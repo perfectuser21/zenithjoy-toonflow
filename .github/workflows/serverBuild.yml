@@ -5,6 +5,7 @@ on:
       - "apps/server/**"
       - "packages/**"
       - "bun.lock"
+      - "Dockerfile"
       - ".github/workflows/serverBuild.yml"
 permissions:
   contents: read
