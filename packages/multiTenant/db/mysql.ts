@@ -2,7 +2,7 @@ import mysql from "mysql2/promise";
 import { drizzle } from "drizzle-orm/mysql2";
 import { and, asc, count, desc, eq, getTableColumns, sql } from "drizzle-orm";
 import { mysqlSchema, varchar } from "drizzle-orm/mysql-core";
-import { mysqlAdmin, mysqlBillingLedger, mysqlModelRouting, mysqlSettings, mysqlSourceMapping, mysqlUser, mysqlWallet, mysqlWebSession } from "./schema";
+import { mysqlAdmin, mysqlBillingLedger, mysqlModelRouting, mysqlSettings, mysqlSourceMapping, mysqlUser, mysqlUserProviderGuard, mysqlUserProviderKey, mysqlWallet, mysqlWebSession } from "./schema";
 import type { AdminDatabase, WalletRecord } from "./schema";
 import type { DataSource } from "./index";
 import { maxWalletMicros, validateWalletAmount, walletBalanceOverflow, walletSettlementExceeded, walletStateConflict } from "./billing";
@@ -59,6 +59,7 @@ export function connectMysql(config: Extract<DataSource, { provider: "mysql" }>[
   }
   const insufficientWallet = new Error("余额不足");
   return {
+    async close() { await client.end(); },
     async initializeBilling() {
       await db.execute(sql`CREATE TABLE IF NOT EXISTS multiTenantWallet (
         userId VARCHAR(36) NOT NULL,
@@ -285,6 +286,49 @@ export function connectMysql(config: Extract<DataSource, { provider: "mysql" }>[
         if ((failure.cause?.code ?? failure.code) === "ER_NO_SUCH_TABLE") return;
         throw error;
       }
+    },
+    async initializeUserProviderGuard() {
+      await db.execute(sql`CREATE TABLE IF NOT EXISTS multiTenantUserProviderGuard (id INT PRIMARY KEY, cipher VARCHAR(8192) NOT NULL)`);
+    },
+    async getUserProviderGuard() {
+      const [value] = await db.select({ cipher: mysqlUserProviderGuard.cipher }).from(mysqlUserProviderGuard).where(eq(mysqlUserProviderGuard.id, 1)).limit(1);
+      return value?.cipher;
+    },
+    async insertUserProviderGuard(cipher) {
+      try { await db.insert(mysqlUserProviderGuard).values({ id: 1, cipher }); return true; }
+      catch (error) {
+        const failure = error as { code?: string; cause?: { code?: string } };
+        if ((failure.cause?.code ?? failure.code) === "ER_DUP_ENTRY") return false;
+        throw error;
+      }
+    },
+    async hasUserProviderKeys() {
+      const [value] = await db.select({ userId: mysqlUserProviderKey.userId }).from(mysqlUserProviderKey).limit(1);
+      return value !== undefined;
+    },
+    async getUserProviderKey(userId, providerId) {
+      const [value] = await db.select({ cipher: mysqlUserProviderKey.cipher, revision: mysqlUserProviderKey.revision }).from(mysqlUserProviderKey)
+        .where(and(eq(mysqlUserProviderKey.userId, userId), eq(mysqlUserProviderKey.providerId, providerId))).limit(1);
+      return value;
+    },
+    async initializeUserProviderKeys() {
+      await db.execute(sql`CREATE TABLE IF NOT EXISTS multiTenantUserProviderKey (
+        userId VARCHAR(36) NOT NULL, providerId VARCHAR(96) NOT NULL, cipher VARCHAR(8192) NOT NULL, revision INT NOT NULL,
+        PRIMARY KEY (userId, providerId)
+      )`);
+    },
+    async writeUserProviderKey(userId, providerId, cipher, expectedRevision) {
+      if (expectedRevision === 0) {
+        try { await db.insert(mysqlUserProviderKey).values({ userId, providerId, cipher, revision: 1 }); return true; }
+        catch (error) {
+          const failure = error as { code?: string; cause?: { code?: string } };
+          if ((failure.cause?.code ?? failure.code) === "ER_DUP_ENTRY") return false;
+          throw error;
+        }
+      }
+      const [result] = await db.update(mysqlUserProviderKey).set({ cipher, revision: expectedRevision + 1 })
+        .where(and(eq(mysqlUserProviderKey.userId, userId), eq(mysqlUserProviderKey.providerId, providerId), eq(mysqlUserProviderKey.revision, expectedRevision)));
+      return result.affectedRows === 1;
     },
     async initializeModelRouting() {
       await db.execute(sql`CREATE TABLE IF NOT EXISTS multiTenantModelRouting (

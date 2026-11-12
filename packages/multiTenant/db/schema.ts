@@ -145,6 +145,22 @@ export const mysqlBillingLedger = mysqlTable("multiTenantBillingLedger", {
   updatedAt: bigint("updatedAt", { mode: "number" }).notNull(),
 }, table => [mysqlIndex("multiTenantBillingLedgerUserCreatedAt").on(table.userId, table.createdAt)]);
 
+export const sqliteUserProviderKey = sqliteTable("multiTenantUserProviderKey", {
+  userId: text("userId").notNull(), providerId: text("providerId").notNull(),
+  cipher: text("cipher").notNull(), revision: integer("revision").notNull(),
+}, table => [sqlitePrimaryKey({ columns: [table.userId, table.providerId] })]);
+export const mysqlUserProviderKey = mysqlTable("multiTenantUserProviderKey", {
+  userId: varchar("userId", { length: 36 }).notNull(), providerId: varchar("providerId", { length: 96 }).notNull(),
+  cipher: varchar("cipher", { length: 8192 }).notNull(), revision: int("revision").notNull(),
+}, table => [mysqlPrimaryKey({ columns: [table.userId, table.providerId] })]);
+
+export const sqliteUserProviderGuard = sqliteTable("multiTenantUserProviderGuard", {
+  id: integer("id").primaryKey(), cipher: text("cipher").notNull(),
+});
+export const mysqlUserProviderGuard = mysqlTable("multiTenantUserProviderGuard", {
+  id: int("id").primaryKey(), cipher: varchar("cipher", { length: 8192 }).notNull(),
+});
+
 export type AdminRecord = typeof sqliteAdmin.$inferSelect;
 export type AdminUpdate = Partial<Omit<AdminRecord, "id" | "userName" | "passwordHash">>;
 export type UserRecord = typeof sqliteUser.$inferSelect;
@@ -157,6 +173,7 @@ export type ModelRoutingRecord = { configuration: unknown; revision: number };
 export type WalletRecord = typeof sqliteWallet.$inferSelect;
 export type BillingRecord = typeof sqliteBillingLedger.$inferSelect;
 export type AdminDatabase = {
+  close(): Promise<void>;
   initialize(): Promise<void>;
   initializeSettings(): Promise<void>;
   getRegistrationEnabled(): Promise<boolean>;
@@ -167,6 +184,13 @@ export type AdminDatabase = {
   getModelRouting(): Promise<ModelRoutingRecord | undefined>;
   initializeModelRouting(): Promise<void>;
   writeModelRouting(configuration: Record<string, unknown>, expectedRevision: number): Promise<boolean>;
+  initializeUserProviderGuard(): Promise<void>;
+  getUserProviderGuard(): Promise<string | undefined>;
+  insertUserProviderGuard(cipher: string): Promise<boolean>;
+  hasUserProviderKeys(): Promise<boolean>;
+  getUserProviderKey(userId: string, providerId: string): Promise<{ cipher: string; revision: number } | undefined>;
+  initializeUserProviderKeys(): Promise<void>;
+  writeUserProviderKey(userId: string, providerId: string, cipher: string, expectedRevision: number): Promise<boolean>;
   initializeBilling(): Promise<void>;
   getWallets(userId: string): Promise<WalletRecord[]>;
   getBillingRecord(requestId: string): Promise<BillingRecord | undefined>;
