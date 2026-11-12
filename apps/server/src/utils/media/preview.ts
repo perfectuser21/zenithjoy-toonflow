@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, realpath, rm, stat, writeFile } from "@toonflow/file";
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, withFileAccess, writeFile } from "@toonflow/file";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { prepareWorkspaceFfmpeg } from "@/utils/ffmpeg";
@@ -37,6 +37,48 @@ function acquirePreview(signal: AbortSignal) {
       }, 120000);
     }
   });
+}
+
+// 大视频按文件流读取，FFmpeg 仅允许自包含 MOV/MP4 及本地文件协议。
+export async function createVideoFrame(source: string, timeSeconds: number, signal: AbortSignal, operationId?: string) {
+  if (!Number.isFinite(timeSeconds) || timeSeconds < 0 || timeSeconds > 86400) throw Object.assign(new Error("视频时间无效"), { status: 400 });
+  if (operationId !== undefined && !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(operationId)) throw Object.assign(new Error("抽帧编号无效"), { status: 400 });
+  const release = await acquirePreview(signal);
+  const active = AbortSignal.any([signal, AbortSignal.timeout(120000)]);
+  let directory: string | undefined;
+  let root = "";
+  let created = false;
+  try {
+    const paths = await prepareWorkspaceFfmpeg(active);
+    root = await realpath(tmpdir());
+    if (operationId) {
+      directory = join(root, `toonflowVideoFrame${operationId.replaceAll("-", "")}`);
+      await mkdir(directory, { mode: 0o700 });
+    } else directory = await mkdtemp(join(root, "toonflowVideoFrame"));
+    created = true;
+    const output = join(directory, "frame.png");
+    await withFileAccess([source], "read", async () => {
+      const child = Bun.spawn([paths.ffmpeg, "-hide_banner", "-v", "error", "-nostdin", "-n", "-protocol_whitelist", "file", "-max_streams", "32",
+        "-f", "mov", "-format_whitelist", "mov", "-enable_drefs", "0", "-use_absolute_path", "0", "-ss", String(timeSeconds), "-i", source,
+        "-map", "0:V:0", "-frames:v", "1", "-c:v", "png", "-f", "image2", "-update", "1", "-map_metadata", "-1", "-fs", String(10 * 1024 * 1024), output], {
+        cwd: directory, stdin: "ignore", stdout: "ignore", stderr: "ignore", windowsHide: true, signal: active,
+        env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== "FFREPORT")),
+      });
+      if (await child.exited !== 0) throw Object.assign(new Error("视频抽帧失败，请检查视频格式和时间"), { status: 422 });
+    }, active);
+    active.throwIfAborted();
+    const outputInfo = await stat(output).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") throw Object.assign(new Error("没有找到该时间的视频画面"), { status: 422 });
+      throw error;
+    });
+    if (outputInfo.size >= 10 * 1024 * 1024) throw Object.assign(new Error("抽帧结果超过 10 MB"), { status: 413 });
+    const data = await readFile(output, { signal: active });
+    if (!data.length) throw Object.assign(new Error("没有找到该时间的视频画面"), { status: 422 });
+    return { data, mimeType: "image/png" as const };
+  } finally {
+    try { if (created && directory && dirname(directory) === root) await rm(directory, { recursive: true, force: true }); }
+    finally { release(); }
+  }
 }
 
 export async function createPreview(content: Buffer, kind: PreviewKind, signal: AbortSignal) {

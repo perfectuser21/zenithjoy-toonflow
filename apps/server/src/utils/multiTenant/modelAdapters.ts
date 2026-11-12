@@ -309,7 +309,7 @@ export type ModelCapabilities = { text: TextCapabilities; image: MediaCapabiliti
 export const modelAdapters = { text: textAdapter, image: mediaAdapter, video: mediaAdapter, audio: mediaAdapter };
 
 // ACT: 客户凭据只能交给本仓审计过的阿里云供应商版本；更新脚本时须重新审计并更新摘要。
-const aliyunMediaSourceSha256 = "70796ca86eba5f792ed6fecd603505ef705e531a84274dee3f21072656e5fb02";
+const aliyunMediaSourceSha256 = new Set(["70796ca86eba5f792ed6fecd603505ef705e531a84274dee3f21072656e5fb02", "e154f127b760f34cbd32be97b0c6b8519eabf4c80a41fea246f7287d8e2ee530"]);
 
 function requireAliyunEndpoint(value: unknown, paths: string[]) {
   if (typeof value !== "string") fail("阿里云服务地址无效", 503);
@@ -336,7 +336,7 @@ export function applyUserProviderKey<K extends ModelType>(type: K, route: ModelR
   }
   const media = upstream as MediaUpstream;
   if (route.providerId !== "aliyun" || media.cloud
-    || createHash("sha256").update(media.source).digest("hex") !== aliyunMediaSourceSha256
+    || !aliyunMediaSourceSha256.has(createHash("sha256").update(media.source).digest("hex"))
     || Object.keys(media.config).some(key => key !== "apiKey" && key !== "baseUrl")) {
     fail("阿里云媒体供应商版本或配置不安全", 503);
   }

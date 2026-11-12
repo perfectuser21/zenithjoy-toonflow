@@ -11,6 +11,7 @@
       <el-button :icon="IconMusic" text :disabled="!outputFile || uploading || exporting || actions?.processing" @click.stop="actions?.open('extractAudio')">提取音轨</el-button>
       <el-button :icon="IconLayersSubtract" text :disabled="!outputFile || uploading || exporting || actions?.processing" @click.stop="actions?.open('separate')">分离音视频</el-button>
       <el-button :icon="IconScissors" text :disabled="!outputFile || uploading || exporting || actions?.processing" @click.stop="actions?.open('trim')">截取片段</el-button>
+      <el-button text title="自动生成背景候选，调用图片模型的费用由您的阿里云账号承担" :disabled="!outputFile || !previewUrl || uploading || exporting || actions?.processing" @click.stop="backgroundVisible = true">换背景</el-button>
       <el-button :icon="IconMovie" text :loading="actions?.creatingAnalysis" :disabled="!outputFile || uploading || exporting || actions?.processing || actions?.creatingAnalysis" @click.stop="actions?.createFrameAnalysis()">逐帧拉片</el-button>
       <el-button
         :icon="IconTransfer"
@@ -57,6 +58,7 @@
     </div>
   </nodeSkeleton>
   <videoActions ref="actions" :file="outputFile" :src="previewUrl" :disabled="uploading || exporting" />
+  <videoBackground v-if="backgroundVisible" v-model="backgroundVisible" :file="outputFile" :src="previewUrl" :disabled="uploading || exporting" />
 </template>
 
 <script setup lang="ts">
@@ -66,6 +68,7 @@ import { ElButton, ElMessage, ElProgress, ElDropdown, ElDropdownMenu, ElDropdown
 import { nodeSkeleton, nodeTools, useNode, z, type NodeHandle } from "@toonflow/nodes-scaffold/runtime";
 import videoPlayer from "./components/videoPlayer.vue";
 import videoActions from "./components/videoActions.vue";
+import videoBackground from "./components/videoBackground.vue";
 import { getMediaMimeType } from "@toonflow/node-shared/mediaTypes";
 
 defineOptions({
@@ -80,6 +83,7 @@ const fileInput = ref<HTMLInputElement>();
 const uploading = ref(false);
 const player = ref<InstanceType<typeof videoPlayer>>();
 const actions = ref<InstanceType<typeof videoActions>>();
+const backgroundVisible = ref(false);
 const exportProgress = computed(() => (node.data as typeof node.data & { exportProgress?: number }).exportProgress);
 const exporting = computed(() => typeof exportProgress.value === "number");
 const videoWidth = ref(0);

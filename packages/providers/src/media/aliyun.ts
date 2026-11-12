@@ -9,6 +9,7 @@ type ReferencedRequest = VideoRequest & {
 };
 type TaskResponse = { code?: string; message?: string; output?: { task_id?: string; task_status?: string; video_url?: string; code?: string; message?: string } };
 const modelIds = ["wan3.0-video", "wan3.0-video-prime"];
+const imageModelIds = ["qwen-image-3.0-pro", "qwen-image-3.0", "qwen-image-2.1-pro", "qwen-image-2.1-turbo"];
 const ratios = ["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"];
 
 function configuration(context: Context) {
@@ -169,6 +170,30 @@ async function pollTask(context: Context, taskId: string) : Promise<MediaAsset[]
   }
 }
 
+async function pollImageTask(context: Context, taskId: string): Promise<MediaAsset[]> {
+  const { apiKey, baseUrl } = configuration(context);
+  const signal = signalFor(context, 30 * 60 * 1000);
+  while (true) {
+    const data = await requestJson(context, `${baseUrl}/api/v1/tasks/${encodeURIComponent(taskId)}`, { headers: { Authorization: `Bearer ${apiKey}` }, signal });
+    const output = data.output;
+    if (output?.task_status === "SUCCEEDED") {
+      const images = Array.isArray(output.choices) ? output.choices.flatMap((choice: any) => Array.isArray(choice?.message?.content)
+        ? choice.message.content.flatMap((item: any) => typeof item?.image === "string" ? [item.image] : []) : []) : [];
+      if (!images.length || images.length > 6) throw new Error("任务已完成，但未返回有效图片");
+      return images.map((value: string) => {
+        let url: URL;
+        try { url = new URL(value); } catch { throw new Error("任务返回的图片地址无效"); }
+        if (!["https:", "http:"].includes(url.protocol) || url.username || url.password) throw new Error("任务返回的图片地址无效");
+        return { mediaType: "image" as const, type: "url" as const, url: url.href, mimeType: "image/png" };
+      });
+    }
+    if (["FAILED", "CANCELED"].includes(output?.task_status ?? "")) throw Object.assign(new Error("图片任务失败或已取消"), { code: "MEDIA_TASK_FAILED" });
+    if (output?.task_status === "UNKNOWN") throw new Error("图片任务状态未知或已过期，请核对阿里云记录，不能自动重新提交");
+    if (!output?.task_status) throw new Error("阿里云未返回图片任务状态，请保留原任务稍后恢复查询");
+    await wait(signal);
+  }
+}
+
 export default {
   id: "aliyun",
   label: "阿里云万相 3.0",
@@ -176,6 +201,10 @@ export default {
   rules,
   readme: "支持文生视频、首尾帧和多素材参考，也可用提示词编辑参考视频。参考视频总长不超过 15 秒；参考音频总长不超过 15 秒。输入视频加输出视频总长不超过 30 秒。图片/视频/音频分别最多 20MB/100MB/15MB；视频使用 MP4/MOV，音频使用 WAV/MP3。上传素材自动使用阿里云临时存储（北京/新加坡，48 小时有效），其他地域使用公开素材地址。视频时长、帧率等由阿里云校验；长视频需先分镜切段。任务暂停或断线后恢复会继续查询原任务。",
   models: [
+    { id: "qwen-image-3.0-pro", label: "千问图像 3.0 专业版", type: "image", mode: ["text", "singleImage", "multiReference"] },
+    { id: "qwen-image-3.0", label: "千问图像 3.0", type: "image", mode: ["text", "singleImage", "multiReference"] },
+    { id: "qwen-image-2.1-pro", label: "千问图像 2.1 专业版", type: "image", mode: ["text", "singleImage", "multiReference"] },
+    { id: "qwen-image-2.1-turbo", label: "千问图像 2.1 极速版", type: "image", mode: ["text", "singleImage", "multiReference"] },
     {
       id: "wan3.0-video", label: "万相 3.0 标准版", type: "video",
       mode: ["text", "endFrameOptional", ["imageReference:10", "videoReference:5", "audioReference:5"]],
@@ -189,6 +218,28 @@ export default {
       durationResolutionMap: [{ duration: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30], resolution: ["480P", "720P", "1080P"] }],
     },
   ],
+  async generateImage(request: ImageRequest) {
+    if (!imageModelIds.includes(request.model) || !request.prompt.trim() || request.prompt.length > 20000) throw new Error("请选择千问图像模型并填写图片要求");
+    if (request.images && request.images.length > (request.model.startsWith("qwen-image-3.0") ? 3 : 10)) throw new Error("参考图片数量超过模型限制");
+    if (request.mask || request.other && Object.keys(request.other).length || request.n !== undefined && request.n !== 1) throw new Error("当前图片任务仅支持生成一张图片");
+    const { apiKey, baseUrl } = configuration(this);
+    const signal = signalFor(this, 10 * 60 * 1000);
+    const images = [];
+    for (const input of request.images ?? []) {
+      const image = await mediaUrl(this, input, "image", request.model, signal);
+      if (image.startsWith("data:") && image.length > 14000000) throw new Error("参考图片不能超过 10 MB");
+      images.push({ image });
+    }
+    const parameters = request.size ? { n: 1, size: request.size.replace("x", "*") } : { n: 1 };
+    const data = await requestJson(this, `${baseUrl}/api/v1/services/aigc/image-generation/generation`, {
+      method: "POST", headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json", "X-DashScope-Async": "enable" },
+      body: JSON.stringify({ model: request.model, input: { messages: [{ role: "user", content: [...images, { text: request.prompt }] }] }, parameters }), signal,
+    });
+    const taskId = data.output?.task_id;
+    if (typeof taskId !== "string" || !/^[a-zA-Z0-9-]+$/.test(taskId)) throw new Error("阿里云未返回任务编号，请核对平台记录后再操作，避免重复提交");
+    await this.saveTaskData?.({ kind: "aliyunQwenImage", taskId, model: request.model, baseUrlHash: String(this.tool.hash(baseUrl)), accountHash: String(this.tool.hash(apiKey)), expiresAt: Date.now() + 24 * 60 * 60 * 1000 });
+    return pollImageTask(this, taskId);
+  },
   async generateVideo(request: ReferencedRequest) {
     this.signal?.throwIfAborted();
     validateRequest(request);
@@ -213,6 +264,11 @@ export default {
   },
   async resumeTask(data) {
     const { apiKey, baseUrl } = configuration(this);
+    if (data.kind === "aliyunQwenImage") {
+      if (typeof data.taskId !== "string" || !/^[a-zA-Z0-9-]+$/.test(data.taskId) || typeof data.model !== "string" || !imageModelIds.includes(data.model) || data.baseUrlHash !== String(this.tool.hash(baseUrl)) || data.accountHash !== String(this.tool.hash(apiKey))) throw new Error("任务恢复数据或服务配置已变化，请使用原账号和服务地址查询原任务");
+      if (typeof data.expiresAt !== "number" || !Number.isFinite(data.expiresAt) || data.expiresAt <= Date.now()) throw new Error("原任务已超过 24 小时查询有效期，未自动重新提交");
+      return pollImageTask(this, data.taskId);
+    }
     if (data.kind !== "aliyunWanVideo" || typeof data.taskId !== "string" || !/^[a-zA-Z0-9-]+$/.test(data.taskId) || typeof data.model !== "string" || !modelIds.includes(data.model) || data.baseUrlHash !== String(this.tool.hash(baseUrl)) || data.accountHash !== String(this.tool.hash(apiKey))) throw new Error("任务恢复数据或服务配置已变化，请使用原账号和服务地址查询原任务");
     if (typeof data.expiresAt !== "number" || !Number.isFinite(data.expiresAt) || data.expiresAt <= Date.now()) throw new Error("原任务已超过 24 小时查询有效期，未自动重新提交");
     return pollTask(this, data.taskId);

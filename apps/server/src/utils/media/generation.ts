@@ -1,5 +1,5 @@
 import { t, translateMessage } from "@/lib/i18n";
-import { mkdir, readFile, realpath, stat, unlink } from "@toonflow/file";
+import { mkdir, readFile, realpath, stat, statfs, unlink } from "@toonflow/file";
 import { join, relative } from "node:path";
 import { createHash } from "node:crypto";
 import { mediaProviders, type Provider, type ProviderTaskData } from "@toonflow/providers";
@@ -13,6 +13,7 @@ import { detectMimeType, readPriceReference } from "@/utils/media/priceReference
 import type { ModelActor } from "@toonflow/multi-tenant-gateway/types";
 import { currentIdentity } from "@/utils/multiTenant/context";
 import { modelGateway } from "@/utils/multiTenant/gateway";
+import { downloadPublicFile } from "@/utils/workspace/download";
 
 const maxMediaSize = 100 * 1024 * 1024;
 export type MediaGenerationCheckpoint = {
@@ -29,6 +30,8 @@ type MediaGenerationTask = {
   modelRouteCipher?: string;
   actor?: ModelActor;
   legacyTaskOwnerId?: string;
+  outputGeneration?: number;
+  beforeSubmit?: () => Promise<void>;
   save: (patch: Partial<MediaGenerationCheckpoint>) => Promise<void>;
 };
 const notSubmittedFailures = new WeakSet<object>();
@@ -98,33 +101,10 @@ export async function readReference(cwd: string, reference: MediaReference, medi
 }
 
 async function downloadAsset(url: string, signal?: AbortSignal) {
-  if (!/^https?:\/\//i.test(url)) invalid("生成结果必须使用 HTTP 或 HTTPS 地址");
-  const response = await fetch(url, { signal });
-  if (!response.ok) {
-    await response.body?.cancel();
-    throw Object.assign(new Error(t`下载生成结果失败（HTTP ${response.status}）`), {
-      code: [401, 403, 404, 410].includes(response.status) ? "MEDIA_ASSET_URL_EXPIRED" : "MEDIA_ASSET_DOWNLOAD_FAILED",
-    });
-  }
-  if (Number(response.headers.get("content-length")) > maxMediaSize) {
-    await response.body?.cancel();
-    invalid("生成文件不能超过 100 MB");
-  }
-  const reader = response.body?.getReader();
-  if (!reader) invalid("生成结果为空");
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  try {
-    while (true) {
-      signal?.throwIfAborted();
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > maxMediaSize) invalid("生成文件不能超过 100 MB");
-      chunks.push(value);
-    }
-  } finally { await reader.cancel(); }
-  return { bytes: Buffer.concat(chunks, size), mimeType: response.headers.get("content-type") ?? "" };
+  let mimeType = "";
+  const bytes = await downloadPublicFile(url, { signal: signal ?? AbortSignal.timeout(120000), maxBytes: maxMediaSize,
+    label: "生成结果", classifyExpired: true, onContentType: value => { mimeType = value; } });
+  return { bytes, mimeType };
 }
 
 async function assetBytes(asset: MediaAsset, mediaType: "image" | "video" | "audio", signal?: AbortSignal) {
@@ -285,8 +265,11 @@ async function executeMedia(
   const checkpoint = task?.checkpoint;
   const saved = new Map<number, GeneratedMedia>();
   for (const file of checkpoint?.files ?? []) {
-    const expected = join(outputDirectory, `${mediaType}${task!.taskId.replaceAll("-", "")}${file.index}.${mediaExtensions[file.mimeType]}`).replace(/\\/g, "/");
-    if (file.path !== expected || file.mediaType !== mediaType) invalid("任务结果文件记录与原生成请求不匹配");
+    const prefix = `${mediaType}${task!.taskId.replaceAll("-", "")}${file.index}`;
+    const expected = join(outputDirectory, `${prefix}.${mediaExtensions[file.mimeType]}`).replace(/\\/g, "/");
+    const fenced = join(outputDirectory, `${prefix}g`).replace(/\\/g, "/");
+    if (file.mediaType !== mediaType || file.path !== expected && !(task!.outputGeneration && file.path.startsWith(fenced)
+      && new RegExp(`^\\d+\\.${mediaExtensions[file.mimeType]}$`).test(file.path.slice(fenced.length)))) invalid("任务结果文件记录与原生成请求不匹配");
     const { path } = await resolveWorkspacePath(directory, file.path);
     try {
       const info = await stat(path);
@@ -328,6 +311,7 @@ async function executeMedia(
       signal?.throwIfAborted();
       requireGenerationMode(task);
       if (!modelRouteCipher) finish = beginGeneration(provider);
+      await task?.beforeSubmit?.();
       markSubmitted();
       assets = type === "audio" ? await provider.generateAudio!(parameters as AudioRequest)
         : type === "image" ? await provider.generateImage!(parameters as ImageRequest) : await provider.generateVideo!(parameters as VideoRequest);
@@ -358,7 +342,12 @@ async function executeMedia(
       const release = lockWorkspaceFiles([output.path]);
       try {
         await mkdir(output.path, { recursive: true });
-        const file = join(outputDirectory, `${mediaType}${task ? `${task.taskId.replaceAll("-", "")}${index}` : crypto.randomUUID()}.${mediaExtensions[mimeType]}`);
+        if (task?.outputGeneration) {
+          const disk = await statfs(output.path);
+          if (disk.bavail * disk.bsize < 2 * 1024 * 1024 * 1024) throw Object.assign(new Error("可用磁盘空间不足，请联系管理员"), { status: 507 });
+        }
+        const suffix = task ? `${task.taskId.replaceAll("-", "")}${index}${task.outputGeneration ? `g${task.outputGeneration}` : ""}` : crypto.randomUUID();
+        const file = join(outputDirectory, `${mediaType}${suffix}.${mediaExtensions[mimeType]}`);
         const { path } = await resolveWorkspacePath(directory, file);
         const outputFile = { path: relative(directory, path).replace(/\\/g, "/"), mimeType, mediaType };
         if (task) {

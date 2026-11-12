@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { dirname, join, relative } from "node:path";
 import { lstat, mkdir, readFile, realpath, writeAtomic } from "@toonflow/file";
 import type { ProviderTaskData } from "@toonflow/providers";
@@ -13,6 +13,7 @@ import { generateMedia, isMediaNotSubmitted, type MediaGenerationCheckpoint } fr
 import { lockWorkspaceFiles, resolveWorkspacePath } from "@/utils/workspace/files";
 import { modelGateway } from "@/utils/multiTenant/gateway";
 import { readPriceReference } from "@/utils/media/priceReference";
+import { acquireMediaLease, beginMediaExecution, publishMediaCheckpoint, readMediaLease, releaseMediaLease, renewMediaLease, type MediaLease } from "@/utils/media/mediaLease";
 
 const maxRecordSize = 16 * 1024 * 1024;
 const maxBlobSize = 140 * 1024 * 1024;
@@ -40,7 +41,8 @@ const recordSchema = z.strictObject({
   mediaType: mediaTypeSchema.optional(),
   request: z.union([imageGenerationSchema, videoGenerationSchema, audioGenerationSchema]).optional(),
   nodeId: z.string().min(1).max(512).optional(), canvasPath: relativePathSchema.optional(),
-  ownerUserId: z.uuid().optional(), ownerAdminId: z.uuid().optional(), modelRouteCipher: z.string().min(1).max(8 * 1024 * 1024).optional(),
+  ownerUserId: z.uuid().optional(), ownerAdminId: z.string().min(1).max(64).regex(/^[a-zA-Z0-9_-]+$/).optional(), executionLeaseId: z.uuid().optional(),
+  submissionState: z.enum(["notSubmitted", "submitting"]).optional(), modelRouteCipher: z.string().min(1).max(8 * 1024 * 1024).optional(),
   chargeId: z.string().min(1).max(128).optional(),
   chargeStatus: z.enum(["settled", "released", "pendingReview"]).optional(),
   state: z.enum(["running", "interrupted", "succeeded", "failed", "cancelled"]),
@@ -51,6 +53,7 @@ const recordSchema = z.strictObject({
 }).superRefine((record, context) => {
   const issue = (message: string) => context.addIssue({ code: "custom", message });
   if (record.ownerUserId && record.ownerAdminId) issue("任务归属无效");
+  if (record.executionLeaseId && !record.submissionState) issue("带租约的任务缺少提交状态");
   if (!record.request || !record.mediaType) {
     if (record.state !== "cancelled" || record.request || record.mediaType) issue("任务缺少生成请求");
   } else if (!requestSchemas[record.mediaType].safeParse(record.request).success) issue("任务生成请求无效");
@@ -79,8 +82,10 @@ type MediaTask = {
   completion?: Promise<void>;
   chargeFinalized?: boolean;
   legacyAdminActor?: ModelActor;
+  executionLease?: MediaLease;
+  leaseTimer?: ReturnType<typeof setInterval>;
 };
-type TaskOwner = { nodeId?: string; canvasPath?: string };
+type TaskOwner = { nodeId?: string; canvasPath?: string; executionLeaseId?: string };
 
 // ACT: 单进程最多 1000 个执行中任务；磁盘记录保留，结束后只释放五分钟未用的内存缓存。
 const tasks = new Map<string, MediaTask>();
@@ -203,21 +208,26 @@ async function restoreBlobs(task: MediaTask) {
 
 async function persist(task: MediaTask, exclusive = false) {
   try {
+    if (task.record.executionLeaseId && !task.executionLease && !exclusive) throw new Error("媒体任务缺少执行租约");
     await privateDirectory(dirname(task.key), true);
     const prepared = await prepareBlobs(task);
     task.record.updatedAt = Date.now();
     const stored = recordSchema.parse({ ...task.record, checkpoint: { ...task.record.checkpoint, providerData: prepared.data }, blobs: prepared.blobs });
     const content = JSON.stringify(stored);
     if (Buffer.byteLength(content, "utf8") > maxRecordSize) invalid("任务元数据不能超过 16 MB");
-    await writeAtomic(task.key, content, { exclusive, mode: 0o600 });
+    const checkpointId = task.executionLease ? randomUUID() : undefined;
+    const file = task.executionLease ? `${task.key}.g${task.executionLease.generation}.${checkpointId}` : task.key;
+    await writeAtomic(file, content, { exclusive: task.executionLease ? true : exclusive, mode: 0o600 });
+    if (task.executionLease && !await publishMediaCheckpoint(task.executionLease, checkpointId!,
+      task.record.state === "succeeded" ? task.record.result?.data ?? undefined : undefined)) throw new Error("媒体任务租约已失效");
     task.persistenceError = undefined;
     if (task.record.state === "cancelled") task.controller?.abort(new Error("生成已取消"));
   } catch (cause) { task.persistenceError = cause; throw cause; }
 }
 
-async function load(cwd: string, taskId: string, key: string, owner?: AuthIdentity | null) {
+async function load(cwd: string, taskId: string, key: string, owner?: AuthIdentity | null, fresh = false, checkpointGeneration?: number, checkpointId?: string) {
   const cached = tasks.get(key);
-  if (cached) {
+  if (cached && !fresh) {
     assertOwner(cached, owner);
     if (!cached.record.ownerUserId && !cached.record.ownerAdminId && owner?.role === "admin") cached.legacyAdminActor = { id: owner.id, role: owner.role };
     cached.settledAt = cached.active ? undefined : Date.now();
@@ -225,7 +235,8 @@ async function load(cwd: string, taskId: string, key: string, owner?: AuthIdenti
   }
   if (!await privateDirectory(dirname(key), false)) return undefined;
   let bytes: Buffer;
-  try { bytes = await readPrivateFile(key, maxRecordSize); }
+  if (!!checkpointGeneration !== !!checkpointId) invalid("媒体任务检查点无效", 409);
+  try { bytes = await readPrivateFile(checkpointGeneration ? `${key}.g${checkpointGeneration}.${checkpointId}` : key, maxRecordSize); }
   catch (cause) { if ((cause as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw cause; }
   const stored = recordSchema.parse(JSON.parse(bytes.toString("utf8")));
   const { blobs, ...record } = stored;
@@ -381,14 +392,22 @@ async function execute(task: MediaTask, resume: boolean) {
         : record.ownerAdminId ? { id: record.ownerAdminId, role: "admin" }
         : task.legacyAdminActor,
       legacyTaskOwnerId: record.ownerUserId,
+      outputGeneration: task.executionLease?.generation,
+      beforeSubmit: task.executionLease ? () => locked(task.key, async () => {
+        if (!task.executionLease || record.state !== "running" || !await renewMediaLease(task.executionLease)) throw new Error("媒体任务租约已失效");
+        record.submissionState = "submitting";
+        await persist(task);
+      }) : undefined,
       save: patch => locked(task.key, async () => {
         if (record.state !== "running") throw new Error("生成已停止");
+        if (task.executionLease && !await renewMediaLease(task.executionLease)) throw new Error("媒体任务租约已失效");
         Object.assign(record.checkpoint, patch);
         await persist(task);
       }),
     });
     await locked(task.key, async () => {
       if (record.state !== "running") return;
+      if (task.executionLease && !await renewMediaLease(task.executionLease)) throw new Error("媒体任务租约已失效");
       await settleCharge(task, files);
       record.state = "succeeded";
       record.result = success(files);
@@ -398,6 +417,7 @@ async function execute(task: MediaTask, resume: boolean) {
     try {
       await locked(task.key, async () => {
         if (record.state !== "running") return;
+        if (task.executionLease && !await renewMediaLease(task.executionLease)) return;
         const notSubmitted = isMediaNotSubmitted(cause);
         record.state = notSubmitted || (cause as { code?: string } | null)?.code === "MEDIA_TASK_FAILED" ? "failed" : "interrupted";
         const result = errorFromCause(cause);
@@ -407,6 +427,10 @@ async function execute(task: MediaTask, resume: boolean) {
       });
     } catch (failure) { task.persistenceError = failure; console.error("保存媒体任务失败", failure); }
   } finally {
+    if (task.leaseTimer) clearInterval(task.leaseTimer);
+    task.leaseTimer = undefined;
+    if (task.executionLease) await releaseMediaLease(task.executionLease).catch(() => {});
+    task.executionLease = undefined;
     await locked(task.key, async () => {
       task.active = false;
       task.controller = undefined;
@@ -423,27 +447,78 @@ async function execute(task: MediaTask, resume: boolean) {
 
 async function launch(task: MediaTask, resume: boolean, exclusive = false) {
   if (task.active) return;
-  if (task.record.ownerUserId && (!task.record.modelRouteCipher || !task.record.chargeId)) invalid("媒体任务扣费记录无效", 409);
-  if (!resume && task.record.ownerUserId) {
-    const chargeId = task.record.chargeId;
-    if (!chargeId) invalid("媒体任务扣费记录无效", 409);
-    const charge = await modelGateway.getCharge(chargeId, task.record.ownerUserId);
-    if (!charge || charge.status !== "reserved") {
-      task.record.state = "failed";
-      task.record.chargeStatus = charge?.status === "settled" ? "settled" : charge?.status === "released" ? "released" : "pendingReview";
-      task.record.result = error("媒体任务扣费状态已变更，不能重新提交", null, 409);
-      await persist(task);
-      invalid("媒体任务扣费状态已变更，不能重新提交", 409);
+  if (task.record.executionLeaseId && !task.executionLease) {
+    const ownerId = task.record.ownerUserId ?? task.record.ownerAdminId;
+    if (!ownerId) invalid("媒体任务租约归属无效", 409);
+    const lease = await acquireMediaLease(task.record.cwd, task.record.executionLeaseId, task.record.taskId, ownerId);
+    if (!lease) return;
+    task.executionLease = lease;
+  }
+  if (task.executionLease) {
+    const identity: AuthIdentity = { id: task.record.ownerUserId ?? task.record.ownerAdminId!, userName: "", role: task.record.ownerUserId ? "user" : "admin" };
+    const latest = await load(task.record.cwd, task.record.taskId, task.key, identity, true, task.executionLease.checkpointGeneration, task.executionLease.checkpointId);
+    if (!latest || latest.record.executionLeaseId !== task.record.executionLeaseId) {
+      await releaseMediaLease(task.executionLease).catch(() => {});
+      task.executionLease = undefined;
+      invalid("媒体任务记录已变化", 409);
+    }
+    task.record = latest.record;
+    task.blobs = latest.blobs;
+    tasks.set(task.key, task);
+    if (["succeeded", "failed", "cancelled"].includes(task.record.state)) {
+      await releaseMediaLease(task.executionLease).catch(() => {});
+      task.executionLease = undefined;
+      return;
+    }
+    if (!resume && task.record.submissionState === "submitting") {
+      if (await resumable(task)) resume = true;
+      else {
+        task.record.state = "interrupted";
+        task.record.result = error("上次提交状态未知，请先核对供应商任务，不能重新提交", null, 409);
+        await persist(task);
+        await releaseMediaLease(task.executionLease).catch(() => {});
+        task.executionLease = undefined;
+        return;
+      }
+    }
+    if (resume && !await resumable(task)) {
+      await releaseMediaLease(task.executionLease).catch(() => {});
+      task.executionLease = undefined;
+      return;
     }
   }
-  if (activeCount >= 1000) {
-    if (task.record.modelRouteCipher) {
-      task.record.state = "failed";
-      task.record.result = error("生成任务过多，请稍后重试", null, 429);
-      await persist(task);
-      await releaseCharge(task);
+  try {
+    if (task.record.ownerUserId && (!task.record.modelRouteCipher || !task.record.chargeId)) invalid("媒体任务扣费记录无效", 409);
+    if (!resume && task.record.ownerUserId) {
+      const chargeId = task.record.chargeId;
+      if (!chargeId) invalid("媒体任务扣费记录无效", 409);
+      const charge = await modelGateway.getCharge(chargeId, task.record.ownerUserId);
+      if (!charge || charge.status !== "reserved") {
+        task.record.state = "failed";
+        task.record.chargeStatus = charge?.status === "settled" ? "settled" : charge?.status === "released" ? "released" : "pendingReview";
+        task.record.result = error("媒体任务扣费状态已变更，不能重新提交", null, 409);
+        await persist(task);
+        invalid("媒体任务扣费状态已变更，不能重新提交", 409);
+      }
     }
-    invalid("生成任务过多，请稍后重试", 429);
+    if (activeCount >= 1000) {
+      if (task.record.modelRouteCipher) {
+        task.record.state = "failed";
+        task.record.result = error("生成任务过多，请稍后重试", null, 429);
+        await persist(task);
+        await releaseCharge(task);
+      }
+      invalid("生成任务过多，请稍后重试", 429);
+    }
+  } catch (cause) {
+    if (task.executionLease) await releaseMediaLease(task.executionLease).catch(() => {});
+    task.executionLease = undefined;
+    throw cause;
+  }
+  if (task.executionLease && !await beginMediaExecution(task.executionLease)) {
+    await releaseMediaLease(task.executionLease).catch(() => {});
+    task.executionLease = undefined;
+    invalid("媒体任务租约已失效", 409);
   }
   task.active = true;
   activeCount++;
@@ -461,8 +536,15 @@ async function launch(task: MediaTask, resume: boolean, exclusive = false) {
     task.controller = undefined;
     task.active = false;
     activeCount--;
+    if (task.executionLease) await releaseMediaLease(task.executionLease).catch(() => {});
+    task.executionLease = undefined;
     throw cause;
   }
+  if (task.executionLease) task.leaseTimer = setInterval(() => {
+    const lease = task.executionLease;
+    if (lease) void renewMediaLease(lease).then(valid => { if (!valid && task.executionLease === lease) task.controller?.abort(new Error("媒体任务租约已失效")); })
+      .catch(() => { if (task.executionLease === lease) task.controller?.abort(new Error("媒体任务租约不可用")); });
+  }, 30000);
   task.completion = execute(task, resume);
 }
 
@@ -473,20 +555,41 @@ export async function start(cwd: string, taskId: string, mediaType: "image" | "v
   const key = taskPath(cwd, taskId);
   const parsed = requestSchemas[mediaType].parse(request);
   if (attachment.nodeId !== undefined) z.string().min(1).max(512).parse(attachment.nodeId);
+  if (attachment.executionLeaseId !== undefined) z.uuid().parse(attachment.executionLeaseId);
   if (attachment.canvasPath !== undefined) {
     relativePathSchema.parse(attachment.canvasPath);
     const resolved = await resolveWorkspacePath(cwd, attachment.canvasPath, true);
     attachment = { ...attachment, canvasPath: relative(cwd, resolved.path).replace(/\\/g, "/") };
   }
   return locked(key, async () => {
-    const current = await load(cwd, taskId, key, owner);
+    let current = await load(cwd, taskId, key, owner);
     if (current) {
-      if (current.record.request && serialize({ mediaType: current.record.mediaType, request: current.record.request, nodeId: current.record.nodeId, canvasPath: current.record.canvasPath })
-        !== serialize({ mediaType, request: parsed, nodeId: attachment.nodeId, canvasPath: attachment.canvasPath })) invalid("相同任务 ID 不能用于不同的生成请求", 409);
+      if (!current.active && current.record.executionLeaseId) {
+        const ownerId = current.record.ownerUserId ?? current.record.ownerAdminId;
+        if (!ownerId) invalid("媒体任务租约归属无效", 409);
+        const lease = await acquireMediaLease(cwd, current.record.executionLeaseId, taskId, ownerId);
+        if (!lease) return snapshot(current, owner);
+        const latest = await load(cwd, taskId, key, owner, true, lease.checkpointGeneration, lease.checkpointId);
+        if (!latest || latest.record.executionLeaseId !== current.record.executionLeaseId) {
+          await releaseMediaLease(lease).catch(() => {});
+          invalid("媒体任务记录已变化", 409);
+        }
+        current = latest;
+        current.executionLease = lease;
+      }
+      try {
+      if (current.record.request && serialize({ mediaType: current.record.mediaType, request: current.record.request, nodeId: current.record.nodeId, canvasPath: current.record.canvasPath, executionLeaseId: current.record.executionLeaseId })
+        !== serialize({ mediaType, request: parsed, nodeId: attachment.nodeId, canvasPath: attachment.canvasPath, executionLeaseId: attachment.executionLeaseId })) invalid("相同任务 ID 不能用于不同的生成请求", 409);
       if (current.persistenceError) await persist(current);
       if (current.record.state === "running" && !current.active && await prepareCharge(current, true)) await launch(current, false);
       await reconcileCharge(current);
       return snapshot(current, owner);
+      } finally {
+        if (!current.active && current.executionLease) {
+          await releaseMediaLease(current.executionLease).catch(() => {});
+          current.executionLease = undefined;
+        }
+      }
     }
     if (activeCount >= 1000) invalid("生成任务过多，请稍后重试", 429);
     const modelRouteCipher = modelGateway.enabled()
@@ -497,22 +600,33 @@ export async function start(cwd: string, taskId: string, mediaType: "image" | "v
       version: 1, taskId, cwd, mediaType, request: parsed, ...attachment,
       ownerUserId: owner?.role === "user" ? owner.id : undefined,
       ownerAdminId: owner?.role === "admin" ? owner.id : undefined, modelRouteCipher,
+      submissionState: attachment.executionLeaseId ? "notSubmitted" : undefined,
       state: "running", createdAt: now, updatedAt: now, checkpoint: {},
     } };
     try {
       // SQL 预占与文件提交不能原子完成；先保留提交意图，chargeId 成功落盘后才允许调用上游。
       await persist(task, true);
       tasks.set(key, task);
+      if (task.record.executionLeaseId) {
+        const ownerId = task.record.ownerUserId ?? task.record.ownerAdminId;
+        if (!ownerId) invalid("媒体任务租约归属无效", 409);
+        task.executionLease = await acquireMediaLease(cwd, task.record.executionLeaseId, taskId, ownerId);
+        if (!task.executionLease) return snapshot(task, owner);
+      }
       await prepareCharge(task);
       await launch(task, false);
     } catch (cause) {
       task.settledAt = Date.now();
-      if (!task.active && !task.persistenceError) {
+      if (!task.active && !task.persistenceError && (!task.record.executionLeaseId || task.executionLease)) {
         task.record.state = "failed";
         const failure = errorFromCause(cause);
         task.record.result = { ...failure, data: null };
         await persist(task);
         await releaseCharge(task);
+      }
+      if (!task.active && task.executionLease) {
+        await releaseMediaLease(task.executionLease).catch(() => {});
+        task.executionLease = undefined;
       }
       throw cause;
     }
@@ -526,20 +640,46 @@ export async function status(cwd: string, taskIds: string[], resume = false, own
   return Promise.all(taskIds.map(taskId => {
     const key = taskPath(cwd, taskId);
     return locked(key, async () => {
-      const task = await load(cwd, taskId, key, owner);
+      let task = await load(cwd, taskId, key, owner);
       if (!task) return { taskId, state: "interrupted" as const, resumable: false, result: error<GeneratedMedia[]>("生成任务不存在", null, 404) };
-      if (task.persistenceError) await persist(task);
-      await reconcileCharge(task);
-      if (!task.active && task.record.state === "running" && await prepareCharge(task, true)) await launch(task, false);
-      if (!task.active && (task.record.state === "running" || (resume && task.record.state === "interrupted"))) {
-        if (await resumable(task)) await launch(task, true);
-        else {
-          task.record.state = "interrupted";
-          task.record.result ??= error("上次生成已中断，缺少可恢复的任务凭据，请先确认供应商任务状态", null, 409);
-          await persist(task);
+      if (!task.active && task.record.executionLeaseId) {
+        const ownerId = task.record.ownerUserId ?? task.record.ownerAdminId;
+        if (!ownerId) invalid("媒体任务租约归属无效", 409);
+        const published = await readMediaLease(task.record.cwd, task.record.executionLeaseId, task.record.taskId, ownerId);
+        if (published?.state === "succeeded" && typeof published.checkpointGeneration === "number" && typeof published.checkpointId === "string") {
+          const latest = await load(cwd, taskId, key, owner, true, published.checkpointGeneration, published.checkpointId);
+          if (!latest || latest.record.executionLeaseId !== task.record.executionLeaseId || latest.record.state !== "succeeded") invalid("媒体任务发布记录无效", 409);
+          return snapshot(latest, owner);
+        }
+        const lease = await acquireMediaLease(task.record.cwd, task.record.executionLeaseId, task.record.taskId, ownerId);
+        if (!lease) return snapshot(task, owner);
+        const latest = await load(cwd, taskId, key, owner, true, lease.checkpointGeneration, lease.checkpointId);
+        if (!latest || latest.record.executionLeaseId !== task.record.executionLeaseId) {
+          await releaseMediaLease(lease).catch(() => {});
+          invalid("媒体任务记录已变化", 409);
+        }
+        task = latest;
+        task.executionLease = lease;
+      }
+      try {
+        if (task.persistenceError) await persist(task);
+        await reconcileCharge(task);
+        if (!task.active && task.record.state === "running" && await prepareCharge(task, true)) await launch(task, false);
+        if (!task.active && (task.record.state === "running" || (resume && task.record.state === "interrupted"))) {
+          if (await resumable(task)) await launch(task, true);
+          else {
+            task.record.state = "interrupted";
+            task.record.result ??= error("上次生成已中断，缺少可恢复的任务凭据，请先确认供应商任务状态", null, 409);
+            await persist(task);
+          }
+        }
+        return snapshot(task, owner);
+      } finally {
+        if (!task.active && task.executionLease) {
+          await releaseMediaLease(task.executionLease).catch(() => {});
+          task.executionLease = undefined;
         }
       }
-      return snapshot(task, owner);
     });
   }));
 }
@@ -553,6 +693,21 @@ export async function cancel(cwd: string, taskIds: string[], owner?: AuthIdentit
       let task = await load(cwd, taskId, key, owner);
       const now = Date.now();
       const exclusive = !task;
+      let cancelLease: MediaLease | undefined;
+      if (task && !task.active && task.record.executionLeaseId) {
+        const ownerId = task.record.ownerUserId ?? task.record.ownerAdminId;
+        if (!ownerId) invalid("媒体任务租约归属无效", 409);
+        cancelLease = await acquireMediaLease(task.record.cwd, task.record.executionLeaseId, task.record.taskId, ownerId);
+        if (!cancelLease) invalid("任务正在其他实例执行，暂时无法取消", 409);
+        const latest = await load(cwd, taskId, key, owner, true, cancelLease.checkpointGeneration, cancelLease.checkpointId);
+        if (!latest || latest.record.executionLeaseId !== task.record.executionLeaseId) {
+          await releaseMediaLease(cancelLease).catch(() => {});
+          invalid("媒体任务记录已变化", 409);
+        }
+        task = latest;
+        task.executionLease = cancelLease;
+      }
+      try {
       if (!task) {
         task = { key, blobs: [], active: false, settledAt: now, record: {
           version: 1, taskId, cwd, ownerUserId: owner?.role === "user" ? owner.id : undefined,
@@ -570,6 +725,7 @@ export async function cancel(cwd: string, taskIds: string[], owner?: AuthIdentit
       // 取消先落盘；包括尚未收到提交的 ID，防止乱序请求稍后创建付费任务。
       await persist(task, exclusive);
       await releaseCharge(task);
+      } finally { if (cancelLease) { await releaseMediaLease(cancelLease).catch(() => {}); if (task) task.executionLease = undefined; } }
     });
   }));
 }

@@ -79,8 +79,8 @@ function requestFile(url: URL, signal: AbortSignal, accept: string) {
   });
 }
 
-export async function downloadPublicFile(value: string, options: { signal: AbortSignal; maxBytes: number; label: string; httpsOnly?: boolean; accept?: string }) {
-  const { signal, maxBytes, label, httpsOnly = false, accept = "*/*" } = options;
+export async function downloadPublicFile(value: string, options: { signal: AbortSignal; maxBytes: number; label: string; httpsOnly?: boolean; accept?: string; classifyExpired?: boolean; onContentType?: (value: string) => void }) {
+  const { signal, maxBytes, label, httpsOnly = false, accept = "*/*", classifyExpired = false, onContentType } = options;
   let url = remoteAddress(value, httpsOnly);
   for (let redirects = 0; redirects <= 5; redirects++) {
     signal.throwIfAborted();
@@ -94,9 +94,13 @@ export async function downloadPublicFile(value: string, options: { signal: Abort
     }
     if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
       response.destroy();
+      if (classifyExpired) throw Object.assign(new Error(`下载生成结果失败（HTTP ${response.statusCode ?? 0}）`), {
+        code: [401, 403, 404, 410].includes(response.statusCode ?? 0) ? "MEDIA_ASSET_URL_EXPIRED" : "MEDIA_ASSET_DOWNLOAD_FAILED",
+      });
       invalid(t`下载${translateMessage(label)}失败（HTTP ${response.statusCode ?? 0}），链接可能失效或需要登录`, 502);
     }
     const tooLarge = () => invalid(t`${translateMessage(label)}不能超过 ${maxBytes / 1024 / 1024} MB`, 413);
+    onContentType?.(response.headers["content-type"] ?? "");
     if (Number(response.headers["content-length"]) > maxBytes) { response.destroy(); tooLarge(); }
     const chunks: Buffer[] = [];
     let size = 0;
