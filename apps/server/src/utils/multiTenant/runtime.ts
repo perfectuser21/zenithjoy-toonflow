@@ -14,6 +14,7 @@ import { errorFromCause } from "@/lib/responseFormat";
 import { getAppOrigin } from "@/utils/mcp/control";
 import { stopMobileLinkRuntime } from "@/utils/mobileLink";
 import { runWithIdentity } from "./context";
+import { verifyProjectQuota } from "@/utils/workspace/projectQuota";
 
 type Runtime = { started: boolean; server?: Server; sockets: Set<Socket>; queue: Promise<void>; onEnabledChange?: (enabled: boolean) => void };
 const runtimes = new WeakMap<Application, Runtime>();
@@ -116,6 +117,7 @@ export async function startMultiTenantRuntime(app: Application, onEnabledChange?
   value.onEnabledChange = onEnabledChange;
   await serial(value, async () => {
     if (!isEnabled()) return;
+    await verifyProjectQuota();
     await openListener(app, value);
     stopMobileLinkRuntime(app);
   });
@@ -134,7 +136,10 @@ export async function changeMultiTenantEnabled(app: Application, enabled: boolea
     if (!value.started) throw Object.assign(new Error("多租户服务尚未启动"), { status: 503 });
     const previous = isEnabled();
     const wasListening = !!value.server;
-    if (enabled) await openListener(app, value);
+    if (enabled) {
+      await verifyProjectQuota();
+      await openListener(app, value);
+    }
     try { commit(); }
     catch (cause) { if (!wasListening) await closeListener(value); throw cause; }
     if (enabled) stopMobileLinkRuntime(app);

@@ -1,3 +1,4 @@
+import { ensureProjectQuota } from "@/utils/workspace/projectQuota";
 import { dirname } from "node:path";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
@@ -165,6 +166,7 @@ export async function userSession(req: Request) {
 export async function registerUser(req: Request, res: Response, userName: string, password: string) {
   assertUserRequest(req);
   const result = await accessControl(() => control.register(userName, password));
+  await ensureProjectQuota(result.user.id, "enroll");
   res.cookie("toonflowWebSession", result.token, { ...cookieOptions(req, "/"), maxAge: 8 * 60 * 60 * 1000 });
   return { user: result.user };
 }
@@ -172,6 +174,7 @@ export async function registerUser(req: Request, res: Response, userName: string
 export async function loginUser(req: Request, res: Response, userName: string, password: string) {
   assertUserRequest(req);
   const result = await accessControl(() => control.loginWeb(userName, password));
+  await ensureProjectQuota(result.user.id, "enroll");
   res.cookie("toonflowWebSession", result.token, { ...cookieOptions(req, "/"), maxAge: 8 * 60 * 60 * 1000 });
   return { user: result.user };
 }

@@ -3,6 +3,7 @@ import { lstat, mkdir, realpath, stat } from "@toonflow/file";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import conf from "@/utils/conf";
 import { getMobileLinkConfig, isMobileLinkRequest } from "@/utils/mobileLink";
+import { ensureProjectQuota, projectQuotaRoot } from "@/utils/workspace/projectQuota";
 import { getRuntimePlatform } from "@/lib/platform";
 
 export function isLocalHostRequest(req: Request) {
@@ -18,6 +19,13 @@ export async function getWorkspaceRoot(req: Request) {
   if (req.res?.locals.multiTenantWeb && !user) throw Object.assign(new Error("请先登录 Toonflow"), { status: 401 });
   if (user?.role === "user" && !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(user.id)) {
     throw Object.assign(new Error("账号工作区身份无效"), { status: 403 });
+  }
+  const quotaRoot = projectQuotaRoot();
+  if (user?.role === "user" && quotaRoot) {
+    await ensureProjectQuota(user.id, "check");
+    const root = await realpath(resolve(quotaRoot, "quotaWorkspaces", user.id, "workspace"));
+    if (root !== resolve(quotaRoot, "quotaWorkspaces", user.id, "workspace")) throw Object.assign(new Error("账号工作区无效"), { status: 403 });
+    return root;
   }
   let root = await realpath(dirname(conf.path));
   const parts = user?.role === "user" ? ["multiTenant", "workspaces", user.id] : ["workspaces"];

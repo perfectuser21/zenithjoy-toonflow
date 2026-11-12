@@ -3,16 +3,19 @@ import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { Request } from "express";
 import { resolveWorkspace } from "@/utils/workspace";
 import { t, translateError, translateMessage } from "@/lib/i18n";
+import { withWorkspaceQuota, workspaceTreeBytes } from "@/utils/workspace/quota";
 
 export async function writeWorkspaceFile(path: string, content: string | Uint8Array, exclusive = false) {
-  await writeAtomic(path, content, { exclusive });
+  const size = typeof content === "string" ? Buffer.byteLength(content) : content.byteLength;
+  await withWorkspaceQuota(path, size, !exclusive, () => writeAtomic(path, content, { exclusive }));
 }
 
 export async function copyWorkspaceFile(source: string, target: string) {
   const info = await lstat(source);
   if (info.isSymbolicLink() || (!info.isFile() && !info.isDirectory())) throw Object.assign(new Error("只能复制普通文件或文件夹"), { status: 403 });
-  if (!info.isDirectory()) return copyFile(source, target, constants.COPYFILE_EXCL);
+  if (!info.isDirectory()) return withWorkspaceQuota(target, info.size, false, () => copyFile(source, target, constants.COPYFILE_EXCL));
   if (isWithin(source, target)) throw Object.assign(new Error("不能把文件夹复制到自身或子目录"), { status: 400 });
+  await withWorkspaceQuota(target, () => workspaceTreeBytes(source), false, async () => {
   await mkdir(target);
   try {
     await cp(source, target, {
@@ -32,6 +35,7 @@ export async function copyWorkspaceFile(source: string, target: string) {
     // ACT: 失败保留已复制内容，不递归回滚删除可能被外部加入文件的目标目录。
     throw Object.assign(new Error(t`复制未完成，已复制的内容保留在 ${target}。${cause instanceof Error ? translateError(cause) : translateMessage("请检查文件权限后重试")}`, { cause }), { code: "ECOPYINCOMPLETE" });
   }
+  });
 }
 
 export async function renameWorkspaceFile(source: string, target: string) {
@@ -46,7 +50,7 @@ export async function renameWorkspaceFile(source: string, target: string) {
     await rename(source, target);
     return;
   }
-  await copyFile(source, target, constants.COPYFILE_EXCL);
+  await withWorkspaceQuota(target, info.size, false, () => copyFile(source, target, constants.COPYFILE_EXCL));
   // ACT: 目标完整写入后才移除源文件；移除失败只回滚本次目标。
   try { await unlink(source); }
   catch (err) {

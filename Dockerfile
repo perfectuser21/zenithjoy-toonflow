@@ -12,7 +12,7 @@ COPY . .
 RUN bun install --frozen-lockfile
 
 RUN bun run build:server \
-    && mkdir -p data/workspaces/myProject \
+    && mkdir -p data/workspaces/myProject data/tmp \
     && chown -R bun:bun build data
 
 ENV NODE_ENV=production
