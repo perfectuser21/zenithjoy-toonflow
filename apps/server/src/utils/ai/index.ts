@@ -12,6 +12,7 @@ import { getReadableFileMimeType } from "@/lib/documentFormats";
 import { readDocument } from "@/utils/documents";
 import { getConfiguredProviders, getModelLimits, getModelReasoning, getProviderBaseUrl, providerSchema } from "@/utils/ai/provider";
 import { modelGateway, requireDirectModelAccess } from "@/utils/multiTenant/gateway";
+import { currentIdentity } from "@/utils/multiTenant/context";
 import type { ModelActor } from "@toonflow/multi-tenant-gateway/types";
 import { createBillingUsageTracker } from "@/utils/ai/billingUsage";
 
@@ -43,7 +44,7 @@ export async function getConfiguredModel(providerId: string, modelId: string, ac
 export type ConfiguredModel = Awaited<ReturnType<typeof getConfiguredModel>>;
 
 export async function listAiModels() {
-  if (modelGateway.enabled()) return modelGateway.catalog(["text"]);
+  if (modelGateway.enabled()) return modelGateway.catalog(["text"], currentIdentity());
   return getConfiguredProviders().flatMap(item => {
     const parsed = providerSchema.extend({ id: z.string().min(1), label: z.string() }).safeParse(item);
     if (!parsed.success) return [];
@@ -61,7 +62,8 @@ export async function listAiModels() {
 
 export function publicAiMessage(configured: ConfiguredModel, message: AssistantMessage, usageKnown = true) {
   if (!configured.route) return message;
-  const priceQuote = usageKnown && configured.execution ? modelGateway.quote(configured.execution, message.usage) : undefined;
+  const customerKey = configured.execution?.billingMode === "userProvider";
+  const priceQuote = !customerKey && usageKnown && configured.execution ? modelGateway.quote(configured.execution, message.usage) : undefined;
   return {
     role: message.role, content: message.content, api: message.api,
     provider: configured.publicProviderId, model: configured.publicModelId,
@@ -74,6 +76,7 @@ export function publicAiMessage(configured: ConfiguredModel, message: AssistantM
     stopReason: message.stopReason, timestamp: message.timestamp,
     ...(message.providerThinkingLevel === undefined ? {} : { providerThinkingLevel: message.providerThinkingLevel }),
     usageKnown,
+    ...(customerKey ? { billingMode: "userProvider", billingNotice: "模型费用由您的阿里云账号收取，具体以阿里云账单为准。", costSource: "unavailable" } : {}),
     modelRouteRevision: configured.revision,
     ...(message.errorMessage ? { errorMessage: "模型请求失败，请稍后重试" } : {}),
     ...(priceQuote ? { priceQuote: { ...priceQuote, routeRevision: configured.revision } } : {}),

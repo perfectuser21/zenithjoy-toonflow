@@ -348,7 +348,7 @@ export function createModelGateway<Upstreams extends ModelMap, Catalogs extends 
       return routeAccess(() => routing.sealExecution(JSON.parse(JSON.stringify({ kind: "multiTenantOwnedModelExecution",
         ownerId: access.actor.id, ...execution, billingMode: execution.billingMode ?? "platform" }))));
     },
-    async catalog<K extends ModelType>(types: readonly K[]): Promise<(Catalogs[K] & PublicModel)[]> {
+    async catalog<K extends ModelType>(types: readonly K[], actor?: ModelAccess["actor"]): Promise<(Catalogs[K] & PublicModel)[]> {
       if (!options.enabled()) fail("多租户模型路由尚未开启", 403);
       const current = await read();
       const resources = executionResources(current.revision);
@@ -358,20 +358,22 @@ export function createModelGateway<Upstreams extends ModelMap, Catalogs extends 
         const adapter = options.adapters[route.type as K];
         const execution = { route, revision: current.revision,
           upstream: await readUpstream(route.type as K, route, current.revision, resources) };
-        const label = options.formatPrice(route.salePrice);
+        const customerKey = actor?.role === "user" && route.target === "backend" && (route.type === "text" ? route.providerId === "aliyunQwen" : route.providerId === "aliyun");
+        const label = customerKey ? "阿里云账号计费" : options.formatPrice(route.salePrice);
         const attributes = await routeAccess(() => adapter.publicModel(execution));
         if (!attributes || typeof attributes !== "object" || Array.isArray(attributes)) fail("平台模型能力配置无效", 503);
         catalog.push({ ...attributes, providerId: "multiTenant", providerLabel: "Toonflow", routeId: route.id, modelId: getPublicModelId(route),
-          label: `${route.label} · ${label}`, salePrice: route.salePrice, priceLabel: label });
+          label: `${route.label} · ${label}`, ...(customerKey ? {} : { salePrice: route.salePrice }), priceLabel: label });
       }
       return catalog;
     },
     quote,
     async quoteRequest<K extends ModelType>(type: K, providerId: string, modelId: string, request: unknown, access: ModelAccess) {
       const execution = await resolve(type, providerId, modelId, undefined, request, access);
+      if (execution.billingMode === "userProvider") return { billingMode: "userProvider" as const, revision: execution.revision };
       const result = quote(execution, await routeAccess(() => options.adapters[type].maximumUsage(execution, request)));
       if (!result) fail("当前模型暂时无法报价");
-      return result;
+      return { ...result, billingMode: "platform" as const };
     },
     reserve,
     async reserveSnapshot<K extends ModelType>(type: K, providerId: string, modelId: string, snapshot: string, request: unknown, context: ModelRequestContext, legacyTaskOwnerId?: string) {
