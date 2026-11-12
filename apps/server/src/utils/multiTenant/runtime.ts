@@ -3,10 +3,6 @@ import type { Application, Request, Response, NextFunction } from "express";
 import type { Server } from "node:http";
 import type { Socket } from "node:net";
 import { posix } from "node:path";
-import { dirname, isAbsolute, relative, sep } from "node:path";
-import { realpathSync } from "@toonflow/file";
-import { tmpdir } from "node:os";
-import conf from "@/utils/conf";
 import type { AuthIdentity } from "@toonflow/multi-tenant-auth";
 import { authenticateHost, authenticateWeb } from "./index";
 import { creationPort, isEnabled } from "./mode";
@@ -15,6 +11,7 @@ import { getAppOrigin } from "@/utils/mcp/control";
 import { stopMobileLinkRuntime } from "@/utils/mobileLink";
 import { runWithIdentity } from "./context";
 import { verifyProjectQuota } from "@/utils/workspace/projectQuota";
+import { isolatedBackgroundBeta, productionBackgroundAdmission } from "./backgroundAdmission";
 
 type Runtime = { started: boolean; server?: Server; sockets: Set<Socket>; queue: Promise<void>; onEnabledChange?: (enabled: boolean) => void };
 const runtimes = new WeakMap<Application, Runtime>();
@@ -24,15 +21,7 @@ const userReadRoutes = new Set(["/api/ai/models", "/api/ai/media/models", "/api/
 const modelWriteRoutes = new Set(["/api/ai/generate", "/api/ai/media/price", "/api/ai/media/generate", "/api/ai/media/tasks/status", "/api/ai/media/tasks/cancel"]);
 const backgroundBetaRoutes = new Set(["/api/ai/media/background/frame", "/api/ai/media/background/plan", "/api/ai/media/background/prepare",
   "/api/ai/media/background/confirm", "/api/ai/media/background/status", "/api/ai/media/background/cancel", "/api/ai/media/background/finish",
-  "/api/ai/media/background/cleanup", "/api/ai/media/background/reservations"]);
-function isolatedBackgroundBeta() {
-  if (process.env.TOONFLOW_BACKGROUND_BETA !== "1") return false;
-  try {
-    const root = realpathSync(tmpdir()), directory = realpathSync(dirname(conf.path));
-    const path = relative(root, directory);
-    return !!path && path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path);
-  } catch { return false; }
-}
+  "/api/ai/media/background/cleanup", "/api/ai/media/background/cleanupframe", "/api/ai/media/background/reservations"]);
 const tenantAgentRoutes = new Set([
   "POST /api/agent", "POST /api/agent/create", "GET /api/agent/get", "GET /api/agent/list", "GET /api/agent/skills",
   "POST /api/agent/answer", "POST /api/agent/canvasresult", "POST /api/agent/stop", "PATCH /api/agent/rename",
@@ -173,8 +162,9 @@ export async function multiTenantAccess(req: Request, res: Response, next: NextF
   const path = accessPath(req);
   if (path === null) return next();
   const backgroundRoute = path.startsWith("/api/ai/media/background/");
-  const backgroundBeta = req.method === "POST" && backgroundBetaRoutes.has(path) && isolatedBackgroundBeta();
-  if (backgroundRoute && !backgroundBeta) throw Object.assign(new Error("长视频换背景尚未在此环境开放"), { status: 403 });
+  if (backgroundRoute && !isEnabled()) throw Object.assign(new Error("长视频换背景尚未在此环境开放"), { status: 403 });
+  const knownBackground = req.method === "POST" && backgroundBetaRoutes.has(path);
+  if (backgroundRoute && !knownBackground) throw Object.assign(new Error("长视频换背景尚未在此环境开放"), { status: 403 });
   if (!isEnabled()) return next();
   const publicWeb = res.locals.multiTenantWeb === true;
   const managementRoute = controlRoutes.has(path)
@@ -193,12 +183,23 @@ export async function multiTenantAccess(req: Request, res: Response, next: NextF
   if (!user) throw Object.assign(new Error("请先登录 Toonflow"), { status: 401 });
   res.locals.multiTenantUser = user;
   if (!["GET", "HEAD", "OPTIONS"].includes(req.method)) getAppOrigin(req);
+  const backgroundBeta = knownBackground && await isolatedBackgroundBeta();
+  const productionRequested = process.env.TOONFLOW_BACKGROUND_PRODUCTION === "1";
+  const recoveryRequested = process.env.TOONFLOW_BACKGROUND_RECOVERY === "1" && ["/api/ai/media/background/status", "/api/ai/media/background/cancel", "/api/ai/media/background/finish"].includes(path);
+  const backgroundProduction = knownBackground && !backgroundBeta && (productionRequested || recoveryRequested) && await productionBackgroundAdmission();
+  const backgroundReadOnly = knownBackground && path === "/api/ai/media/background/status" && !backgroundBeta && !backgroundProduction;
+  if (backgroundRoute && !backgroundBeta && !backgroundProduction && !backgroundReadOnly) throw Object.assign(new Error("长视频换背景尚未在此环境开放"), { status: 403 });
+  if (backgroundRoute) {
+    res.locals.backgroundProduction = backgroundProduction;
+    res.locals.backgroundReadOnly = backgroundReadOnly;
+    res.locals.backgroundAllowNew = backgroundBeta || backgroundProduction && productionRequested;
+  }
   if (user.role === "admin") return runWithIdentity(user, next);
   const fileRoute = path.startsWith("/api/workspaces/") && path !== "/api/workspaces/files/reveal";
   const settingsRoute = path === "/api/settings/get" && req.method === "GET" || path === "/api/settings/save" && req.method === "PUT";
   const ownProviderKey = path === "/api/multitenant/user/providerkey" && ["GET", "PUT"].includes(req.method);
   const tenantAgent = process.env.TOONFLOW_TRUSTED_CANVAS_BETA === "1" && tenantAgentRoutes.has(`${req.method} ${path}`);
-  if (fileRoute || settingsRoute || ownProviderKey || tenantAgent || backgroundBeta || req.method === "GET" && userReadRoutes.has(path)
+  if (fileRoute || settingsRoute || ownProviderKey || tenantAgent || backgroundBeta || backgroundProduction || backgroundReadOnly || req.method === "GET" && userReadRoutes.has(path)
     || req.method === "POST" && modelWriteRoutes.has(path) || communityReads.has(path) && ["GET", "POST"].includes(req.method)) return runWithIdentity(user, next);
   throw Object.assign(new Error("当前账号尚未开放此功能"), { status: 403 });
 }
