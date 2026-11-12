@@ -2,8 +2,10 @@ import type { BillingCredit, BillingReleaseMetadata, BillingSettlement, BillingS
 import type { ManagedModelProvider, ModelPrice, ModelProvider, ModelRoute } from "@toonflow/multi-tenant-models/config";
 
 export type ModelType = ModelRoute["type"];
-export type ModelExecution<T = unknown> = { route: ModelRoute; revision: number; upstream: T; legacyFormat?: true };
+export type ModelExecution<T = unknown> = { route: ModelRoute; revision: number; upstream: T; legacyFormat?: true; billingMode?: "platform" | "userProvider" };
 export type ModelActor = { id: string; role: "user" | "admin" };
+// 仅允许由认证会话及服务端已验证的任务记录构造。
+export type ModelAccess = { actor: ModelActor; legacyTaskOwnerId?: string };
 export type ModelRequestContext = {
   actor: ModelActor | null;
   requestId: string;
@@ -56,6 +58,7 @@ export interface ModelAdapter<T, Public, Cloud extends Record<string, unknown>> 
 
 export type ModelGatewayOptions<Upstreams extends ModelMap, Catalogs extends ModelMap, Cloud extends Record<string, unknown>> = {
   enabled(): boolean;
+  applyUserProviderKey<K extends ModelType>(type: K, route: ModelRoute, upstream: Upstreams[K], apiKey: string): Promise<Upstreams[K]> | Upstreams[K];
   formatPrice(price: ModelPrice): string;
   adapters: { [K in ModelType]: ModelAdapter<Upstreams[K], Catalogs[K], Cloud> };
   cloud: {

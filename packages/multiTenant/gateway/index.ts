@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { calculateModelPrice, createModelRouting } from "@toonflow/multi-tenant-models";
+import { calculateModelPrice, createModelRouting, createUserProviderKeys } from "@toonflow/multi-tenant-models";
 import { getPublicModelId, modelRouteSchema, modelRoutesSchema, modelRoutingRevisionSchema, publicModelIdSchema, modelProviderSchema, modelProvidersSchema } from "@toonflow/multi-tenant-models/config";
 import type { ManagedModelProvider, ModelProvider, ModelRoute, ProviderConfigurationSnapshot } from "@toonflow/multi-tenant-models/config";
 import { createBilling } from "@toonflow/multi-tenant-billing";
 import { billingUsageSchema } from "@toonflow/multi-tenant-billing/config";
 import type { BillingCredit, BillingReleaseMetadata, BillingUsage } from "@toonflow/multi-tenant-billing/config";
-import type { AvailableModel, ModelExecution, ModelFinalization, ModelGatewayOptions, ModelMap, ModelOutcome, ModelRequestContext, ModelRunFailure, ModelRunInput, ModelType, ModelExecutionResources, PublicModel } from "./types";
+import type { AvailableModel, ModelAccess, ModelExecution, ModelFinalization, ModelGatewayOptions, ModelMap, ModelOutcome, ModelRequestContext, ModelRunFailure, ModelRunInput, ModelType, ModelExecutionResources, PublicModel } from "./types";
 
 export type * from "./types";
 
@@ -22,6 +22,12 @@ const managedProviderSchema = modelProviderSchema.extend({
 const executionSchema = z.strictObject({
   kind: z.literal("multiTenantModelExecution"), route: modelRouteSchema, revision: revisionSchema, upstream: z.unknown(),
 });
+const ownedExecutionSchema = z.strictObject({
+  kind: z.literal("multiTenantOwnedModelExecution"), ownerId: z.string().min(1).max(64),
+  billingMode: z.enum(["platform", "userProvider"]), route: modelRouteSchema, revision: revisionSchema, upstream: z.unknown(),
+});
+const accessSchema = z.strictObject({ actor: z.object({ id: z.string().min(1).max(64), role: z.enum(["user", "admin"]) }),
+  legacyTaskOwnerId: z.string().min(1).max(64).optional() });
 const contextSchema = z.strictObject({
   actor: z.object({ id: z.string().min(1).max(64), role: z.enum(["user", "admin"]) }).nullable(),
   requestId: z.uuid(), payload: z.unknown(), scope: z.string().min(1).max(4096).optional(), recoverExisting: z.boolean().optional(),
@@ -71,7 +77,9 @@ export function createModelGateway<Upstreams extends ModelMap, Catalogs extends 
   options: ModelGatewayOptions<Upstreams, Catalogs, Cloud>,
 ) {
   const routing = createModelRouting(dataDirectory);
+  const providerKeys = createUserProviderKeys(dataDirectory);
   const billing = createBilling(dataDirectory);
+  const executionOwners = new WeakMap<object, { ownerId: string; billingMode: "platform" | "userProvider" }>();
   const routeAccess = <T>(operation: () => Promise<T> | T) => access(operation, "模型路由配置访问失败");
   const billingAccess = <T>(operation: () => Promise<T> | T) => access(operation, "模型账务处理失败，请联系管理员");
   const read = () => routeAccess(() => routing.read());
@@ -147,17 +155,25 @@ export function createModelGateway<Upstreams extends ModelMap, Catalogs extends 
     return routeAccess(() => source.resolve(route, resources));
   }
 
-  async function resolve<K extends ModelType>(type: K, providerId: string, modelId: string, snapshot?: string, request?: unknown): Promise<ModelExecution<Upstreams[K]>> {
+  async function resolve<K extends ModelType>(type: K, providerId: string, modelId: string, snapshot: string | undefined, request: unknown | undefined, access: ModelAccess): Promise<ModelExecution<Upstreams[K]>> {
+    const { actor, legacyTaskOwnerId } = accessSchema.parse(access);
     const publicModelId = requirePublicModel(type, providerId, modelId);
     const adapter = options.adapters[type];
     let execution: ModelExecution<Upstreams[K]>;
     if (snapshot !== undefined) {
       const raw = await routeAccess(() => routing.openExecution(snapshot));
+      const owned = ownedExecutionSchema.safeParse(raw);
       const parsed = executionSchema.safeParse(raw);
-      if (parsed.success) {
+      if (owned.success) {
+        if (owned.data.ownerId !== actor.id) fail("媒体任务归属不一致", 403);
+        execution = { route: owned.data.route, revision: owned.data.revision, billingMode: owned.data.billingMode,
+          upstream: await routeAccess(() => adapter.restore(owned.data.upstream, owned.data.route)) };
+      } else if (parsed.success) {
+        if (actor.role !== "admin" && legacyTaskOwnerId !== actor.id) fail("无法验证旧媒体任务归属", 403);
         execution = { route: parsed.data.route, revision: parsed.data.revision,
           upstream: await routeAccess(() => adapter.restore(parsed.data.upstream, parsed.data.route)) };
       } else {
+        if (actor.role !== "admin" && legacyTaskOwnerId !== actor.id) fail("无法验证旧媒体任务归属", 403);
         const legacy = await routeAccess(() => adapter.restoreLegacy?.(raw));
         if (!legacy) fail("媒体任务路由快照无效", 409);
         execution = { ...legacy, legacyFormat: true };
@@ -169,8 +185,24 @@ export function createModelGateway<Upstreams extends ModelMap, Catalogs extends 
       const route = current.routes.find(item => matchesPublicModel(item, publicModelId) && item.type === type && item.enabled);
       if (!route) fail("平台模型不存在或已停用", 404);
       execution = { route, revision: current.revision, upstream: await readUpstream(type, route, current.revision) };
+      // 新请求只开放明确支持的客户自带密钥供应商；不得把别名或未知代理回退为平台计费。
+      if (actor.role === "user" && !(route.target === "backend" &&
+        (type === "text" ? route.providerId === "aliyunQwen" : route.providerId === "aliyun"))) {
+        fail("该模型暂未开放客户自带密钥调用，请联系管理员", 403);
+      }
+      if (actor.role === "user" && route.target === "backend" &&
+        (type === "text" ? route.providerId === "aliyunQwen" : route.providerId === "aliyun")) {
+        const apiKey = await providerKeys.openForExecution(actor.id, "aliyun");
+        if (!apiKey) fail("请先在个人设置中配置阿里云 API Key", 400);
+        const price = route.salePrice;
+        const salePrice = price.mode === "perMillionTokens"
+          ? { ...price, input: "0", output: "0", cacheRead: "0", cacheWrite: "0" } : { ...price, amount: "0" };
+        execution = { route: { ...route, salePrice, costPrice: null }, revision: current.revision, billingMode: "userProvider",
+          upstream: await options.applyUserProviderKey(type, route, execution.upstream, apiKey) };
+      }
     }
     if (request !== undefined) await routeAccess(() => adapter.validate(execution, request));
+    executionOwners.set(execution, { ownerId: actor.id, billingMode: execution.billingMode ?? "platform" });
     return execution;
   }
 
@@ -183,6 +215,8 @@ export function createModelGateway<Upstreams extends ModelMap, Catalogs extends 
     if (!options.enabled()) fail("多租户模型路由尚未开启", 403);
     const input = contextSchema.parse(context);
     if (!input.actor) fail("请先登录 Toonflow", 401);
+    const owner = executionOwners.get(execution);
+    if (!owner || owner.ownerId !== input.actor.id || owner.billingMode !== (execution.billingMode ?? "platform")) fail("模型执行归属不一致", 403);
     const route = modelRouteSchema.parse(execution.route);
     const revision = revisionSchema.parse(execution.revision);
     const adapter = options.adapters[route.type];
@@ -196,7 +230,8 @@ export function createModelGateway<Upstreams extends ModelMap, Catalogs extends 
       // ACT: 旧任务只保留原哈希协议以恢复已存在预占；新执行统一使用显式 scope，不由调用方拼接哈希。
       requestHash = hashRequest({ owner: input.actor.id, routeId: route.id, revision, request: { ...input.payload, directory: input.scope } });
     } else {
-      requestHash = hashRequest({ owner: input.actor.id, routeId: route.id, revision, payload: input.payload, scope: input.scope });
+      requestHash = hashRequest({ owner: input.actor.id, routeId: route.id, revision, payload: input.payload, scope: input.scope,
+        ...(owner.billingMode === "userProvider" ? { billingMode: owner.billingMode } : {}) });
     }
     const result = await billingAccess(() => billing.reserve({
       userId: input.actor!.id, requestId: input.requestId, requestHash, route, revision, maximumUsage, recoverExisting: input.recoverExisting,
@@ -308,9 +343,10 @@ export function createModelGateway<Upstreams extends ModelMap, Catalogs extends 
       return routeAccess(() => routing.saveCloud(JSON.parse(JSON.stringify(cloud)), revision));
     },
     resolve,
-    async capture<K extends ModelType>(type: K, providerId: string, modelId: string, request: unknown) {
-      const execution = await resolve(type, providerId, modelId, undefined, request);
-      return routeAccess(() => routing.sealExecution(JSON.parse(JSON.stringify({ kind: "multiTenantModelExecution", ...execution }))));
+    async capture<K extends ModelType>(type: K, providerId: string, modelId: string, request: unknown, access: ModelAccess) {
+      const execution = await resolve(type, providerId, modelId, undefined, request, access);
+      return routeAccess(() => routing.sealExecution(JSON.parse(JSON.stringify({ kind: "multiTenantOwnedModelExecution",
+        ownerId: access.actor.id, ...execution, billingMode: execution.billingMode ?? "platform" }))));
     },
     async catalog<K extends ModelType>(types: readonly K[]): Promise<(Catalogs[K] & PublicModel)[]> {
       if (!options.enabled()) fail("多租户模型路由尚未开启", 403);
@@ -331,15 +367,16 @@ export function createModelGateway<Upstreams extends ModelMap, Catalogs extends 
       return catalog;
     },
     quote,
-    async quoteRequest<K extends ModelType>(type: K, providerId: string, modelId: string, request: unknown) {
-      const execution = await resolve(type, providerId, modelId, undefined, request);
+    async quoteRequest<K extends ModelType>(type: K, providerId: string, modelId: string, request: unknown, access: ModelAccess) {
+      const execution = await resolve(type, providerId, modelId, undefined, request, access);
       const result = quote(execution, await routeAccess(() => options.adapters[type].maximumUsage(execution, request)));
       if (!result) fail("当前模型暂时无法报价");
       return result;
     },
     reserve,
-    async reserveSnapshot<K extends ModelType>(type: K, providerId: string, modelId: string, snapshot: string, request: unknown, context: ModelRequestContext) {
-      return reserve(await resolve(type, providerId, modelId, snapshot, request), context);
+    async reserveSnapshot<K extends ModelType>(type: K, providerId: string, modelId: string, snapshot: string, request: unknown, context: ModelRequestContext, legacyTaskOwnerId?: string) {
+      if (!context.actor) fail("请先登录 Toonflow", 401);
+      return reserve(await resolve(type, providerId, modelId, snapshot, request, { actor: context.actor, legacyTaskOwnerId }), context);
     },
     finalize,
     getCharge(chargeId: string, userId: string) { return billingAccess(() => billing.getCharge(chargeId, userId)); },

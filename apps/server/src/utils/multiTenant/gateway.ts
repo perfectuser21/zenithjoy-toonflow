@@ -1,13 +1,14 @@
 import { dirname } from "node:path";
 import { createModelGateway } from "@toonflow/multi-tenant-gateway";
 import conf from "@/utils/conf";
-import { cloudSchema, formatModelPrice, loadModelCloud, modelAdapters } from "./modelAdapters";
+import { applyUserProviderKey, cloudSchema, formatModelPrice, loadModelCloud, modelAdapters } from "./modelAdapters";
 import type { Cloud, ModelCapabilities, ModelUpstreams } from "./modelAdapters";
 import { providerAdapters } from "./providerAdapters";
 import { isEnabled } from "./mode";
 
 export const modelGateway = createModelGateway<ModelUpstreams, ModelCapabilities, Cloud>(dirname(conf.path), {
   enabled: isEnabled,
+  applyUserProviderKey,
   formatPrice: formatModelPrice,
   adapters: modelAdapters,
   cloud: { parse: value => cloudSchema.parse(value), load: loadModelCloud },

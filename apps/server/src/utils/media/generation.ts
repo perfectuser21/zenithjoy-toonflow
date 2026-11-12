@@ -10,6 +10,8 @@ import { getMediaProvider, listMediaProviders, loadMediaProviderSource } from "@
 import { lockWorkspaceFiles, resolveWorkspacePath, writeWorkspaceFile } from "@/utils/workspace/files";
 import { beginGeneration, getProviderPrice } from "@/utils/media/billing";
 import { detectMimeType, readPriceReference } from "@/utils/media/priceReference";
+import type { ModelActor } from "@toonflow/multi-tenant-gateway/types";
+import { currentIdentity } from "@/utils/multiTenant/context";
 import { modelGateway } from "@/utils/multiTenant/gateway";
 
 const maxMediaSize = 100 * 1024 * 1024;
@@ -25,6 +27,8 @@ type MediaGenerationTask = {
   resume: boolean;
   checkpoint: MediaGenerationCheckpoint;
   modelRouteCipher?: string;
+  actor?: ModelActor;
+  legacyTaskOwnerId?: string;
   save: (patch: Partial<MediaGenerationCheckpoint>) => Promise<void>;
 };
 const notSubmittedFailures = new WeakSet<object>();
@@ -199,9 +203,10 @@ async function prepareRequest<T>(directory: string | undefined, mediaType: "imag
 }
 
 async function configuredProvider(request: MediaGenerationRequest, mediaType: "image" | "video" | "audio", signal?: AbortSignal, directory?: string,
-  saveTaskData?: (data: ProviderTaskData) => Promise<void>, resume = false, modelRouteCipher?: string) {
+  saveTaskData?: (data: ProviderTaskData) => Promise<void>, resume = false, modelRouteCipher?: string, actor?: ModelActor, legacyTaskOwnerId?: string) {
   if (modelGateway.enabled() || modelRouteCipher) {
-    const { upstream } = await modelGateway.resolve(mediaType, request.providerId, request.modelId, modelRouteCipher, request);
+    if (!actor) throw Object.assign(new Error("请先登录 Toonflow"), { status: 401 });
+    const { upstream } = await modelGateway.resolve(mediaType, request.providerId, request.modelId, modelRouteCipher, request, { actor, legacyTaskOwnerId });
     const provider = await loadMediaProviderSource(upstream.source, upstream.config, signal, undefined, directory, saveTaskData, upstream.cloud);
     return { provider, request: { ...request, providerId: provider.id, modelId: upstream.upstreamModelId } };
   }
@@ -230,7 +235,9 @@ async function preparePriceRequest(directory: string | undefined, mediaType: "im
 export async function getMediaPrice(directory: string | undefined, mediaType: "image" | "video" | "audio", request: MediaGenerationRequest, signal?: AbortSignal) {
   signal?.throwIfAborted();
   if (modelGateway.enabled()) {
-    const quote = await modelGateway.quoteRequest(mediaType, request.providerId, request.modelId, request);
+    const actor = currentIdentity();
+    if (!actor) throw Object.assign(new Error("请先登录 Toonflow"), { status: 401 });
+    const quote = await modelGateway.quoteRequest(mediaType, request.providerId, request.modelId, request, { actor: { id: actor.id, role: actor.role } });
     return { ...quote, price: `${quote.amount} ${quote.currency}`, tips: translateMessage("平台售价，按实际用量结算") };
   }
   const { provider } = await configuredProvider(request, mediaType, signal, directory);
@@ -294,7 +301,7 @@ async function executeMedia(
   }
   let finish = () => {};
   const resumeAssets = async () => {
-    const { provider } = await configuredProvider(request, mediaType, signal, directory, data => task!.save({ providerData: data }), true, modelRouteCipher);
+    const { provider } = await configuredProvider(request, mediaType, signal, directory, data => task!.save({ providerData: data }), true, modelRouteCipher, task?.actor, task?.legacyTaskOwnerId);
     if (!checkpoint?.providerData || !provider.resumeTask) invalid("该任务没有可恢复的供应商凭据，不能重新提交生成");
     requireGenerationMode(task);
     finish();
@@ -311,7 +318,7 @@ async function executeMedia(
       assets = checkpoint?.assets ?? await resumeAssets();
     } else {
       const { provider, request: upstreamRequest } = await configuredProvider(request, mediaType, signal, directory,
-        task ? data => task.save({ providerData: data }) : undefined, false, modelRouteCipher);
+        task ? data => task.save({ providerData: data }) : undefined, false, modelRouteCipher, task?.actor, task?.legacyTaskOwnerId);
       const generate = mediaType === "image" ? provider.generateImage : mediaType === "video" ? provider.generateVideo : provider.generateAudio;
       if (typeof generate !== "function") invalid(t`此供应商不支持${translateMessage({ image: "图片", video: "视频", audio: "音频" }[mediaType])}生成`);
       const rules = Array.isArray(provider.rules) ? provider.rules : [];
