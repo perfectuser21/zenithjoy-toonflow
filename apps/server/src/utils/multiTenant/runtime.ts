@@ -22,8 +22,7 @@ const tenantAgentRoutes = new Set([
   "POST /api/agent/answer", "POST /api/agent/canvasresult", "POST /api/agent/stop", "PATCH /api/agent/rename",
   "POST /api/agent/branch", "DELETE /api/agent/message", "DELETE /api/agent/queue", "POST /api/agent/queue/steer",
 ]);
-const communityReads = new Set(["getAdvertisements", "getExploreProjects", "getExploreProject", "getExploreProcess", "getExploreDownload", "getSponsorList"]
-  .map(name => `/api/channel/community/${name.toLowerCase()}`));
+const communityReads = new Set(["/api/channel/community/getsponsorlist"]);
 const platformPrefixes = ["/api/providers", "/api/plugins", "/api/mcp/servers", "/api/channel/account", "/api/channel/model", "/api/channel/provider", "/api/channel/subaccounts", "/api/channel/user", "/api/channel/wallet", "/api/channel/plugin"];
 const platformControlRoutes = new Set(["nodes", "tools", "ext", "agents"].flatMap(kind =>
   ["install", "save", "setenabled", "uninstall", "connect"].map(action => `/api/${kind}/${action}`))
