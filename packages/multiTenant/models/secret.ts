@@ -103,7 +103,7 @@ export function createModelSecret(dataDirectory: string) {
           decipher.setAAD(aad);
           decipher.setAuthTag(tag);
           const prior = jsonRecordSchema.parse(JSON.parse(Buffer.concat([decipher.update(encrypted), decipher.final()]).toString("utf8")));
-          if (typeof prior.apiKey !== "string" || !prior.apiKey.trim()) throw new Error("invalid credential");
+          if (!(typeof prior.apiKey === "string" && !!prior.apiKey.trim()) && !(prior.unbound === true && Object.keys(prior).length === 1)) throw new Error("invalid credential");
         } catch { invalid("客户凭据无法解密，请检查原始记录与密钥"); }
       }
       const data = JSON.stringify(jsonRecordSchema.parse(payload));

@@ -5,8 +5,9 @@ import { createModelSecret, modelCipherSchema } from "./secret";
 
 const userIdSchema = z.uuid();
 const providerIdSchema = z.literal("aliyun");
-const revisionSchema = z.number().int().min(0).max(2147483646);
+const revisionSchema = z.number().int().min(0).max(2147483647);
 const apiKeySchema = z.string().trim().min(1).max(4096).regex(/^[\x21-\x7e]+$/);
+const unboundSchema = z.strictObject({ unbound: z.literal(true) });
 
 function fail(message: string, status: number): never { throw Object.assign(new Error(message), { status }); }
 async function databaseCall<T>(operation: () => Promise<T>): Promise<T> {
@@ -65,6 +66,7 @@ export function createUserProviderKeys(dataDirectory: string, existingDatabase?:
       if (stored && (!modelCipherSchema.safeParse(stored.cipher).success || !Number.isSafeInteger(stored.revision) || stored.revision < 1)) fail("客户凭据记录无效", 503);
       if (stored) {
         const value = await secret.openUserProvider(stored.cipher, binding, guard);
+        if (unboundSchema.safeParse(value).success) return { configured: false, revision: stored.revision };
         if (!apiKeySchema.safeParse(value.apiKey).success) fail("客户凭据记录无效", 503);
       }
       return { configured: !!stored, revision: stored?.revision ?? 0 };
@@ -72,6 +74,7 @@ export function createUserProviderKeys(dataDirectory: string, existingDatabase?:
     async save(userId: string, providerId: string, apiKey: string, expectedRevision: number) {
       const { db, user, provider, binding, guard } = await identity(userId, providerId);
       const revision = revisionSchema.parse(expectedRevision);
+      if (revision >= 2147483646) fail("客户凭据版本已耗尽，请联系管理员", 409);
       const parsedKey = apiKeySchema.safeParse(apiKey);
       if (!parsedKey.success) fail("API Key 格式无效", 400);
       const key = parsedKey.data;
@@ -79,12 +82,25 @@ export function createUserProviderKeys(dataDirectory: string, existingDatabase?:
       if ((stored?.revision ?? 0) !== revision) fail("客户凭据已更新，请刷新后重试", 409);
       if (stored) {
         const previous = await secret.openUserProvider(stored.cipher, binding, guard);
-        if (!apiKeySchema.safeParse(previous.apiKey).success) fail("客户凭据记录无效", 503);
+        if (!unboundSchema.safeParse(previous).success && !apiKeySchema.safeParse(previous.apiKey).success) fail("客户凭据记录无效", 503);
       }
       const cipher = await secret.replaceUserProvider({ apiKey: key }, binding, stored?.cipher, guard);
       if (cipher.length > 8192) fail("API Key 编码后过长", 400);
       if (!await databaseCall(() => db.writeUserProviderKey(user, provider, cipher, revision))) fail("客户凭据已更新，请刷新后重试", 409);
       return { configured: true, revision: revision + 1 };
+    },
+    async unbind(userId: string, providerId: string, expectedRevision: number) {
+      const { db, user, provider, binding, guard } = await identity(userId, providerId);
+      const revision = revisionSchema.parse(expectedRevision);
+      if (revision >= 2147483647) fail("客户凭据版本已耗尽，请联系管理员", 409);
+      const stored = await databaseCall(() => db.getUserProviderKey(user, provider));
+      if (!stored || stored.revision !== revision) fail("客户凭据已更新，请刷新后重试", 409);
+      const previous = await secret.openUserProvider(stored.cipher, binding, guard);
+      if (unboundSchema.safeParse(previous).success) fail("客户凭据已更新，请刷新后重试", 409);
+      if (!apiKeySchema.safeParse(previous.apiKey).success) fail("客户凭据记录无效", 503);
+      const cipher = await secret.replaceUserProvider({ unbound: true }, binding, stored.cipher, guard);
+      if (!await databaseCall(() => db.writeUserProviderKey(user, provider, cipher, revision))) fail("客户凭据已更新，请刷新后重试", 409);
+      return { configured: false, revision: revision + 1 };
     },
     // 只供服务端生成适配器读取，不能通过 API 返回给浏览器。
     async openForExecution(userId: string, providerId: string) {
@@ -92,6 +108,7 @@ export function createUserProviderKeys(dataDirectory: string, existingDatabase?:
       const stored = await databaseCall(() => db.getUserProviderKey(user, provider));
       if (!stored) return undefined;
       const value = await secret.openUserProvider(stored.cipher, binding, guard);
+      if (unboundSchema.safeParse(value).success) return undefined;
       const parsedKey = apiKeySchema.safeParse(value.apiKey);
       if (!parsedKey.success) fail("客户凭据记录无效", 503);
       return parsedKey.data;

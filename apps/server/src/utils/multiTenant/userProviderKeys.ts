@@ -22,3 +22,7 @@ export function readOwnProviderKeyStatus(req: Request) {
 export function saveOwnProviderKey(req: Request, apiKey: string, expectedRevision: number) {
   return keys.save(ownUserId(req), "aliyun", apiKey, expectedRevision);
 }
+
+export function unbindOwnProviderKey(req: Request, expectedRevision: number) {
+  return keys.unbind(ownUserId(req), "aliyun", expectedRevision);
+}

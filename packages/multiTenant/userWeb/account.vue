@@ -16,6 +16,7 @@
         <el-input v-model="apiKey" type="password" autocomplete="off" :aria-label="translate('API 密钥')" :disabled="busy || keySaving" maxlength="4096" />
         <el-button nativeType="submit" type="primary" :loading="keySaving" :disabled="busy || keyLoading || !keyStatus || keyConflict || !apiKey.trim()">{{ translate("保存") }}</el-button>
       </form>
+      <el-button v-if="keyStatus?.configured" :disabled="busy || keyLoading || keySaving || keyConflict" @click="unbindProviderKey">{{ translate("解绑密钥") }}</el-button>
     </section>
     <section v-if="role === 'user'" class="billingSection" aria-labelledby="accountBalanceTitle" :aria-busy="balanceLoading">
       <header class="sectionHeader">
@@ -65,12 +66,13 @@
 <script setup lang="ts">
 import { locale, translate } from "@toonflow/i18n/vue";
 import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { ElAlert, ElButton, ElInput, ElSkeleton } from "element-plus";
+import { ElAlert, ElButton, ElInput, ElMessageBox, ElSkeleton } from "element-plus";
 import type { BillingSnapshot, BillingTransaction } from "@toonflow/multi-tenant-billing/config";
 import type { UserRequest } from "./types";
 import "element-plus/es/components/alert/style/css";
 import "element-plus/es/components/button/style/css";
 import "element-plus/es/components/input/style/css";
+import "element-plus/es/components/message-box/style/css";
 import "element-plus/es/components/skeleton/style/css";
 
 const props = defineProps<{ request: UserRequest; userName: string; role?: "admin" | "user" }>();
@@ -132,6 +134,33 @@ async function saveProviderKey() {
     if (!disposed && !request.signal.aborted && keyRequest === request) {
       keyConflict.value = typeof cause === "object" && cause !== null && "status" in cause && cause.status === 409;
       keyError.value = keyConflict.value ? `${translate("这条数据已发生变化，请刷新列表后重试。")} ${translate("保存失败，请重试；当前填写的内容已保留")}` : translate("保存失败，修改内容已保留，请重试");
+    }
+  } finally {
+    if (keyRequest === request) { keyRequest = undefined; keySaving.value = false; }
+  }
+}
+
+async function unbindProviderKey() {
+  if (!keyStatus.value?.configured || keyConflict.value || keyLoading.value || keySaving.value || busy.value) return;
+  const userName = props.userName, revision = keyStatus.value.revision;
+  try {
+    await ElMessageBox.confirm(translate("解绑后，新任务需要重新配置阿里云密钥。已经提交的任务不受影响。"), translate("解绑密钥"), { confirmButtonText: translate("解绑"), cancelButtonText: translate("取消"), type: "warning" });
+  } catch { return; }
+  if (disposed || props.role !== "user" || props.userName !== userName || keyStatus.value?.revision !== revision || keyLoading.value || keySaving.value || busy.value) return;
+  const request = new AbortController();
+  keyRequest = request;
+  keySaving.value = true;
+  keyError.value = "";
+  try {
+    const result = await props.request<{ configured: boolean; revision: number }>({ method: "POST", url: "/api/multiTenant/user/providerKey/unbind", data: { expectedRevision: revision }, signal: request.signal });
+    if (!disposed && !request.signal.aborted && keyRequest === request && props.role === "user" && props.userName === userName) {
+      keyStatus.value = result;
+      apiKey.value = "";
+    }
+  } catch (cause) {
+    if (!disposed && !request.signal.aborted && keyRequest === request) {
+      keyConflict.value = typeof cause === "object" && cause !== null && "status" in cause && cause.status === 409;
+      keyError.value = keyConflict.value ? translate("这条数据已发生变化，请刷新列表后重试。") : translate("解绑失败，请重试");
     }
   } finally {
     if (keyRequest === request) { keyRequest = undefined; keySaving.value = false; }
