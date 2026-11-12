@@ -2,7 +2,7 @@ import logger from "morgan";
 import express from "express";
 import cors from "cors";
 import { createHash } from "node:crypto";
-import { dirname, resolve } from "node:path";
+import { dirname, extname, resolve } from "node:path";
 import { lstat, readFile, readdir, unlink } from "@toonflow/file";
 import type { Request, Response, NextFunction } from "express";
 import buildRoute from "@/core";
@@ -14,6 +14,8 @@ import { languageRequest, setLocaleFallback, translateError, translateMessage } 
 import { detectLocale, normalizeLocale } from "@toonflow/i18n";
 
 const autoInstallProviders = ["apiMart.ts", "metaso.ts", "compshare.ts"];
+declare const __toonflowWebHashes__: Record<string, string> | undefined;
+const trustedWebHashes = typeof __toonflowWebHashes__ === "undefined" ? {} : __toonflowWebHashes__;
 
 export async function createApp({
   webRoot,
@@ -133,6 +135,19 @@ export async function createApp({
   }));
   const { createA2aRouter } = await import("@/agent/a2a");
   app.use("/a2a", createA2aRouter());
+  app.use(async (req, res, next) => {
+    if (process.env.TOONFLOW_TRUSTED_CANVAS_BETA !== "1" || !res.locals.multiTenantWeb || !["GET", "HEAD"].includes(req.method)) return next();
+    let path: string;
+    try { path = decodeURIComponent(req.path); } catch { return res.sendStatus(400); }
+    const name = path === "/" ? "index.html" : path.startsWith("/") ? path.slice(1) : "";
+    if (!name || name.includes("\\") || name.split("/").some(part => !part || part === "." || part === "..") || !Object.hasOwn(trustedWebHashes, name)) return res.sendStatus(404);
+    const file = resolve(webRoot, name);
+    const info = await lstat(file).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return undefined; throw error; });
+    if (!info?.isFile() || info.size > 50 * 1024 * 1024) return res.sendStatus(404);
+    const bytes = await readFile(file);
+    if (bytes.byteLength > 50 * 1024 * 1024 || createHash("sha256").update(bytes).digest("hex") !== trustedWebHashes[name]) return res.sendStatus(404);
+    return res.set("Cache-Control", "no-store").type(extname(name)).send(bytes);
+  });
   app.use(express.static(webRoot));
 
   // 错误处理

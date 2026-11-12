@@ -33,6 +33,8 @@ import chatReasoning from "@tdesign-vue-next/chat/es/chat-reasoning";
 import type { AgentToolCall } from "@toonflow/server/agent/types";
 import messageMarkdown from "@/components/messageMarkdown.vue";
 import marketInstallApproval from "./marketInstallApproval.vue";
+import questionCard from "@toonflow/tool-ask-user/questionCard";
+import { currentUser, publicWeb } from "@/stores/multiTenant";
 
 const { tool, directory, toolSessionId } = defineProps<{ tool: AgentToolCall; directory?: string; toolSessionId?: string }>();
 const emit = defineEmits<{ copy: [content: string] }>();
@@ -42,6 +44,10 @@ watch(() => [tool.name, tool.question?.callId] as const, async ([name], previous
   let active = true;
   onCleanup(() => { active = false; });
   rendererError.value = "";
+  if (publicWeb.value && currentUser.value?.role === "user") {
+    renderer.value = name === "askUser" ? questionCard : undefined;
+    return;
+  }
   if (name === "installMarketPlugin" && !toolSessionId) {
     renderer.value = marketInstallApproval;
     return;

@@ -20,4 +20,4 @@ jobs:
         with:
           bun-version-file: package.json
       - run: bun install --frozen-lockfile
-      - run: bun run --cwd apps/server build
+      - run: bun run build:server

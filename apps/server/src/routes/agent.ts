@@ -7,6 +7,7 @@ import u from "@/utils";
 import { translateError, translateMessage } from "@/lib/i18n";
 import { thinkingLevels } from "@/lib/modelReasoning";
 import { getAgentModelConfiguration } from "@/agent/runtime/model";
+import { currentIdentity } from "@/utils/multiTenant/context";
 
 const inputSchema = z.object({
   prompt: z.string().trim(), directory: z.string().min(1),
@@ -33,7 +34,11 @@ const inputSchema = z.object({
 });
 
 export default Router().post("/", validateFields(inputSchema.shape), async (req, res) => {
-  const { directory, canvas, runId = crypto.randomUUID(), ...options } = req.body as z.infer<typeof inputSchema>;
+  const { directory, canvas, runId = crypto.randomUUID(), ...options } = inputSchema.parse(req.body);
+  if (currentIdentity()?.role === "user" && process.env.TOONFLOW_TRUSTED_CANVAS_BETA !== "1") throw Object.assign(new Error("当前账号的画布助手尚未开放"), { status: 403 });
+  if (currentIdentity()?.role === "user" && (options.mentions?.length || options.resendFrom)) {
+    throw Object.assign(new Error("当前账号暂不支持引用素材或重发历史消息"), { status: 403 });
+  }
   if (options.streamingBehavior && !options.expectedRunId) {
     throw Object.assign(new Error("排队或引导需要指定当前任务标识，请刷新对话后重试"), { status: 400 });
   }
@@ -53,21 +58,32 @@ export default Router().post("/", validateFields(inputSchema.shape), async (req,
     if (req.aborted || res.destroyed || req.socket.destroyed) close();
     controller.signal.throwIfAborted();
     const workspace = u.workspace.resolveWorkspace(req, directory);
-    const run = { runId, directory: workspace.then(cwd => cwd, () => undefined), abort: stop, finished: finished.promise };
+    const run: { runId: string; directory: Promise<string | undefined>; workspace?: string; sessionFile?: string; abort(): void; finished: Promise<void> } = { runId, directory: workspace.then(cwd => cwd, () => undefined), abort: stop, finished: finished.promise };
     unregister = u.agent.registerAgentRun(run);
     const cwd = await workspace;
+    run.workspace = process.platform === "win32" ? cwd.toLowerCase() : cwd;
     controller.signal.throwIfAborted();
     await getAgentModelConfiguration(options.providerId, options.modelId, options.thinkingLevel);
+    const actor = currentIdentity();
+    if (actor?.role === "user" && canvas?.id) {
+      if (!canvas.id.toLowerCase().endsWith(".json")) throw Object.assign(new Error("画布路径无效"), { status: 400 });
+      await u.mentionFiles.queryStoredMentionNodes(cwd, canvas.id, { limit: 1 });
+    }
     res.set({ "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no" });
     res.flushHeaders();
     send = (event: AgentEvent) => {
       if (event.type === "error") event = { ...event, message: translateMessage(event.message) };
-      if (event.type === "session") options.sessionFile = event.file;
+      if (event.type === "session") { options.sessionFile = event.file; run.sessionFile = event.file; }
       u.agent.trackAgentEvent(cwd, options.sessionFile, event);
       if (!res.destroyed && !res.writableEnded) res.write(`${JSON.stringify(event)}\n`);
     };
-    bridge = canvas ? u.canvas.createCanvasContext(cwd, canvas as CanvasInfo, send, reason => controller.abort(reason)) : undefined;
-    questions = u.question.createQuestionContext(cwd, send, stop);
+    const binding = actor?.role === "user" ? () => {
+      if (!options.sessionFile) throw new Error("会话尚未建立");
+      return { ownerId: actor.id, runId, sessionFile: options.sessionFile, canvasId: safeCanvas?.id ?? "" };
+    } : undefined;
+    const safeCanvas = actor?.role === "user" ? canvas?.id ? { ...canvas, tools: [] } : undefined : canvas;
+    bridge = safeCanvas ? u.canvas.createCanvasContext(cwd, safeCanvas as CanvasInfo, send, reason => controller.abort(reason), binding) : undefined;
+    questions = u.question.createQuestionContext(cwd, send, stop, binding);
     heartbeat = setInterval(() => {
       if (!res.destroyed && !res.writableEnded && !res.writableNeedDrain) res.write("\n");
     }, 20000);

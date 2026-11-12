@@ -130,6 +130,7 @@
         "@toonflow/provider-web": "workspace:*",
         "@toonflow/providers": "workspace:*",
         "@toonflow/server": "workspace:*",
+        "@toonflow/tool-ask-user": "workspace:*",
         "@toonflow/tool-browser": "workspace:*",
         "@toonflow/tool-canvas": "workspace:*",
         "@toonflow/tools-scaffold": "workspace:*",

@@ -65,6 +65,7 @@ export interface NodeToolsContext {
 export interface CanvasToolCall {
   name: string;
   args: Record<string, unknown>;
+  guard?: { canvasId: string; nodeTypes?: Record<string, string> };
 }
 
 export interface CanvasInfo {

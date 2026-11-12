@@ -8,6 +8,30 @@ import { loadToolModule, parseTool, validateToolConfig } from "./tools";
 
 export const nodeNameSchema = z.string().max(96).regex(/^[a-z][a-zA-Z0-9]*$/);
 export const nodesDirectory = resolve(dirname(conf.path), "nodes");
+declare const __toonflowNodeHashes__: Record<string, string> | undefined;
+const trustedNodeHashes = typeof __toonflowNodeHashes__ === "undefined" ? {} : __toonflowNodeHashes__;
+const trustedNodeNames: Record<string, string> = { videoNode: "视频", textNode: "文本", videoGenerationNode: "视频生成" };
+
+export async function readTrustedNode(name: string) {
+  const expected = trustedNodeHashes[name];
+  if (!Object.hasOwn(trustedNodeNames, name) || !expected) return undefined;
+  const path = resolve(nodesDirectory, `${name}.umd.js`);
+  const info = await lstat(path).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return undefined; throw error; });
+  if (!info?.isFile() || info.size > 20 * 1024 * 1024) return undefined;
+  const disabled = await lstat(resolve(nodesDirectory, `${name}.disabled`)).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return undefined; throw error; });
+  if (disabled) return undefined;
+  const bytes = await readFile(path);
+  if (bytes.byteLength > 20 * 1024 * 1024 || createHash("sha256").update(bytes).digest("hex") !== expected) return undefined;
+  return { bytes, displayName: trustedNodeNames[name] };
+}
+
+export async function listTrustedNodes() {
+  const results = await Promise.all(Object.keys(trustedNodeNames).map(async name => {
+    const node = await readTrustedNode(name);
+    return node ? { name, displayName: node.displayName, url: `/api/nodes/files?name=${name}`, enabled: true, config: {}, builtin: true, canConfigure: false } : undefined;
+  }));
+  return results.filter(node => node !== undefined);
+}
 export const configRulesSchema = z.array(z.record(z.string(), z.json())).max(100);
 type ConfigRule = z.infer<typeof configRulesSchema>[number];
 

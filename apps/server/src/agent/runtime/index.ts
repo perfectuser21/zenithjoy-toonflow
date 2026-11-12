@@ -31,6 +31,7 @@ import { lockWorkspaceFiles, resolveWorkspacePath } from "@/utils/workspace/file
 import { t } from "@/lib/i18n";
 import { decodeTextFile } from "@/lib/documentFormats";
 import type { ThinkingLevel } from "@/lib/modelReasoning";
+import { currentIdentity } from "@/utils/multiTenant/context";
 
 type AgentOptions = {
   prompt: string;
@@ -153,6 +154,7 @@ export async function run(
     const file = basename(history.getSessionFile()!);
     const parentFile = getParentSessionFile(history);
     const child = getSubAgentInfo(history)?.data;
+    if (currentIdentity()?.role === "user" && (parentFile || child)) throw Object.assign(new Error("当前账号不能运行团队子会话"), { status: 403 });
     const liveTools = new Map<string, AgentToolCall>();
     const publish = send;
     send = event => {
@@ -172,16 +174,17 @@ export async function run(
     unregister = registerAgentSession(history.getSessionFile()!, active);
     if (!runId) unregisterRun = registerAgentRun({ runId: active.runId, directory: Promise.resolve(cwd), abort: active.abort, finished: finished.promise });
     const tools = await createAgentTools(cwd, canvas, question);
-    if (isMemoryEnabled()) {
+    const tenantUser = currentIdentity()?.role === "user";
+    if (!tenantUser && isMemoryEnabled()) {
       const memoryTool = createMemoryTool();
       if (tools.some(tool => tool.name === memoryTool.name)) throw new Error("工具名称 memory 已被内置全局记忆工具占用");
       tools.push(memoryTool);
     }
-    if (parentFile && child) {
+    if (!tenantUser && parentFile && child) {
       if (tools.some(tool => tool.name === "report")) throw new Error("工具名称 report 已被内置上报工具占用");
       tools.push(createReportTool(cwd, parentFile, file, child.name, send));
     }
-    const teamTools = createAgentTeamTools(cwd, file, async (member, message, onReady, taskSignal) => {
+    const teamTools = tenantUser ? [] : createAgentTeamTools(cwd, file, async (member, message, onReady, taskSignal) => {
       if (!member.providerId || !member.modelId) throw new Error("目标 Agent 没有可用的模型配置，请先在其会话中选择模型");
       active.waitingForAgent = member.file;
       try {
@@ -197,7 +200,7 @@ export async function run(
       if (tools.some(existing => existing.name === tool.name)) throw new Error(t`工具名称 ${tool.name} 已被内置团队通讯工具占用`);
       tools.push(tool);
     }
-    tools.push(await createSubAgentTool({
+    if (!tenantUser) tools.push(await createSubAgentTool({
       cwd, tools, canvas, modelRuntime: runtime, model: runtimeModel, thinkingLevel: effectiveThinkingLevel,
       runTask: (name, task, taskSignal, onProgress) => runDelegatedAgent({
         cwd, parentFile: file, name, task, providerId, modelId, thinkingLevel, canvas, signal: taskSignal, send, onProgress,

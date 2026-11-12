@@ -17,6 +17,11 @@ const userRoutes = new Set(["register", "login", "session", "logout", "host"].ma
 const controlRoutes = new Set(["status", "setup", "login", "logout", "state", "enabled", "registration", "hostsession"].map(name => `/api/multitenant/${name}`));
 const userReadRoutes = new Set(["/api/ai/models", "/api/ai/media/models", "/api/multitenant/user/balance", "/api/nodes/get", "/api/nodes/files", "/api/ext/list", "/api/ext/read", "/api/tools/get"]);
 const modelWriteRoutes = new Set(["/api/ai/generate", "/api/ai/media/price", "/api/ai/media/generate", "/api/ai/media/tasks/status", "/api/ai/media/tasks/cancel"]);
+const tenantAgentRoutes = new Set([
+  "POST /api/agent", "POST /api/agent/create", "GET /api/agent/get", "GET /api/agent/list", "GET /api/agent/skills",
+  "POST /api/agent/answer", "POST /api/agent/canvasresult", "POST /api/agent/stop", "PATCH /api/agent/rename",
+  "POST /api/agent/branch", "DELETE /api/agent/message", "DELETE /api/agent/queue", "POST /api/agent/queue/steer",
+]);
 const communityReads = new Set(["getAdvertisements", "getExploreProjects", "getExploreProject", "getExploreProcess", "getExploreDownload", "getSponsorList"]
   .map(name => `/api/channel/community/${name.toLowerCase()}`));
 const platformPrefixes = ["/api/providers", "/api/plugins", "/api/mcp/servers", "/api/channel/account", "/api/channel/model", "/api/channel/provider", "/api/channel/subaccounts", "/api/channel/user", "/api/channel/wallet", "/api/channel/plugin"];
@@ -170,7 +175,8 @@ export async function multiTenantAccess(req: Request, res: Response, next: NextF
   const fileRoute = path.startsWith("/api/workspaces/") && path !== "/api/workspaces/files/reveal";
   const settingsRoute = path === "/api/settings/get" && req.method === "GET" || path === "/api/settings/save" && req.method === "PUT";
   const ownProviderKey = path === "/api/multitenant/user/providerkey" && ["GET", "PUT"].includes(req.method);
-  if (fileRoute || settingsRoute || ownProviderKey || req.method === "GET" && userReadRoutes.has(path)
+  const tenantAgent = process.env.TOONFLOW_TRUSTED_CANVAS_BETA === "1" && tenantAgentRoutes.has(`${req.method} ${path}`);
+  if (fileRoute || settingsRoute || ownProviderKey || tenantAgent || req.method === "GET" && userReadRoutes.has(path)
     || req.method === "POST" && modelWriteRoutes.has(path) || communityReads.has(path) && ["GET", "POST"].includes(req.method)) return runWithIdentity(user, next);
   throw Object.assign(new Error("当前账号尚未开放此功能"), { status: 403 });
 }

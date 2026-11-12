@@ -5,6 +5,7 @@ import { success } from "@/lib/responseFormat";
 import { translateMessage } from "@/lib/i18n";
 
 export default Router().get("/", async (req, res) => {
+  if (process.env.TOONFLOW_TRUSTED_CANVAS_BETA === "1" && u.multiTenant.requestIdentity(req)?.role === "user") return res.set("Cache-Control", "no-store").json(success([]));
   const canManage = u.workspace.isLocalWorkspaceRequest(req) === true;
   const files = await readdir(u.extPlugins.extDirectory, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return [];

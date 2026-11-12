@@ -2,6 +2,7 @@ import { computed, ref } from "vue";
 import axios from "axios";
 import { t, translate } from "@toonflow/i18n/vue";
 import { actualPlatform } from "./platform";
+import { publicWeb } from "@/stores/multiTenant";
 
 type MobileConnection = { mode: "local" | "remote"; name?: string; url?: string; online?: boolean | null; appVersion?: string; remoteAppVersion?: string };
 
@@ -25,6 +26,12 @@ let connectionRequest: Promise<MobileConnection> | undefined;
 let connectionTimer: ReturnType<typeof setTimeout> | undefined;
 
 export async function refreshMobileConnection() {
+  if (publicWeb.value) {
+    clearTimeout(connectionTimer);
+    deviceConnectionSupported.value = false;
+    deviceHubEnabled.value = false;
+    return mobileConnection.value = { mode: "local" };
+  }
   if (connectionRequest) return connectionRequest;
   clearTimeout(connectionTimer);
   connectionRequest = (async () => {
@@ -64,6 +71,7 @@ export async function refreshMobileConnection() {
 }
 
 export async function changeDeviceConnection(action: "connect" | "disconnect", body?: { qrCode: string } | { url: string; code: string }) {
+  if (publicWeb.value) throw new Error("创作入口不支持设备互联");
   if (action === "connect") {
     await refreshMobileConnection();
     if (deviceHubEnabled.value) throw new Error("请先在设置 → 设备互联中关闭“允许其他设备连接”");
