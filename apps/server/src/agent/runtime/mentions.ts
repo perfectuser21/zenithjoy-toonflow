@@ -1,11 +1,11 @@
 import { t } from "@/lib/i18n";
-import { constants, copyFile, mkdir, stat, unlink } from "@toonflow/file";
+import { mkdir, stat, unlink } from "@toonflow/file";
 import { extname } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import type { AgentMention } from "@/agent/runtime/types";
 import { getAssetsDirectory } from "@/utils/assets";
-import { lockWorkspaceFiles, resolveWorkspacePath } from "@/utils/workspace/files";
+import { copyWorkspaceFile, lockWorkspaceFiles, resolveWorkspacePath } from "@/utils/workspace/files";
 import { getReadableFileExtension } from "@/lib/documentFormats";
 
 const mediaTypes = new Set(["IMAGE", "MASK", "VIDEO", "AUDIO", "FILE"]);
@@ -105,7 +105,7 @@ export async function snapshotMentions(cwd: string, mentions: AgentMention[], sa
       const release = lockWorkspaceFiles([source, target.path]);
       try {
         await mkdir(folder.path, { recursive: true });
-        await copyFile(source, target.path, constants.COPYFILE_EXCL);
+        await copyWorkspaceFile(source, target.path);
         created.push(target.path);
         signal?.throwIfAborted();
         const info = await stat(target.path);

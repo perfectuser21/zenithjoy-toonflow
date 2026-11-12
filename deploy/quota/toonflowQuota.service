@@ -1,0 +1,18 @@
+[Unit]
+Description=Toonflow project quota helper
+After=local-fs.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+EnvironmentFile=/etc/toonflowQuota.env
+ExecStartPre=/usr/bin/mountpoint -q ${TOONFLOW_QUOTA_VOLUME}
+ExecStart=/usr/bin/python3 /opt/toonflow/quota/quotaHelper.py ${TOONFLOW_QUOTA_ROOT} ${TOONFLOW_QUOTA_SOCKET} ${TOONFLOW_SERVER_UID} ${TOONFLOW_SERVER_GID} ${TOONFLOW_AUTH_DB}
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

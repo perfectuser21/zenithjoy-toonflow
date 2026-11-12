@@ -1,9 +1,9 @@
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import { formatDimensionNote, resizeImage } from "@earendil-works/pi-coding-agent";
-import { mkdir, readFile, realpath, stat, writeAtomic } from "@toonflow/file";
+import { mkdir, readFile, realpath, stat } from "@toonflow/file";
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { resolveWorkspacePath } from "@/utils/workspace/files";
+import { resolveWorkspacePath, writeWorkspaceFile } from "@/utils/workspace/files";
 import { t } from "@/lib/i18n";
 
 export type AgentImageReference = { id: string; path: string; sourcePath: string; mimeType: string; bytes: number; note?: string };
@@ -47,7 +47,7 @@ async function saveImageBytes(cwd: string, bytes: Uint8Array, mimeType: string, 
   const relativePath = `.agent/attachments/${hash}.${imageExtension(mimeType)}`;
   const target = await resolveWorkspacePath(cwd, relativePath, true);
   signal?.throwIfAborted();
-  try { await writeAtomic(target.path, bytes, { exclusive: true }); }
+  try { await writeWorkspaceFile(target.path, bytes, true); }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     const saved = await readFile((await resolveWorkspacePath(cwd, relativePath)).path, { signal });
@@ -106,7 +106,7 @@ export async function saveAgentImage(cwd: string, image: ImageContent, id: strin
     const note = formatDimensionNote(resized);
     cached = { path, sourcePath, mimeType: outputMimeType, bytes: bytes.byteLength, ...(note ? { note } : {}) };
     signal?.throwIfAborted();
-    await writeAtomic(cachePath.path, JSON.stringify(cached));
+    await writeWorkspaceFile(cachePath.path, JSON.stringify(cached));
   }
   signal?.throwIfAborted();
   return {

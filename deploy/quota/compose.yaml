@@ -1,0 +1,25 @@
+# 显式选择：宿主必须事先准备固定容量 ext4 prjquota 挂载和配额 helper。
+services:
+  toonflow:
+    build:
+      context: ../..
+    init: true
+    restart: unless-stopped
+    user: "1000:1000"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      NODE_ENV: production
+      TOONFLOW_DATA_DIR: /app/data
+      TOONFLOW_PROJECT_QUOTA_ROOT: /app/data/projectQuota
+      TMPDIR: /app/data/tmp
+    ports:
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:10888:10888"
+    volumes:
+      - type: bind
+        source: ${TOONFLOW_QUOTA_VOLUME:?需要指定预先挂载的固定容量 ext4 项目配额卷}
+        target: /app/data

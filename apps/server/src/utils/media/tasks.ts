@@ -12,6 +12,7 @@ import conf from "@/utils/conf";
 import { generateMedia, isMediaNotSubmitted, type MediaGenerationCheckpoint } from "@/utils/media/generation";
 import { lockWorkspaceFiles, resolveWorkspacePath } from "@/utils/workspace/files";
 import { modelGateway } from "@/utils/multiTenant/gateway";
+import { projectQuotaRoot } from "@/utils/workspace/projectQuota";
 import { readPriceReference } from "@/utils/media/priceReference";
 
 const maxRecordSize = 16 * 1024 * 1024;
@@ -98,9 +99,19 @@ function assertOwner(task: MediaTask, owner?: AuthIdentity | null) {
   }
 }
 function identity(value: string) { return process.platform === "win32" ? value.toLowerCase() : value; }
-function taskPath(cwd: string, taskId: string) {
+function taskPath(cwd: string, taskId: string, owner?: AuthIdentity | null) {
   z.uuid().parse(taskId);
-  return join(dirname(conf.path), "mediaTasks", `workspace${createHash("sha256").update(identity(cwd)).digest("hex")}`, `task${taskId.replaceAll("-", "").toLowerCase()}.json`);
+  const root = projectQuotaRoot();
+  let storage = join(dirname(conf.path), root && owner?.role !== "user" ? "adminMediaTasks" : "mediaTasks");
+  if (root && owner?.role === "user") {
+    const workspaceRoot = join(root, "quotaWorkspaces");
+    const offset = relative(workspaceRoot, cwd).split(/[\\/]/);
+    if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(offset[0] ?? "") || offset[1] !== "workspace" || offset[0] !== owner.id) {
+      throw Object.assign(new Error("媒体任务未绑定受保护的用户工作区"), { status: 403 });
+    }
+    storage = join(workspaceRoot, offset[0], "private", "mediaTasks");
+  }
+  return join(storage, `workspace${createHash("sha256").update(identity(cwd)).digest("hex")}`, `task${taskId.replaceAll("-", "").toLowerCase()}.json`);
 }
 function serialize(value: unknown) {
   return JSON.stringify(value, (_key, item) => item && typeof item === "object" && !Array.isArray(item)
@@ -470,7 +481,7 @@ export async function start(cwd: string, taskId: string, mediaType: "image" | "v
   attachment: TaskOwner = {}, owner?: AuthIdentity | null) {
   requireOwner(owner);
   cwd = await realpath(cwd);
-  const key = taskPath(cwd, taskId);
+  const key = taskPath(cwd, taskId, owner);
   const parsed = requestSchemas[mediaType].parse(request);
   if (attachment.nodeId !== undefined) z.string().min(1).max(512).parse(attachment.nodeId);
   if (attachment.canvasPath !== undefined) {
@@ -524,7 +535,7 @@ export async function status(cwd: string, taskIds: string[], resume = false, own
   requireOwner(owner);
   cwd = await realpath(cwd);
   return Promise.all(taskIds.map(taskId => {
-    const key = taskPath(cwd, taskId);
+    const key = taskPath(cwd, taskId, owner);
     return locked(key, async () => {
       const task = await load(cwd, taskId, key, owner);
       if (!task) return { taskId, state: "interrupted" as const, resumable: false, result: error<GeneratedMedia[]>("生成任务不存在", null, 404) };
@@ -548,7 +559,7 @@ export async function cancel(cwd: string, taskIds: string[], owner?: AuthIdentit
   requireOwner(owner);
   cwd = await realpath(cwd);
   await Promise.all(taskIds.map(taskId => {
-    const key = taskPath(cwd, taskId);
+    const key = taskPath(cwd, taskId, owner);
     return locked(key, async () => {
       let task = await load(cwd, taskId, key, owner);
       const now = Date.now();
@@ -578,7 +589,7 @@ export async function wait(cwd: string, taskId: string, owner?: AuthIdentity | n
   requireOwner(owner);
   if (signal?.aborted) { await cancel(cwd, [taskId], owner); signal.throwIfAborted(); }
   cwd = await realpath(cwd);
-  const task = await load(cwd, taskId, taskPath(cwd, taskId), owner);
+  const task = await load(cwd, taskId, taskPath(cwd, taskId, owner), owner);
   if (!task) invalid("生成任务不存在", 404);
   let abort: (() => void) | undefined;
   try {

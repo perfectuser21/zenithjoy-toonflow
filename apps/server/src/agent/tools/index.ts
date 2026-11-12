@@ -1,3 +1,4 @@
+import { withWorkspaceQuota } from "@/utils/workspace/quota";
 import { t } from "@/lib/i18n";
 import { listMediaModels, generateMedia } from "@/utils/media/generation";
 import { createWorkspaceFfmpeg, executeWorkspaceFfmpeg } from "@/utils/ffmpeg";
@@ -121,7 +122,8 @@ export function createAgentToolContext(cwd: string, config: Record<string, unkno
       await removeWorkspaceFile(cwd, target, recursive);
     }),
     copyFile: (path, target, exclusive = false) => withWritePaths([path, target], async ([source, destination]) => {
-      await copyFile(source, destination, exclusive ? constants.COPYFILE_EXCL : 0);
+      const info = await stat(source);
+      await withWorkspaceQuota(destination, info.size, !exclusive, () => copyFile(source, destination, exclusive ? constants.COPYFILE_EXCL : 0));
     }),
   };
   return {
