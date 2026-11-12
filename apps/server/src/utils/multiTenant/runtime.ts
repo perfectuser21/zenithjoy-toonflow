@@ -197,7 +197,8 @@ export async function multiTenantAccess(req: Request, res: Response, next: NextF
   if (user.role === "admin") return runWithIdentity(user, next);
   const fileRoute = path.startsWith("/api/workspaces/") && path !== "/api/workspaces/files/reveal";
   const settingsRoute = path === "/api/settings/get" && req.method === "GET" || path === "/api/settings/save" && req.method === "PUT";
-  const ownProviderKey = path === "/api/multitenant/user/providerkey" && ["GET", "PUT"].includes(req.method);
+  const ownProviderKey = path === "/api/multitenant/user/providerkey" && ["GET", "PUT"].includes(req.method)
+    || path === "/api/multitenant/user/providerkey/unbind" && req.method === "POST";
   const tenantAgent = process.env.TOONFLOW_TRUSTED_CANVAS_BETA === "1" && tenantAgentRoutes.has(`${req.method} ${path}`);
   if (fileRoute || settingsRoute || ownProviderKey || tenantAgent || backgroundBeta || backgroundProduction || backgroundReadOnly || req.method === "GET" && userReadRoutes.has(path)
     || req.method === "POST" && modelWriteRoutes.has(path) || communityReads.has(path) && ["GET", "POST"].includes(req.method)) return runWithIdentity(user, next);
