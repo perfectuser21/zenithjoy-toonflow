@@ -1,8 +1,9 @@
 import { Database } from "bun:sqlite";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { and, asc, count, desc, eq, getTableColumns, sql } from "drizzle-orm";
-import { sqliteAdmin, sqliteBillingLedger, sqliteModelRouting, sqliteSettings, sqliteSourceMapping, sqliteUser, sqliteUserProviderGuard, sqliteUserProviderKey, sqliteWallet, sqliteWebSession } from "./schema";
+import { sqliteAdmin, sqliteBackgroundJob, sqliteBillingLedger, sqliteModelRouting, sqliteSettings, sqliteSourceMapping, sqliteUser, sqliteUserProviderGuard, sqliteUserProviderKey, sqliteWallet, sqliteWebSession } from "./schema";
 import type { AdminDatabase } from "./schema";
+import { backgroundJobKeySchema, backgroundJobCreateSchema, backgroundJobLeaseSchema, backgroundJobRenewSchema, backgroundJobUpdateSchema, backgroundJobReleaseSchema } from "./backgroundJobs";
 import { maxWalletMicros, validateWalletAmount, walletBalanceOverflow, walletSettlementExceeded, walletStateConflict } from "./billing";
 
 export function connectSqlite(file: string): AdminDatabase {
@@ -18,7 +19,59 @@ export function connectSqlite(file: string): AdminDatabase {
       || wallet.reservedMicros < 0 || wallet.balanceMicros < wallet.reservedMicros || wallet.balanceMicros > maxWalletMicros) walletStateConflict();
     return wallet;
   }
+  const backgroundNow = sql`CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)`;
+  function backgroundIdentity(input: { jobId: string; ownerId: string; workspaceHash: string }) {
+    return and(eq(sqliteBackgroundJob.jobId, input.jobId), eq(sqliteBackgroundJob.ownerId, input.ownerId), eq(sqliteBackgroundJob.workspaceHash, input.workspaceHash));
+  }
+  function backgroundLease(input: { jobId: string; ownerId: string; workspaceHash: string; leaseOwner: string; generation: number }) {
+    return and(backgroundIdentity(input), eq(sqliteBackgroundJob.leaseOwner, input.leaseOwner), eq(sqliteBackgroundJob.leaseGeneration, input.generation), sql`${sqliteBackgroundJob.leaseUntil} > ${backgroundNow}`);
+  }
   return {
+    async initializeBackgroundJobs() {
+      db.run(sql`CREATE TABLE IF NOT EXISTS "multiTenantBackgroundJob" (
+        "jobId" TEXT PRIMARY KEY NOT NULL, "ownerId" TEXT NOT NULL, "workspaceHash" TEXT NOT NULL, "payload" TEXT NOT NULL,
+        "revision" INTEGER NOT NULL, "leaseOwner" TEXT, "leaseUntil" INTEGER NOT NULL, "leaseGeneration" INTEGER NOT NULL
+      )`);
+    },
+    async createBackgroundJob(input) {
+      const value = backgroundJobCreateSchema.parse(input);
+      return db.insert(sqliteBackgroundJob).values({ ...value, revision: 1, leaseOwner: null, leaseUntil: 0, leaseGeneration: 0 })
+        .onConflictDoNothing({ target: sqliteBackgroundJob.jobId }).returning({ jobId: sqliteBackgroundJob.jobId }).get() !== undefined;
+    },
+    async getBackgroundJob(input) {
+      const value = backgroundJobKeySchema.parse(input);
+      return db.select().from(sqliteBackgroundJob).where(backgroundIdentity(value)).get();
+    },
+    async acquireBackgroundJobLease(input) {
+      const value = backgroundJobLeaseSchema.parse(input);
+      try {
+        return db.update(sqliteBackgroundJob).set({ leaseOwner: value.leaseOwner, leaseUntil: sql`${backgroundNow} + ${value.ttlMs}`, leaseGeneration: sql`${sqliteBackgroundJob.leaseGeneration} + 1` })
+          .where(and(backgroundIdentity(value), sql`${sqliteBackgroundJob.leaseUntil} <= ${backgroundNow}`, sql`${sqliteBackgroundJob.leaseGeneration} < 2147483646`))
+          .returning({ jobId: sqliteBackgroundJob.jobId }).get() !== undefined;
+      } catch (error) {
+        // SQLite did not execute the atomic statement when another writer holds its lock.
+        // Treat this as contention, never as an acquired lease.
+        const failure = error as { code?: string; cause?: { code?: string } };
+        if ([failure.code, failure.cause?.code].some((code) => code === "SQLITE_BUSY" || code === "SQLITE_LOCKED")) return false;
+        throw error;
+      }
+    },
+    async renewBackgroundJobLease(input) {
+      const value = backgroundJobRenewSchema.parse(input);
+      return db.update(sqliteBackgroundJob).set({ leaseUntil: sql`${backgroundNow} + ${value.ttlMs}` }).where(backgroundLease(value))
+        .returning({ jobId: sqliteBackgroundJob.jobId }).get() !== undefined;
+    },
+    async updateBackgroundJob(input) {
+      const value = backgroundJobUpdateSchema.parse(input);
+      return db.update(sqliteBackgroundJob).set({ payload: value.payload, revision: sql`${sqliteBackgroundJob.revision} + 1` })
+        .where(and(backgroundLease(value), eq(sqliteBackgroundJob.revision, value.expectedRevision)))
+        .returning({ jobId: sqliteBackgroundJob.jobId }).get() !== undefined;
+    },
+    async releaseBackgroundJobLease(input) {
+      const value = backgroundJobReleaseSchema.parse(input);
+      return db.update(sqliteBackgroundJob).set({ leaseOwner: null, leaseUntil: 0 }).where(backgroundLease(value))
+        .returning({ jobId: sqliteBackgroundJob.jobId }).get() !== undefined;
+    },
     async close() { client.close(); },
     async initializeSettings() {
       // 平台策略只在显式初始化或保存时创建；读取旧库不补表，也不覆盖已有关闭状态。

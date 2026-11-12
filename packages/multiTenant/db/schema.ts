@@ -161,6 +161,17 @@ export const mysqlUserProviderGuard = mysqlTable("multiTenantUserProviderGuard",
   id: int("id").primaryKey(), cipher: varchar("cipher", { length: 8192 }).notNull(),
 });
 
+export const sqliteBackgroundJob = sqliteTable("multiTenantBackgroundJob", {
+  jobId: text("jobId").primaryKey(), ownerId: text("ownerId").notNull(), workspaceHash: text("workspaceHash").notNull(),
+  payload: text("payload", { mode: "json" }).$type<Record<string, unknown>>().notNull(), revision: integer("revision").notNull(),
+  leaseOwner: text("leaseOwner"), leaseUntil: integer("leaseUntil").notNull(), leaseGeneration: integer("leaseGeneration").notNull(),
+});
+export const mysqlBackgroundJob = mysqlTable("multiTenantBackgroundJob", {
+  jobId: varchar("jobId", { length: 36 }).primaryKey(), ownerId: varchar("ownerId", { length: 64 }).notNull(), workspaceHash: varchar("workspaceHash", { length: 64 }).notNull(),
+  payload: json("payload").$type<Record<string, unknown>>().notNull(), revision: int("revision").notNull(),
+  leaseOwner: varchar("leaseOwner", { length: 36 }), leaseUntil: bigint("leaseUntil", { mode: "number" }).notNull(), leaseGeneration: int("leaseGeneration").notNull(),
+});
+
 export type AdminRecord = typeof sqliteAdmin.$inferSelect;
 export type AdminUpdate = Partial<Omit<AdminRecord, "id" | "userName" | "passwordHash">>;
 export type UserRecord = typeof sqliteUser.$inferSelect;
@@ -191,6 +202,13 @@ export type AdminDatabase = {
   getUserProviderKey(userId: string, providerId: string): Promise<{ cipher: string; revision: number } | undefined>;
   initializeUserProviderKeys(): Promise<void>;
   writeUserProviderKey(userId: string, providerId: string, cipher: string, expectedRevision: number): Promise<boolean>;
+  initializeBackgroundJobs(): Promise<void>;
+  createBackgroundJob(input: import("./backgroundJobs").BackgroundJobCreate): Promise<boolean>;
+  getBackgroundJob(input: import("./backgroundJobs").BackgroundJobKey): Promise<import("./backgroundJobs").BackgroundJobRecord | undefined>;
+  acquireBackgroundJobLease(input: import("./backgroundJobs").BackgroundJobLease): Promise<boolean>;
+  renewBackgroundJobLease(input: import("./backgroundJobs").BackgroundJobRenew): Promise<boolean>;
+  updateBackgroundJob(input: import("./backgroundJobs").BackgroundJobUpdate): Promise<boolean>;
+  releaseBackgroundJobLease(input: import("./backgroundJobs").BackgroundJobRelease): Promise<boolean>;
   initializeBilling(): Promise<void>;
   getWallets(userId: string): Promise<WalletRecord[]>;
   getBillingRecord(requestId: string): Promise<BillingRecord | undefined>;
