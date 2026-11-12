@@ -69,7 +69,7 @@ function imageOptions(value: unknown, pattern: RegExp) {
 }
 
 export async function listMediaModels(): Promise<MediaModel[]> {
-  if (modelGateway.enabled()) return modelGateway.catalog(["image", "video", "audio"]);
+  if (modelGateway.enabled()) return modelGateway.catalog(["image", "video", "audio"], currentIdentity());
   const installedProviders = await listMediaProviders();
   installedProviders.sort((left, right) => Number(right.id === "toonflow") - Number(left.id === "toonflow"));
   return installedProviders.filter(provider => provider.id !== "toonflow" || !!getAccountProvider()).flatMap(provider => provider.models.flatMap(model => {
@@ -224,6 +224,7 @@ export async function getMediaPrice(directory: string | undefined, mediaType: "i
     const actor = currentIdentity();
     if (!actor) throw Object.assign(new Error("请先登录 Toonflow"), { status: 401 });
     const quote = await modelGateway.quoteRequest(mediaType, request.providerId, request.modelId, request, { actor: { id: actor.id, role: actor.role } });
+    if (quote.billingMode === "userProvider") return { price: "模型费用由您的阿里云账号收取，具体以阿里云账单为准。", tips: "模型费用由您的阿里云账号收取，具体以阿里云账单为准。" };
     return { ...quote, price: `${quote.amount} ${quote.currency}`, tips: translateMessage("平台售价，按实际用量结算") };
   }
   const { provider } = await configuredProvider(request, mediaType, signal, directory);

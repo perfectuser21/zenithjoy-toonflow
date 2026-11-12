@@ -1,6 +1,6 @@
 <template>
   <el-tooltip v-model:visible="infoVisible" :content="priceLabel" :disabled="!priceLabel" placement="top" :showArrow="false" :trigger="['hover', 'focus']" :triggerKeys="[]" :popperStyle="{ maxWidth: '280px', lineHeight: '1.6', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }">
-    <button type="button" class="mediaPrice" :aria-label="price?.price || priceLabel" :aria-busy="loading" @pointerdown.stop @click.stop="infoVisible = Boolean(priceLabel)">
+    <button type="button" class="mediaPrice" :class="{ externalPrice: price?.price === '模型费用由您的阿里云账号收取，具体以阿里云账单为准。' }" :aria-label="price?.price || priceLabel" :aria-busy="loading" @pointerdown.stop @click.stop="infoVisible = Boolean(priceLabel)">
       <span>{{ loading ? "正在估价…" : price ? price.price : "无法计算价格" }}</span>
       <icon-info-circle v-if="!loading && (!price || price.tips)" :size="14" aria-hidden="true" />
     </button>
@@ -79,5 +79,7 @@ watch([() => JSON.stringify(props.input), () => props.supported, currentDirector
   > svg { flex-shrink: 0; transform: translateY(1px); }
   &:hover { color: var(--el-text-color-primary); }
   &:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 3px; border-radius: 2px; }
+  &.externalPrice { max-width: 320px; text-align: left; white-space: normal; }
+  &.externalPrice > span { overflow: visible; }
 }
 </style>
