@@ -3,6 +3,7 @@
   "version": "2.0.0",
   "private": true,
   "type": "module",
+  "exports": { "./questionCard": "./src/questionCard.vue" },
   "scripts": {
     "build": "bun build.ts",
     "typecheck": "vue-tsc --noEmit"

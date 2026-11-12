@@ -95,6 +95,10 @@ export function useCanvasTools(options: {
           return await Promise.race([
             Promise.resolve().then(async () => {
               canvasSignal.throwIfAborted();
+              if (request.guard?.canvasId !== undefined && request.guard.canvasId !== options.getCanvasBinding().id) throw new Error("画布已切换，请重新发送消息");
+              for (const [nodeId, type] of Object.entries(request.guard?.nodeTypes ?? {})) {
+                if (flow.findNode(nodeId)?.type !== type) throw new Error("画布节点已变化，请保存后重试");
+              }
               let result = await execute(request, callSignal, id);
               callSignal.throwIfAborted();
               if (changesCanvas) {

@@ -3,7 +3,8 @@ import { listMediaModels, generateMedia } from "@/utils/media/generation";
 import { createWorkspaceFfmpeg, executeWorkspaceFfmpeg } from "@/utils/ffmpeg";
 import { createBrowserContext } from "@/utils/browser";
 import { createSandboxContext } from "@toonflow/tool-sandbox/host";
-import { canvasSchemas, isNodeToolAllowed, nodeToolPermissionsSchema } from "@toonflow/tool-canvas/runtime";
+import { canvasOperations, canvasSchemas, isNodeToolAllowed, nodeToolPermissionsSchema } from "@toonflow/tool-canvas/runtime";
+import { z } from "zod";
 import { getRuntimePlatform } from "@/lib/platform";
 import { importImage } from "@/utils/workspace/chatImages";
 import { basename, dirname, join, relative, resolve } from "node:path";
@@ -170,8 +171,29 @@ export function createAgentToolContext(cwd: string, config: Record<string, unkno
 }
 
 export async function createAgentTools(cwd: string, canvas?: CanvasContext, question?: QuestionContext, includeMcp = true): Promise<ToolDefinition[]> {
-  // 普通账号的画布工具和回执尚未完成租户隔离审计，任何入口误开放时仍须默认拒绝。
-  if (currentIdentity()?.role === "user") throw Object.assign(new Error("当前账号的画布助手尚未开放"), { status: 403 });
+  if (currentIdentity()?.role === "user") {
+    const allowed = new Set(["getCanvas", "findCanvasNodes", "getCanvasNodes", "getCanvasEdges", "addNode", "connectNodes"]);
+    const tools: ToolDefinition[] = canvas ? canvasOperations.filter(operation => allowed.has(operation.name)).map(operation => ({
+      name: operation.name, label: operation.label, description: operation.name === "addNode"
+        ? "在当前画布新增节点。文本节点 type 为 remote-textNode，视频素材节点为 remote-videoNode，视频生成节点为 remote-videoGenerationNode；这些是完整类型名，不要使用 text 或 video。"
+        : operation.name === "connectNodes" ? "连接已保存画布中的节点。仅支持视频素材 video → 文本 in、视频素材 video → 视频生成 in、文本 text → 视频生成 in。" : operation.description,
+      parameters: z.toJSONSchema(operation.name === "addNode" ? canvasSchemas.addNode.extend({ type: z.enum(["remote-textNode", "remote-videoNode", "remote-videoGenerationNode"]) }) : operation.parameters, { io: "input", target: "draft-07" }),
+      executionMode: "sequential" as const,
+      async execute(_id, params, signal) {
+        const args = operation.parameters.parse(params) as Record<string, unknown>;
+        if (args.canvasId !== undefined && args.canvasId !== canvas.id) throw new Error("只能操作本次会话绑定的画布");
+        const callArgs = operation.name === "addNode" || operation.name === "connectNodes" ? args : { ...args, canvasId: canvas.id };
+        const result = await canvas.call({ name: operation.name, args: callArgs }, signal);
+        return { content: [{ type: "text" as const, text: JSON.stringify({ source: "客户端画布回传，未由服务端核验或证明保存", data: result ?? null }) }], details: result };
+      },
+    })) : [];
+    if (question) {
+      const schema = z.object({ title: z.string().trim().min(1).max(100), question: z.string().trim().min(1).max(4000), options: z.array(z.string().trim().min(1).max(300)).max(8).optional() });
+      tools.push({ name: "askUser", label: "提问器", description: "向用户提问并等待回答。", parameters: z.toJSONSchema(schema, { io: "input", target: "draft-07" }), executionMode: "sequential",
+        async execute(id, params, signal) { const result = await question.ask(id, schema.parse(params), signal); return { content: [{ type: "text", text: JSON.stringify(result) }], details: result }; } });
+    }
+    return tools;
+  }
   const tools = createPluginMarketTools(question);
   const names = new Set(tools.map(tool => tool.name));
   const context = createAgentToolContext(cwd, {}, canvas, question);

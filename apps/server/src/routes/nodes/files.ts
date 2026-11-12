@@ -11,6 +11,11 @@ const router = Router();
 
 export default router.get("/", validateFields({ name: z.string().regex(/^[a-z][a-zA-Z0-9]*$/) }, "query"), async (req, res) => {
   const name = req.query.name as string;
+  if (process.env.TOONFLOW_TRUSTED_CANVAS_BETA === "1" && u.multiTenant.requestIdentity(req)?.role === "user") {
+    const node = await u.nodePlugins.readTrustedNode(name);
+    if (!node) return res.status(404).json(error("节点不存在或未通过校验", null, 404));
+    return res.set("Cache-Control", "no-store").type("application/javascript").send(node.bytes);
+  }
   const nodesDirectory = resolve(dirname(u.conf.path), "nodes");
   const filePath = resolve(nodesDirectory, `${name}.umd.js`);
   const file = await lstat(filePath).catch((err: NodeJS.ErrnoException) => {

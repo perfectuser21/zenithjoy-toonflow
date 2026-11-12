@@ -17,4 +17,5 @@ for (const group of ["nodes", "tools", "ext"]) {
 }
 
 await $`${process.execPath} run build`.cwd(resolve(projectDir, "apps/web"));
-await $`${process.execPath} run build`.cwd(resolve(projectDir, "apps/server"));
+await $`${process.execPath} run build`.cwd(resolve(projectDir, "apps/server"))
+  .env({ ...process.env, TOONFLOW_RELEASE_PREREQUISITES: "1" });

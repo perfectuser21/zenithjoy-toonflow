@@ -8,6 +8,7 @@ const router = Router();
 
 export default router.get("/", async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
+  if (process.env.TOONFLOW_TRUSTED_CANVAS_BETA === "1" && u.multiTenant.requestIdentity(req)?.role === "user") return res.json(success(await u.nodePlugins.listTrustedNodes()));
   const canConfigure = u.workspace.isLocalWorkspaceRequest(req);
   const files = await readdir(u.nodePlugins.nodesDirectory, { withFileTypes: true }).catch((err: NodeJS.ErrnoException) => {
     if (err.code === "ENOENT") return [];

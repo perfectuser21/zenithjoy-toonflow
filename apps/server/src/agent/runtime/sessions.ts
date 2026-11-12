@@ -12,6 +12,7 @@ import { lockWorkspaceFiles, resolveWorkspacePath, writeWorkspaceFile } from "@/
 import { getReadableFileMimeType } from "@/lib/documentFormats";
 import { thinkingLevels } from "@/lib/modelReasoning";
 import { translateMessage } from "@/lib/i18n";
+import { currentIdentity } from "@/utils/multiTenant/context";
 
 export const agentAttachmentsSchema = z
   .array(
@@ -51,6 +52,7 @@ export function getAgentTaskId(entry?: SessionEntry) {
 
 export type ActiveAgentSession = {
   runId: string;
+  ownerId?: string;
   signal: AbortSignal;
   queueRevision: number;
   history: SessionManager; session?: AgentSession; send: (event: AgentEvent) => void;
@@ -75,31 +77,54 @@ const queuedMessageIds = new WeakMap<object, string>();
 const sessionKey = (path: string) => process.platform === "win32" ? resolve(path).toLowerCase() : resolve(path);
 type ActiveAgentRun = {
   runId: string; directory: Promise<string | undefined>;
+  ownerId?: string; workspace?: string; sessionFile?: string;
   abort(): void; finished: Promise<void>;
 };
 // ACT: 请求进入时即登记，停止操作也覆盖工作区授权和 SDK 初始化期间；进程退出后不恢复任务。
 const activeRuns = new Map<string, ActiveAgentRun>();
+const runKey = (runId: string, ownerId?: string) => `${ownerId ?? ""}\0${runId}`;
 
 export function registerAgentRun(run: ActiveAgentRun) {
-  if (activeRuns.has(run.runId)) throw Object.assign(new Error("Agent 请求标识已存在"), { status: 409 });
-  activeRuns.set(run.runId, run);
-  return () => { activeRuns.delete(run.runId); };
+  run.ownerId = currentIdentity()?.id;
+  const key = runKey(run.runId, run.ownerId);
+  if (activeRuns.has(key)) throw Object.assign(new Error("Agent 请求标识已存在"), { status: 409 });
+  activeRuns.set(key, run);
+  return () => { if (activeRuns.get(key) === run) activeRuns.delete(key); };
 }
 
 export async function stopAgentRuns(cwd: string, runIds: string[]) {
   const directory = sessionKey(cwd);
   await Promise.all([...new Set(runIds)].map(async runId => {
-    const run = activeRuns.get(runId);
+    const actor = currentIdentity();
+    const key = runKey(runId, actor?.id);
+    const run = activeRuns.get(key);
     if (!run) return;
+    if (actor?.role === "user" && run.ownerId !== actor.id) return;
     const path = await run.directory;
-    if (!path || sessionKey(path) !== directory || activeRuns.get(runId) !== run) return;
+    if (!path || sessionKey(path) !== directory || activeRuns.get(key) !== run) return;
+    if (actor?.role === "user" && run.sessionFile) {
+      const active = getActiveAgentSession(resolve(path, ".agent/sessions", run.sessionFile));
+      if (!active || active.ownerId !== actor.id || active.runId !== runId) return;
+    }
     run.abort();
     await run.finished;
   }));
 }
 
 export function getActiveAgentSession(path: string) {
-  return activeSessions.get(sessionKey(path));
+  const active = activeSessions.get(sessionKey(path));
+  const actor = currentIdentity();
+  if (actor?.role === "user" && active && active.ownerId !== actor.id) throw Object.assign(new Error("会话不存在或已结束"), { status: 404 });
+  return active;
+}
+
+export function verifyAgentCall(cwd: string, binding: { ownerId: string; runId: string; sessionFile: string }) {
+  const actor = currentIdentity();
+  if (!actor || actor.role !== "user" || actor.id !== binding.ownerId || !/^[\w-]+\.jsonl$/.test(binding.sessionFile)) return false;
+  const active = getActiveAgentSession(resolve(cwd, ".agent/sessions", binding.sessionFile));
+  const run = activeRuns.get(runKey(binding.runId, actor.id));
+  return !!active && !active.signal.aborted && active.ownerId === actor.id && active.runId === binding.runId
+    && !!run && run.ownerId === actor.id && run.workspace === sessionKey(cwd) && run.sessionFile === binding.sessionFile;
 }
 
 export function getQueuedMessageId(message: object) {
@@ -182,6 +207,7 @@ export function trackAgentEvent(cwd: string, file: string | undefined, event: Ag
 
 export function registerAgentSession(path: string, active: ActiveAgentSession) {
   const key = sessionKey(path);
+  active.ownerId = currentIdentity()?.id;
   activeSessions.set(key, active);
   return () => { if (activeSessions.get(key) === active) activeSessions.delete(key); };
 }
