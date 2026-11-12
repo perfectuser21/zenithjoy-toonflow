@@ -3,6 +3,10 @@ import type { Application, Request, Response, NextFunction } from "express";
 import type { Server } from "node:http";
 import type { Socket } from "node:net";
 import { posix } from "node:path";
+import { dirname, isAbsolute, relative, sep } from "node:path";
+import { realpathSync } from "@toonflow/file";
+import { tmpdir } from "node:os";
+import conf from "@/utils/conf";
 import type { AuthIdentity } from "@toonflow/multi-tenant-auth";
 import { authenticateHost, authenticateWeb } from "./index";
 import { creationPort, isEnabled } from "./mode";
@@ -18,6 +22,17 @@ const userRoutes = new Set(["register", "login", "session", "logout", "host"].ma
 const controlRoutes = new Set(["status", "setup", "login", "logout", "state", "enabled", "registration", "hostsession"].map(name => `/api/multitenant/${name}`));
 const userReadRoutes = new Set(["/api/ai/models", "/api/ai/media/models", "/api/multitenant/user/balance", "/api/nodes/get", "/api/nodes/files", "/api/ext/list", "/api/ext/read", "/api/tools/get"]);
 const modelWriteRoutes = new Set(["/api/ai/generate", "/api/ai/media/price", "/api/ai/media/generate", "/api/ai/media/tasks/status", "/api/ai/media/tasks/cancel"]);
+const backgroundBetaRoutes = new Set(["/api/ai/media/background/frame", "/api/ai/media/background/plan", "/api/ai/media/background/prepare",
+  "/api/ai/media/background/confirm", "/api/ai/media/background/status", "/api/ai/media/background/cancel", "/api/ai/media/background/finish",
+  "/api/ai/media/background/cleanup", "/api/ai/media/background/reservations"]);
+function isolatedBackgroundBeta() {
+  if (process.env.TOONFLOW_BACKGROUND_BETA !== "1") return false;
+  try {
+    const root = realpathSync(tmpdir()), directory = realpathSync(dirname(conf.path));
+    const path = relative(root, directory);
+    return !!path && path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path);
+  } catch { return false; }
+}
 const tenantAgentRoutes = new Set([
   "POST /api/agent", "POST /api/agent/create", "GET /api/agent/get", "GET /api/agent/list", "GET /api/agent/skills",
   "POST /api/agent/answer", "POST /api/agent/canvasresult", "POST /api/agent/stop", "PATCH /api/agent/rename",
@@ -155,9 +170,12 @@ export function requestIdentity(req: Request): AuthIdentity | undefined {
 }
 
 export async function multiTenantAccess(req: Request, res: Response, next: NextFunction) {
-  if (!isEnabled()) return next();
   const path = accessPath(req);
   if (path === null) return next();
+  const backgroundRoute = path.startsWith("/api/ai/media/background/");
+  const backgroundBeta = req.method === "POST" && backgroundBetaRoutes.has(path) && isolatedBackgroundBeta();
+  if (backgroundRoute && !backgroundBeta) throw Object.assign(new Error("长视频换背景尚未在此环境开放"), { status: 403 });
+  if (!isEnabled()) return next();
   const publicWeb = res.locals.multiTenantWeb === true;
   const managementRoute = controlRoutes.has(path)
     || ["/api/multitenant/users", "/api/multitenant/sourcemapping", "/api/multitenant/models", "/api/multitenant/providers", "/api/multitenant/billing"].some(prefix => path === prefix || path.startsWith(`${prefix}/`));
@@ -180,7 +198,7 @@ export async function multiTenantAccess(req: Request, res: Response, next: NextF
   const settingsRoute = path === "/api/settings/get" && req.method === "GET" || path === "/api/settings/save" && req.method === "PUT";
   const ownProviderKey = path === "/api/multitenant/user/providerkey" && ["GET", "PUT"].includes(req.method);
   const tenantAgent = process.env.TOONFLOW_TRUSTED_CANVAS_BETA === "1" && tenantAgentRoutes.has(`${req.method} ${path}`);
-  if (fileRoute || settingsRoute || ownProviderKey || tenantAgent || req.method === "GET" && userReadRoutes.has(path)
+  if (fileRoute || settingsRoute || ownProviderKey || tenantAgent || backgroundBeta || req.method === "GET" && userReadRoutes.has(path)
     || req.method === "POST" && modelWriteRoutes.has(path) || communityReads.has(path) && ["GET", "POST"].includes(req.method)) return runWithIdentity(user, next);
   throw Object.assign(new Error("当前账号尚未开放此功能"), { status: 403 });
 }

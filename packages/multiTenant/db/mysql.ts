@@ -2,8 +2,9 @@ import mysql from "mysql2/promise";
 import { drizzle } from "drizzle-orm/mysql2";
 import { and, asc, count, desc, eq, getTableColumns, sql } from "drizzle-orm";
 import { mysqlSchema, varchar } from "drizzle-orm/mysql-core";
-import { mysqlAdmin, mysqlBillingLedger, mysqlModelRouting, mysqlSettings, mysqlSourceMapping, mysqlUser, mysqlUserProviderGuard, mysqlUserProviderKey, mysqlWallet, mysqlWebSession } from "./schema";
+import { mysqlAdmin, mysqlBackgroundJob, mysqlBillingLedger, mysqlModelRouting, mysqlSettings, mysqlSourceMapping, mysqlUser, mysqlUserProviderGuard, mysqlUserProviderKey, mysqlWallet, mysqlWebSession } from "./schema";
 import type { AdminDatabase, WalletRecord } from "./schema";
+import { backgroundJobKeySchema, backgroundJobCreateSchema, backgroundJobLeaseSchema, backgroundJobRenewSchema, backgroundJobUpdateSchema, backgroundJobReleaseSchema } from "./backgroundJobs";
 import type { DataSource } from "./index";
 import { maxWalletMicros, validateWalletAmount, walletBalanceOverflow, walletSettlementExceeded, walletStateConflict } from "./billing";
 
@@ -58,7 +59,55 @@ export function connectMysql(config: Extract<DataSource, { provider: "mysql" }>[
     }
   }
   const insufficientWallet = new Error("余额不足");
+  const backgroundNow = sql`CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 AS UNSIGNED)`;
+  function backgroundIdentity(input: { jobId: string; ownerId: string; workspaceHash: string }) {
+    return and(eq(mysqlBackgroundJob.jobId, input.jobId), eq(mysqlBackgroundJob.ownerId, input.ownerId), eq(mysqlBackgroundJob.workspaceHash, input.workspaceHash));
+  }
+  function backgroundLease(input: { jobId: string; ownerId: string; workspaceHash: string; leaseOwner: string; generation: number }) {
+    return and(backgroundIdentity(input), eq(mysqlBackgroundJob.leaseOwner, input.leaseOwner), eq(mysqlBackgroundJob.leaseGeneration, input.generation), sql`${mysqlBackgroundJob.leaseUntil} > ${backgroundNow}`);
+  }
   return {
+    async initializeBackgroundJobs() {
+      await db.execute(sql`CREATE TABLE IF NOT EXISTS multiTenantBackgroundJob (
+        jobId VARCHAR(36) CHARACTER SET ascii COLLATE ascii_bin PRIMARY KEY, ownerId VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+        workspaceHash VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL, payload JSON NOT NULL, revision INT NOT NULL,
+        leaseOwner VARCHAR(36) CHARACTER SET ascii COLLATE ascii_bin, leaseUntil BIGINT NOT NULL, leaseGeneration INT NOT NULL
+      ) ENGINE=InnoDB`);
+      const [table] = await db.select({ engine: informationTables.engine }).from(informationTables).where(and(
+        eq(informationTables.tableSchema, config.database), eq(informationTables.tableName, "multiTenantBackgroundJob"))).limit(1);
+      if (table?.engine?.toLowerCase() !== "innodb") throw Object.assign(new Error("批次存储不支持事务"), { status: 503 });
+    },
+    async createBackgroundJob(input) {
+      const value = backgroundJobCreateSchema.parse(input);
+      try { await db.insert(mysqlBackgroundJob).values({ ...value, revision: 1, leaseOwner: null, leaseUntil: 0, leaseGeneration: 0 }); return true; }
+      catch (error) { if (errorCode(error) === "ER_DUP_ENTRY") return false; throw error; }
+    },
+    async getBackgroundJob(input) {
+      const value = backgroundJobKeySchema.parse(input);
+      return (await db.select().from(mysqlBackgroundJob).where(backgroundIdentity(value)).limit(1))[0];
+    },
+    async acquireBackgroundJobLease(input) {
+      const value = backgroundJobLeaseSchema.parse(input);
+      const [result] = await db.update(mysqlBackgroundJob).set({ leaseOwner: value.leaseOwner, leaseUntil: sql`${backgroundNow} + ${value.ttlMs}`, leaseGeneration: sql`${mysqlBackgroundJob.leaseGeneration} + 1` })
+        .where(and(backgroundIdentity(value), sql`${mysqlBackgroundJob.leaseUntil} <= ${backgroundNow}`, sql`${mysqlBackgroundJob.leaseGeneration} < 2147483646`));
+      return result.affectedRows === 1;
+    },
+    async renewBackgroundJobLease(input) {
+      const value = backgroundJobRenewSchema.parse(input);
+      const [result] = await db.update(mysqlBackgroundJob).set({ leaseUntil: sql`${backgroundNow} + ${value.ttlMs}` }).where(backgroundLease(value));
+      return result.affectedRows === 1;
+    },
+    async updateBackgroundJob(input) {
+      const value = backgroundJobUpdateSchema.parse(input);
+      const [result] = await db.update(mysqlBackgroundJob).set({ payload: value.payload, revision: sql`${mysqlBackgroundJob.revision} + 1` })
+        .where(and(backgroundLease(value), eq(mysqlBackgroundJob.revision, value.expectedRevision)));
+      return result.affectedRows === 1;
+    },
+    async releaseBackgroundJobLease(input) {
+      const value = backgroundJobReleaseSchema.parse(input);
+      const [result] = await db.update(mysqlBackgroundJob).set({ leaseOwner: null, leaseUntil: 0 }).where(backgroundLease(value));
+      return result.affectedRows === 1;
+    },
     async close() { await client.end(); },
     async initializeBilling() {
       await db.execute(sql`CREATE TABLE IF NOT EXISTS multiTenantWallet (

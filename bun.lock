@@ -54,6 +54,7 @@
         "@toonflow/mcp": "workspace:*",
         "@toonflow/multi-tenant-auth": "workspace:*",
         "@toonflow/multi-tenant-billing": "workspace:*",
+        "@toonflow/multi-tenant-db": "workspace:*",
         "@toonflow/multi-tenant-gateway": "workspace:*",
         "@toonflow/multi-tenant-models": "workspace:*",
         "@toonflow/multi-tenant-source-mapping": "workspace:*",
