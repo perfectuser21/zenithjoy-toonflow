@@ -23,3 +23,7 @@ services:
       - type: bind
         source: ${TOONFLOW_QUOTA_VOLUME:?需要指定预先挂载的固定容量 ext4 项目配额卷}
         target: /app/data
+      # 单独绑定控制目录，防止可写数据目录中的服务账号替换整个锁目录。
+      - type: bind
+        source: ${TOONFLOW_QUOTA_VOLUME:?需要指定预先挂载的固定容量 ext4 项目配额卷}/projectQuota
+        target: /app/data/projectQuota

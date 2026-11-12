@@ -34,6 +34,18 @@ try:
     fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 except BlockingIOError:
     raise SystemExit("配额服务已在运行")
+# 锁文件留在 root 独占写入的目录，服务只能对同一 inode 加锁，不能替换它。
+try:
+    admission_fd = os.open("backgroundAdmission.flock", os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, 0o600, dir_fd=root_fd)
+except FileExistsError:
+    admission_fd = os.open("backgroundAdmission.flock", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd)
+else:
+    os.fchown(admission_fd, 0, service_gid)
+    os.fchmod(admission_fd, 0o660)
+admission_stat = os.fstat(admission_fd)
+if not stat.S_ISREG(admission_stat.st_mode) or admission_stat.st_uid != 0 or admission_stat.st_gid != service_gid or stat.S_IMODE(admission_stat.st_mode) != 0o660 or admission_stat.st_nlink != 1 or admission_stat.st_dev != root_stat.st_dev:
+    raise SystemExit("换背景进程锁文件不安全")
+os.close(admission_fd)
 mount = subprocess.run(["/usr/bin/findmnt", "-n", "-o", "TARGET", "--target", root], check=True, capture_output=True, text=True, timeout=5).stdout.strip()
 if not os.path.isabs(mount):
     raise SystemExit("无法验证配额挂载点")
