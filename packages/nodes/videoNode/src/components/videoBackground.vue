@@ -36,6 +36,7 @@
         <p v-if="tooLong && selectedVideoModel && selectedVideoModel.providerId !== 'multiTenant'">长视频需要使用平台配置的视频模型。</p>
         <p v-else-if="selectedVideoModel && !durations.length">该模型未提供可用的生成时长。</p>
         <p>生成视频会调用视频模型并产生费用，原视频会保留；费用由您的阿里云账号承担。</p>
+        <p class="reviewHint">AI 生成可能改变或新增画面，请播放预览并核对成品。</p>
         <p v-if="tooLong && batch && !batchLocked">确认后将分别生成 {{ batch.parts.length }} 段，逐段产生费用，全部成功后合成为一个视频。</p>
         <p v-if="tooLong && batchProgress" role="status" aria-live="polite">{{ batchProgress }}</p>
         <p v-if="tooLong && batch && ['confirming', 'confirmed'].includes(batch.phase)">可以关闭窗口后重新打开查看；关闭窗口不会停止云端任务。</p>
@@ -48,6 +49,22 @@
         <p v-if="pending && pending.source !== file?.url" role="alert">上次任务使用的是之前的视频，请先复查该任务。</p>
         <p v-if="taskError" role="alert">{{ taskError }}</p>
         <el-button v-if="pending && !busy" @click="resumeTask">复查任务</el-button>
+        <div v-if="resultFile" class="resultPreview">
+          <h4>成品预览</h4>
+          <p>请检查整个视频，原视频仍然保留。</p>
+          <video v-if="resultUrl" :src="resultUrl" controls playsinline preload="metadata" aria-label="换背景成品预览" @error="resultPreviewError = '无法播放成品，请在画布的视频节点中重试。'" />
+          <p v-if="resultPreviewError" role="alert">{{ resultPreviewError }}</p>
+        </div>
+        <details v-if="tooLong && batch && !batch.cleaned && batch.parts.some(part => part.state === 'succeeded')" class="segmentPreview" @toggle="onSegmentToggle">
+          <summary>逐段预览</summary>
+          <p>选择已生成的片段播放，检查是否有意外变化。</p>
+          <p v-if="batch.parts.some(part => part.state === 'succeeded' && !part.resultPath)">部分历史任务未保留片段预览，请检查合成成品。</p>
+          <div class="segmentButtons">
+            <el-button v-for="(part, index) in batch.parts" :key="part.taskId" :disabled="part.state !== 'succeeded' || !part.resultPath" :aria-pressed="selectedSegment?.url === part.resultPath" @click="selectSegment(part)">第 {{ index + 1 }} 段</el-button>
+          </div>
+          <video v-if="segmentUrl" :src="segmentUrl" controls playsinline preload="metadata" aria-label="换背景片段预览" @error="segmentPreviewError = '无法播放片段，请稍后重试。'" />
+          <p v-if="segmentPreviewError" role="alert">{{ segmentPreviewError }}</p>
+        </details>
       </section>
       <details class="advancedSettings" @toggle="onAdvancedToggle">
         <summary>高级设置</summary>
@@ -90,6 +107,7 @@ import { ElButton, ElDialog, ElMessageBox } from "element-plus";
 import { useNode, useVueFlow } from "@vue-flow/core";
 import { getNodeModelIdentity, useNodeAi, useNodeFiles, type NodeMediaModel, type NodeMediaResult, type NodeMediaValue, type NodeVideoRequest } from "@toonflow/nodes-scaffold/runtime";
 import { useNodePersistence, type NodePersistenceContext } from "@toonflow/nodes-scaffold/nodeDocument";
+import { getMediaMimeType } from "@toonflow/node-shared/mediaTypes";
 
 const props = defineProps<{ file?: NodeMediaValue; src: string; disabled?: boolean }>();
 const visible = defineModel<boolean>({ required: true });
@@ -100,10 +118,22 @@ const files = useNodeFiles();
 const ai = useNodeAi();
 const getPersistence = useNodePersistence();
 type BackgroundTask = { taskId: string; directory: string; canvasPath: string; source: string; kind: "image" | "video"; outputNodeId: string };
-type BatchPart = { startSeconds: number; endSeconds: number; taskId: string; state: "pending" | "submitting" | "submitted" | "succeeded" | "failed" | "unknown" | "cancelled" };
+type BatchPart = { startSeconds: number; endSeconds: number; taskId: string; state: "pending" | "submitting" | "submitted" | "succeeded" | "failed" | "unknown" | "cancelled"; resultPath?: string };
 type BatchState = { jobId: string; directory: string; canvasPath: string; source: string; outputNodeId: string; phase: "preparing" | "prepared" | "confirming" | "confirmed" | "cancelling" | "cancelled" | "completed"; parts: BatchPart[]; cleanupPending?: boolean; cleaned?: boolean };
-type BackgroundState = { source: string; frame?: string; candidates: { path: string; mimeType: string }[]; pending?: BackgroundTask; batch?: BatchState };
+type BackgroundState = { source: string; frame?: string; candidates: { path: string; mimeType: string }[]; pending?: BackgroundTask; batch?: BatchState; lastResult?: NodeMediaValue };
 const state = computed(() => node.data.backgroundState as BackgroundState | undefined);
+const resultFile = computed(() => {
+  if (state.value?.source !== props.file?.url) return;
+  if (state.value?.lastResult) return state.value.lastResult;
+  const job = state.value?.batch;
+  const output = job?.phase === "completed" ? findNode(job.outputNodeId)?.data?.outputs?.video : undefined;
+  return output?.dataType === "VIDEO" ? output.value as NodeMediaValue : undefined;
+});
+const resultPreviewError = ref("");
+const segmentPreviewError = ref("");
+const selectedSegment = ref<NodeMediaValue>();
+const resultUrl = files.useFileUrl(resultFile, () => { resultPreviewError.value = "无法读取成品，请在画布的视频节点中重试。"; });
+const segmentUrl = files.useFileUrl(selectedSegment, () => { segmentPreviewError.value = "无法读取片段，文件可能已清理。"; });
 const candidates = computed(() => state.value?.source === props.file?.url ? state.value?.candidates ?? [] : []);
 const pending = computed(() => state.value?.pending);
 const batch = computed(() => state.value?.batch);
@@ -232,7 +262,17 @@ function validateBatch(value: { jobId: string; stage: string; parts: BatchPart[]
 }
 
 function displayParts(parts: BatchPart[]): BatchPart[] {
-  return parts.map(({ startSeconds, endSeconds, taskId, state }) => ({ startSeconds, endSeconds, taskId, state }));
+  return parts.map(({ startSeconds, endSeconds, taskId, state, resultPath }) => ({ startSeconds, endSeconds, taskId, state, ...(state === "succeeded" && typeof resultPath === "string" && resultPath ? { resultPath } : {}) }));
+}
+
+function selectSegment(part: BatchPart) {
+  if (batch.value?.cleaned || part.state !== "succeeded" || !part.resultPath) return;
+  segmentPreviewError.value = "";
+  selectedSegment.value = { url: part.resultPath, mimeType: getMediaMimeType({ name: part.resultPath, type: "" }) || "video/mp4" };
+}
+
+function onSegmentToggle(event: Event) {
+  if (!(event.target as HTMLDetailsElement).open) selectedSegment.value = undefined;
 }
 
 async function prepareBatch() {
@@ -328,12 +368,15 @@ async function cleanupBatch() {
 
 async function completeBatch(result: { resultPath?: string }, job: BatchState) {
   if (!result.resultPath || typeof result.resultPath !== "string") throw new Error("合成结果尚未确认，请复查任务");
-  if (state.value?.batch?.jobId !== job.jobId || findNode(id) !== node || getPersistence?.()?.directory !== job.directory || getPersistence?.()?.canvasPath !== job.canvasPath) throw new Error("画布已变化，请重新打开后复查任务");
+  const background = state.value;
+  if (!background || background.batch?.jobId !== job.jobId || findNode(id) !== node || getPersistence?.()?.directory !== job.directory || getPersistence?.()?.canvasPath !== job.canvasPath) throw new Error("画布已变化，请重新打开后复查任务");
   if (!nodeTypes?.value?.["remote-videoNode"]) throw new Error("请启用视频节点插件，再复查任务");
   if (!findNode(job.outputNodeId)) addNodes({ id: job.outputNodeId, type: "remote-videoNode", position: { x: node.computedPosition.x + (node.dimensions.width || 320) + 80, y: node.computedPosition.y }, data: { label: "换背景视频", outputs: { video: { dataType: "VIDEO", value: { url: result.resultPath, mimeType: "video/mp4" } } } } });
+  const previousResult = background.lastResult;
+  background.lastResult = { url: result.resultPath, mimeType: "video/mp4" };
   job.phase = "completed";
-  try { await saveState(); } catch (error) { job.phase = "confirmed"; throw error; }
-  statusText.value = "已合成为新视频，原视频已保留。";
+  try { await saveState(); } catch (error) { job.phase = "confirmed"; background.lastResult = previousResult; throw error; }
+  statusText.value = "已合成为新视频，原视频已保留。请播放并检查全部画面。";
 }
 
 async function pollBatch() {
@@ -449,15 +492,17 @@ async function applyResult(task: BackgroundTask, results: NodeMediaResult[]) {
   const result = results[0];
   if (!result || result.mediaType !== task.kind) throw new Error("任务未返回对应的媒体文件，请复查任务");
   if (!state.value || state.value.pending?.taskId !== task.taskId || state.value.source !== task.source || findNode(id) !== node) throw new Error("画布或视频已变化，请复查任务");
+  const previousResult = state.value.lastResult;
   if (task.kind === "image") {
     if (!state.value.candidates.some(item => item.path === result.path)) state.value.candidates.push({ path: result.path, mimeType: result.mimeType });
   } else {
     if (!nodeTypes?.value?.["remote-videoNode"]) throw new Error("请启用视频节点插件，再复查任务");
     if (!findNode(task.outputNodeId)) addNodes({ id: task.outputNodeId, type: "remote-videoNode", position: { x: node.computedPosition.x + (node.dimensions.width || 320) + 80, y: node.computedPosition.y }, data: { label: "换背景视频", outputs: { video: { dataType: "VIDEO", value: { url: result.path, mimeType: result.mimeType } } } } });
+    state.value.lastResult = { url: result.path, mimeType: result.mimeType };
   }
   state.value.pending = undefined;
   try { await saveState(); }
-  catch (error) { state.value.pending = task; throw error; }
+  catch (error) { state.value.pending = task; state.value.lastResult = previousResult; throw error; }
   if (task.kind === "image") await loadCandidateUrls();
 }
 
@@ -475,7 +520,7 @@ async function resumeTask() {
     const results = await ai.resumeMedia(task.directory, task.taskId, request.signal, { nodeId: id, canvasPath: task.canvasPath, onStatus: status => { terminalFailed = !!status.result && (status.state === "failed" || status.state === "cancelled"); } });
     lifetime.signal.throwIfAborted();
     await applyResult(task, results);
-    statusText.value = task.kind === "image" ? "候选图已生成。" : "生成完成，已添加新视频节点。";
+    statusText.value = task.kind === "image" ? "候选图已生成。" : "生成完成，原视频已保留。请播放并检查全部画面。";
   } catch (error) {
     if (terminalFailed) await clearPending(task).catch(() => {});
     if (!request.signal.aborted) showTaskFailure(error, "任务复查失败");
@@ -538,7 +583,7 @@ async function generateVideo() {
     const mode = backgroundMode(selectedVideoModel.value);
     if (!mode) throw new Error("所选模型不支持视频与图片参考");
     await submitTask("video", { ...getNodeModelIdentity(selectedVideoModel.value), directory: context.directory, outputDirectory: "assets/generated", prompt: "使用参考图片更换视频背景，保持原视频人物、动作和镜头运动。", videos: [{ path: props.file.url, mimeType: props.file.mimeType }], images: [{ path: selected.path, mimeType: selected.mimeType }], mode: mode as NodeVideoRequest["mode"], duration: outputDuration.value });
-    statusText.value = "生成完成，已添加新视频节点。";
+    statusText.value = "生成完成，原视频已保留。请播放并检查全部画面。";
   } catch (error) { if (!lifetime.signal.aborted) showTaskFailure(error, "视频生成失败"); }
   finally { busy.value = false; }
 }
@@ -609,6 +654,8 @@ async function extractFrame() {
 }
 
 watch(() => [props.file?.url, props.src, props.disabled, getCanvas?.()?.id], () => { visible.value = false; clearFrame(); }, { flush: "sync" });
+watch(() => [batch.value?.cleaned, batch.value?.cleanupPending], ([cleaned, cleaning]) => { if (cleaned || cleaning) selectedSegment.value = undefined; });
+watch(resultFile, () => { resultPreviewError.value = ""; });
 onMounted(() => {
   void extractFrame();
   void ai.getMediaModels().then(value => {
@@ -618,7 +665,7 @@ onMounted(() => {
   }).catch(error => { taskError.value = error instanceof Error ? error.message : "读取模型失败"; }).finally(() => { modelsLoaded.value = true; });
   if (candidates.value.length) void loadCandidateUrls().catch(() => { taskError.value = "读取候选图片失败，请重新打开后重试"; });
   if (pending.value) statusText.value = "上次任务尚未确认，请先复查任务。";
-  if (batch.value?.phase === "completed") statusText.value = "已合成为新视频，原视频已保留。";
+  if (batch.value?.phase === "completed") statusText.value = "已合成为新视频，原视频已保留。请播放并检查全部画面。";
   if (batch.value && ["cancelling", "cancelled"].includes(batch.value.phase)) statusText.value = "任务已请求停止；云端任务是否停止及费用情况请先核查。";
   if (batch.value && ["confirming", "confirmed"].includes(batch.value.phase)) void pollBatch();
 });
@@ -643,6 +690,14 @@ onBeforeUnmount(() => { lifetime.abort(); clearFrame(); taskController?.abort();
     .candidateGrid button.selected { border-color: var(--el-color-primary); }
     .candidateGrid img { max-width: 100%; max-height: 120px; }
     .segmentList { max-height: 150px; margin: 8px 0; padding-left: 24px; overflow-y: auto; line-height: 1.8; }
+    .reviewHint { color: var(--el-text-color-primary); font-weight: 600; }
+    .resultPreview, .segmentPreview {
+      margin-top: 16px;
+      h4 { margin: 0; font-size: 14px; }
+      summary { cursor: pointer; }
+      video { display: block; width: 100%; max-height: 280px; background: var(--el-fill-color-darker); border-radius: var(--el-border-radius-base); }
+    }
+    .segmentButtons { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; .el-button { margin: 0; } }
   }
   .advancedSettings {
     summary { cursor: pointer; }
