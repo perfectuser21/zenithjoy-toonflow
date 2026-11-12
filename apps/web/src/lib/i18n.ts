@@ -1,5 +1,6 @@
 import axios, { type AxiosInstance } from "axios";
 import { computed, watch } from "vue";
+import { ElMessageBox } from "element-plus";
 import { detectLocale, isRtlLocale } from "@toonflow/i18n";
 import { locale, setLocale, translate } from "@toonflow/i18n/vue";
 import { uiSettings } from "@/stores/settings";
@@ -36,7 +37,16 @@ export function registerApiLanguage(client: AxiosInstance) {
 }
 
 export function registerLanguage() {
-  const applyLanguage = () => setLocale(uiSettings.value.language === "system" ? detectLocale(navigator.languages) : uiSettings.value.language);
+  let lastApply = 0;
+  const applyLanguage = () => {
+    const request = ++lastApply;
+    void setLocale(uiSettings.value.language === "system" ? detectLocale(navigator.languages) : uiSettings.value.language).catch(() => {
+      if (request !== lastApply) return;
+      void ElMessageBox.confirm(translate("加载失败，请重试"), translate("提示"), {
+        confirmButtonText: translate("重试"), cancelButtonText: translate("取消"),
+      }).then(() => { if (request === lastApply) applyLanguage(); }).catch(() => {});
+    });
+  };
   const stopSettings = watch(() => uiSettings.value.language, applyLanguage, { immediate: true, flush: "sync" });
   const stopDocument = watch(locale, value => {
     document.documentElement.lang = value;

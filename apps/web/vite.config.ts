@@ -33,6 +33,7 @@ export default defineConfig(({ command }) => ({
   resolve: {
     alias: [
       { find: "@", replacement: fileURLToPath(new URL("./src", import.meta.url)) },
+      { find: /^@toonflow\/i18n$/, replacement: fileURLToPath(new URL("../../packages/i18n/src/browser.ts", import.meta.url)) },
       { find: /^shiki$/, replacement: fileURLToPath(new URL("./src/lib/shiki.ts", import.meta.url)) },
     ],
   },
@@ -41,6 +42,15 @@ export default defineConfig(({ command }) => ({
     emptyOutDir: true,
   },
   plugins: [
+    {
+      name: "browserI18nCatalogs",
+      enforce: "pre",
+      resolveId(source, importer) {
+        if (source === "./index" && importer?.split("?")[0].endsWith("/packages/i18n/src/vue.ts")) {
+          return fileURLToPath(new URL("../../packages/i18n/src/browser.ts", import.meta.url));
+        }
+      },
+    },
     {
       name: "externalDependencySourcemaps",
       apply: "serve",
