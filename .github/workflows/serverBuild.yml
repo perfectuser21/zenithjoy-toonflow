@@ -6,6 +6,7 @@ on:
       - "packages/**"
       - "bun.lock"
       - "Dockerfile"
+      - "deploy/quota/**"
       - ".github/workflows/serverBuild.yml"
 permissions:
   contents: read

@@ -51,6 +51,10 @@ if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022 or
 workspaces_fd = os.open("quotaWorkspaces", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
 if os.fstat(workspaces_fd).st_ino != info.st_ino or os.fstat(workspaces_fd).st_dev != info.st_dev:
     raise SystemExit("工作区根目录已变更")
+# mkdir 的权限会被进程 umask 收紧；仅在核验 root 持有且不可被服务用户替换后修正。
+os.fchmod(workspaces_fd, 0o711)
+if stat.S_IMODE(os.fstat(workspaces_fd).st_mode) != 0o711:
+    raise SystemExit("工作区根目录权限无效")
 database = f"/proc/self/fd/{root_fd}/quotaRegistry.sqlite"
 if os.path.lexists(database):
     info = os.lstat(database)
