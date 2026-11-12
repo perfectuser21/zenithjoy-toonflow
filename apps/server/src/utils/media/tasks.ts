@@ -6,6 +6,7 @@ import type { GeneratedMedia, MediaGenerationRequest } from "@toonflow/tools-sca
 import type { AuthIdentity } from "@toonflow/multi-tenant-auth";
 import type { ModelActor, ModelOutcome } from "@toonflow/multi-tenant-gateway/types";
 import { audioGenerationSchema, imageGenerationSchema, videoGenerationSchema } from "@/utils/media/schemas";
+import { backgroundMediaPolicy } from "@/utils/multiTenant/backgroundAdmission";
 import { z } from "zod";
 import { error, errorFromCause, success } from "@/lib/responseFormat";
 import conf from "@/utils/conf";
@@ -404,8 +405,15 @@ async function execute(task: MediaTask, resume: boolean) {
         : task.legacyAdminActor,
       legacyTaskOwnerId: record.ownerUserId,
       outputGeneration: task.executionLease?.generation,
+      beforeNetwork: task.executionLease ? async () => {
+        const policy = await backgroundMediaPolicy(record.cwd);
+        if (policy === "none" || !resume && policy !== "new" || !task.executionLease || !await renewMediaLease(task.executionLease)) {
+          throw new Error("长视频任务准入或租约已失效");
+        }
+      } : undefined,
       beforeSubmit: task.executionLease ? () => locked(task.key, async () => {
         if (!task.executionLease || record.state !== "running" || !await renewMediaLease(task.executionLease)) throw new Error("媒体任务租约已失效");
+        if (await backgroundMediaPolicy(record.cwd) !== "new") throw new Error("长视频换背景未开放新任务");
         record.submissionState = "submitting";
         await persist(task);
       }) : undefined,
@@ -458,6 +466,10 @@ async function execute(task: MediaTask, resume: boolean) {
 
 async function launch(task: MediaTask, resume: boolean, exclusive = false) {
   if (task.active) return;
+  if (task.record.executionLeaseId) {
+    const policy = await backgroundMediaPolicy(task.record.cwd);
+    if (policy === "none" || policy === "recovery" && (!resume || !await resumable(task))) return;
+  }
   if (task.record.executionLeaseId && !task.executionLease) {
     const ownerId = task.record.ownerUserId ?? task.record.ownerAdminId;
     if (!ownerId) invalid("媒体任务租约归属无效", 409);
@@ -499,6 +511,10 @@ async function launch(task: MediaTask, resume: boolean, exclusive = false) {
     }
   }
   try {
+    if (task.record.executionLeaseId) {
+      const policy = await backgroundMediaPolicy(task.record.cwd);
+      if (policy === "none" || policy === "recovery" && (!resume || !await resumable(task))) invalid("长视频换背景暂不可运行", 403);
+    }
     if (task.record.ownerUserId && (!task.record.modelRouteCipher || !task.record.chargeId)) invalid("媒体任务扣费记录无效", 409);
     if (!resume && task.record.ownerUserId) {
       const chargeId = task.record.chargeId;
@@ -563,6 +579,7 @@ export async function start(cwd: string, taskId: string, mediaType: "image" | "v
   attachment: TaskOwner = {}, owner?: AuthIdentity | null) {
   requireOwner(owner);
   cwd = await realpath(cwd);
+  if (attachment.executionLeaseId && await backgroundMediaPolicy(cwd) !== "new") invalid("长视频换背景未开放新任务", 403);
   const key = taskPath(cwd, taskId, owner);
   const parsed = requestSchemas[mediaType].parse(request);
   if (attachment.nodeId !== undefined) z.string().min(1).max(512).parse(attachment.nodeId);
@@ -575,6 +592,7 @@ export async function start(cwd: string, taskId: string, mediaType: "image" | "v
   return locked(key, async () => {
     let current = await load(cwd, taskId, key, owner);
     if (current) {
+      if (current.record.executionLeaseId && await backgroundMediaPolicy(cwd) !== "new") invalid("长视频换背景未开放新任务", 403);
       if (!current.active && current.record.executionLeaseId) {
         const ownerId = current.record.ownerUserId ?? current.record.ownerAdminId;
         if (!ownerId) invalid("媒体任务租约归属无效", 409);
@@ -645,7 +663,7 @@ export async function start(cwd: string, taskId: string, mediaType: "image" | "v
   });
 }
 
-export async function status(cwd: string, taskIds: string[], resume = false, owner?: AuthIdentity | null) {
+export async function status(cwd: string, taskIds: string[], resume = false, owner?: AuthIdentity | null, recoveryOnly = false) {
   requireOwner(owner);
   cwd = await realpath(cwd);
   return Promise.all(taskIds.map(taskId => {
@@ -653,6 +671,12 @@ export async function status(cwd: string, taskIds: string[], resume = false, own
     return locked(key, async () => {
       let task = await load(cwd, taskId, key, owner);
       if (!task) return { taskId, state: "interrupted" as const, resumable: false, result: error<GeneratedMedia[]>("生成任务不存在", null, 404) };
+      let taskRecoveryOnly = recoveryOnly;
+      if (task.record.executionLeaseId) {
+        const policy = await backgroundMediaPolicy(cwd);
+        if (policy === "none") return snapshot(task, owner);
+        if (policy === "recovery") taskRecoveryOnly = true;
+      }
       if (!task.active && task.record.executionLeaseId) {
         const ownerId = task.record.ownerUserId ?? task.record.ownerAdminId;
         if (!ownerId) invalid("媒体任务租约归属无效", 409);
@@ -675,8 +699,10 @@ export async function status(cwd: string, taskIds: string[], resume = false, own
       try {
         if (task.persistenceError) await persist(task);
         await reconcileCharge(task);
-        if (!task.active && task.record.state === "running" && await prepareCharge(task, true)) await launch(task, false);
+        if (!taskRecoveryOnly && !task.active && task.record.state === "running" && await prepareCharge(task, true)) await launch(task, false);
         if (!task.active && (task.record.state === "running" || (resume && task.record.state === "interrupted"))) {
+          // 关闭新任务时只恢复已取得供应商凭据的既有任务，不启动尚未提交的请求。
+          if (taskRecoveryOnly && (!resume || !await resumable(task))) return snapshot(task, owner);
           if (await resumable(task)) await launch(task, true);
           else {
             task.record.state = "interrupted";
@@ -743,10 +769,11 @@ export async function cancel(cwd: string, taskIds: string[], owner?: AuthIdentit
 
 export async function wait(cwd: string, taskId: string, owner?: AuthIdentity | null, signal?: AbortSignal): Promise<GeneratedMedia[]> {
   requireOwner(owner);
-  if (signal?.aborted) { await cancel(cwd, [taskId], owner); signal.throwIfAborted(); }
   cwd = await realpath(cwd);
   const task = await load(cwd, taskId, taskPath(cwd, taskId, owner), owner);
   if (!task) invalid("生成任务不存在", 404);
+  if (task.record.executionLeaseId && await backgroundMediaPolicy(cwd) === "none" && task.record.state !== "succeeded") invalid("长视频换背景暂不可运行，请保留原任务", 403);
+  if (signal?.aborted) { await cancel(cwd, [taskId], owner); signal.throwIfAborted(); }
   let abort: (() => void) | undefined;
   try {
     await Promise.race([task.completion, new Promise<never>((_resolve, reject) => {

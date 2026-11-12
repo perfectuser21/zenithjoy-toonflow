@@ -118,6 +118,13 @@ export async function createApp({
   app.use(["/api/workspaces/files/write", "/api/assets/save"], express.raw({ type: "application/octet-stream", limit: "100mb" }));
   app.use(express.json({ limit: "100mb" }));
   app.use(express.urlencoded({ extended: true, limit: "100mb" }));
+  app.use("/api/ai/media/background", async (req, res, next) => {
+    if (!res.locals.backgroundProduction) return next();
+    if (typeof req.body?.directory !== "string" || !req.body.directory) throw Object.assign(new Error("请选择工作目录"), { status: 400 });
+    const [{ resolveWorkspace }, { assertBackgroundWorkspace }] = await Promise.all([import("@/utils/workspace"), import("@/utils/multiTenant/backgroundAdmission")]);
+    await assertBackgroundWorkspace(await resolveWorkspace(req, req.body.directory));
+    next();
+  });
   app.use("/api/desktop", desktopRequest);
 
   const router = await import("@/router");

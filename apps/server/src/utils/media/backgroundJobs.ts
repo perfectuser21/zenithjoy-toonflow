@@ -14,6 +14,7 @@ import { acquireMediaLease, createMediaLease, readMediaLease, releaseMediaLease,
 import { modelGateway } from "@/utils/multiTenant/gateway";
 import { createVideoFrame } from "@/utils/media/preview";
 import { writeWorkspaceFile } from "@/utils/workspace/files";
+import { backgroundMediaPolicy } from "@/utils/multiTenant/backgroundAdmission";
 
 const partSchema = z.strictObject({ path: z.string().min(1), mimeType: z.literal("video/mp4"), duration: z.number().positive(),
   startSeconds: z.number().nonnegative(), endSeconds: z.number().positive(), fileRevision: z.string().min(1), taskId: z.uuid(), leaseId: z.uuid(),
@@ -81,6 +82,11 @@ async function withBudget<T>(cwd: string, actor: AuthIdentity, kind: "plan" | "p
   const active = AbortSignal.any([signal, controller.signal]);
   const check = async () => {
     active.throwIfAborted();
+    const policy = await backgroundMediaPolicy(cwd);
+    if (policy === "none" || kind !== "plan" && policy !== "new") {
+      controller.abort();
+      invalid("后台视频处理准入已失效", 403);
+    }
     if (!await databaseAccess(() => renewBackgroundBudget(database, lease))) {
       controller.abort();
       invalid("后台视频处理租约已失效", 409);
@@ -258,7 +264,13 @@ export async function confirmBackgroundJob(cwd: string, jobId: string, actor: Au
   });
 }
 
-export async function advanceBackgroundJob(cwd: string, jobId: string, actor: AuthIdentity, resume: boolean) {
+export async function readBackgroundJob(cwd: string, jobId: string, actor: AuthIdentity) {
+  const row = await databaseAccess(async () => (await db()).getBackgroundJob(access(cwd, jobId, actor)));
+  if (!row) invalid("任务不存在", 404);
+  return { jobId, ...payloadSchema.parse(row.payload) };
+}
+
+export async function advanceBackgroundJob(cwd: string, jobId: string, actor: AuthIdentity, resume: boolean, allowNew = true) {
   return leased(cwd, jobId, actor, async ({ payload, save }) => {
     if (payload.stage !== "confirmed" || !payload.image || !payload.imageRevision || !payload.modelId || !payload.mode || !payload.prompt) return { jobId, ...payload };
     const imageFile = await resolveWorkspacePath(cwd, payload.image.path);
@@ -266,6 +278,7 @@ export async function advanceBackgroundJob(cwd: string, jobId: string, actor: Au
     await source(cwd, payload);
     for (const part of payload.parts) {
       if (part.state === "pending") {
+        if (!allowNew) break;
         if (await jobBytes(cwd, jobId) > 312 * 1024 * 1024) invalid("剩余空间不足以安全生成下一段并合成", 413);
         if (await revision((await resolveWorkspacePath(cwd, part.path)).path) !== part.fileRevision) invalid("视频片段已变化，请重新准备项目", 409);
         // ACT: 提交前先落库不确定状态；进程失联后若任务不存在，不能自动再发上游。
@@ -290,7 +303,7 @@ export async function advanceBackgroundJob(cwd: string, jobId: string, actor: Au
         await save();
         continue;
       }
-      const current = (await mediaTasks.status(cwd, [part.taskId], resume, actor))[0];
+      const current = (await mediaTasks.status(cwd, [part.taskId], resume, actor, !allowNew))[0];
       if (!current || current.result?.code === 404) { part.state = "unknown"; await save(); break; }
       if (current.state === "succeeded") part.state = "unknown";
       else if (["failed", "cancelled"].includes(current.state)) part.state = "failed";
