@@ -8,6 +8,7 @@ import { createModelSecret, modelCipherSchema } from "./secret";
 export { getPublicModelId, modelAmountSchema, modelPriceSchema, modelRouteSchema, modelRoutesSchema, modelRoutingRevisionSchema, publicModelIdSchema, modelProviderSchema, modelProvidersSchema } from "./config";
 export type { ManagedModelProvider, ModelPrice, ModelProvider, ModelRoute, ModelRoutingSnapshot, ProviderConfigurationSnapshot } from "./config";
 export { calculateModelPrice } from "./pricing";
+export { createUserProviderKeys } from "./userProviderKeys";
 export type { ModelPriceUsage } from "./pricing";
 
 const configurationSchema = z.strictObject({ routes: modelRoutesSchema, cloudCipher: modelCipherSchema.optional(), providerCipher: modelCipherSchema.optional() });

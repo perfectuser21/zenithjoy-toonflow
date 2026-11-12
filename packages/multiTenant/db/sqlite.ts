@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { and, asc, count, desc, eq, getTableColumns, sql } from "drizzle-orm";
-import { sqliteAdmin, sqliteBillingLedger, sqliteModelRouting, sqliteSettings, sqliteSourceMapping, sqliteUser, sqliteWallet, sqliteWebSession } from "./schema";
+import { sqliteAdmin, sqliteBillingLedger, sqliteModelRouting, sqliteSettings, sqliteSourceMapping, sqliteUser, sqliteUserProviderGuard, sqliteUserProviderKey, sqliteWallet, sqliteWebSession } from "./schema";
 import type { AdminDatabase } from "./schema";
 import { maxWalletMicros, validateWalletAmount, walletBalanceOverflow, walletSettlementExceeded, walletStateConflict } from "./billing";
 
@@ -19,6 +19,7 @@ export function connectSqlite(file: string): AdminDatabase {
     return wallet;
   }
   return {
+    async close() { client.close(); },
     async initializeSettings() {
       // 平台策略只在显式初始化或保存时创建；读取旧库不补表，也不覆盖已有关闭状态。
       db.run(sql`CREATE TABLE IF NOT EXISTS "multiTenantSettings" (
@@ -90,6 +91,37 @@ export function connectSqlite(file: string): AdminDatabase {
       return db.update(sqliteModelRouting).set({ configuration, revision: expectedRevision + 1 })
         .where(and(eq(sqliteModelRouting.id, 1), eq(sqliteModelRouting.revision, expectedRevision)))
         .returning({ id: sqliteModelRouting.id }).get() !== undefined;
+    },
+    async initializeUserProviderGuard() {
+      db.run(sql`CREATE TABLE IF NOT EXISTS "multiTenantUserProviderGuard" ("id" INTEGER PRIMARY KEY, "cipher" TEXT NOT NULL)`);
+    },
+    async getUserProviderGuard() {
+      return db.select({ cipher: sqliteUserProviderGuard.cipher }).from(sqliteUserProviderGuard).where(eq(sqliteUserProviderGuard.id, 1)).get()?.cipher;
+    },
+    async insertUserProviderGuard(cipher) {
+      return db.insert(sqliteUserProviderGuard).values({ id: 1, cipher }).onConflictDoNothing({ target: sqliteUserProviderGuard.id })
+        .returning({ id: sqliteUserProviderGuard.id }).get() !== undefined;
+    },
+    async hasUserProviderKeys() {
+      return db.select({ userId: sqliteUserProviderKey.userId }).from(sqliteUserProviderKey).limit(1).get() !== undefined;
+    },
+    async getUserProviderKey(userId, providerId) {
+      return db.select({ cipher: sqliteUserProviderKey.cipher, revision: sqliteUserProviderKey.revision }).from(sqliteUserProviderKey)
+        .where(and(eq(sqliteUserProviderKey.userId, userId), eq(sqliteUserProviderKey.providerId, providerId))).get();
+    },
+    async initializeUserProviderKeys() {
+      db.run(sql`CREATE TABLE IF NOT EXISTS "multiTenantUserProviderKey" (
+        "userId" TEXT NOT NULL, "providerId" TEXT NOT NULL, "cipher" TEXT NOT NULL, "revision" INTEGER NOT NULL,
+        PRIMARY KEY ("userId", "providerId")
+      )`);
+    },
+    async writeUserProviderKey(userId, providerId, cipher, expectedRevision) {
+      if (expectedRevision === 0) return db.insert(sqliteUserProviderKey).values({ userId, providerId, cipher, revision: 1 })
+        .onConflictDoNothing({ target: [sqliteUserProviderKey.userId, sqliteUserProviderKey.providerId] })
+        .returning({ userId: sqliteUserProviderKey.userId }).get() !== undefined;
+      return db.update(sqliteUserProviderKey).set({ cipher, revision: expectedRevision + 1 })
+        .where(and(eq(sqliteUserProviderKey.userId, userId), eq(sqliteUserProviderKey.providerId, providerId), eq(sqliteUserProviderKey.revision, expectedRevision)))
+        .returning({ userId: sqliteUserProviderKey.userId }).get() !== undefined;
     },
     async initializeBilling() {
       db.run(sql`CREATE TABLE IF NOT EXISTS "multiTenantWallet" (
