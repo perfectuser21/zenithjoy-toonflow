@@ -62,9 +62,9 @@ const inputSchema = z.object({
 
 export default Router().post("/", validateFields(inputSchema.shape), async (req, res) => {
   const input = inputSchema.parse(req.body, validationOptions());
-  const configured = await u.ai.getConfiguredModel(input.providerId, input.modelId);
-  const controller = new AbortController();
   const identity = u.multiTenant.requestIdentity(req);
+  const configured = await u.ai.getConfiguredModel(input.providerId, input.modelId, identity);
+  const controller = new AbortController();
   let chargeId: string | undefined;
   let billing: ModelFinalization | undefined;
   let stream: ReturnType<typeof u.ai.streamAi> | undefined;

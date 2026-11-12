@@ -12,13 +12,15 @@ import { getReadableFileMimeType } from "@/lib/documentFormats";
 import { readDocument } from "@/utils/documents";
 import { getConfiguredProviders, getModelLimits, getModelReasoning, getProviderBaseUrl, providerSchema } from "@/utils/ai/provider";
 import { modelGateway, requireDirectModelAccess } from "@/utils/multiTenant/gateway";
+import type { ModelActor } from "@toonflow/multi-tenant-gateway/types";
 import { createBillingUsageTracker } from "@/utils/ai/billingUsage";
 
 export { fetchProviderModels } from "@/utils/ai/models";
 export { accountProviderSchema, getAccountProvider, getAccountToken, getConfiguredProviders, getModelLimits, getModelReasoning, providerSchema, reasoningEffortsSchema } from "@/utils/ai/provider";
 
-export async function getConfiguredModel(providerId: string, modelId: string) {
-  const execution = modelGateway.enabled() ? await modelGateway.resolve("text", providerId, modelId) : undefined;
+export async function getConfiguredModel(providerId: string, modelId: string, actor?: ModelActor | null) {
+  if (modelGateway.enabled() && !actor) throw Object.assign(new Error("请先登录 Toonflow"), { status: 401 });
+  const execution = modelGateway.enabled() ? await modelGateway.resolve("text", providerId, modelId, undefined, undefined, { actor: { id: actor!.id, role: actor!.role } }) : undefined;
   const resolved = execution?.upstream;
   const parsed = providerSchema.safeParse(resolved?.provider ?? getConfiguredProviders().find(item => item?.id === providerId));
   if (!parsed.success) {

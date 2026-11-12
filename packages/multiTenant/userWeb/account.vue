@@ -4,6 +4,19 @@
       <span class="accountAvatar" aria-hidden="true">{{ Array.from(userName.trim())[0]?.toUpperCase() }}</span>
       <p class="userName">{{ userName }}</p>
     </div>
+    <section v-if="role === 'user'" class="providerSection" aria-labelledby="providerKeyTitle" :aria-busy="keyLoading || keySaving">
+      <header class="sectionHeader">
+        <h3 id="providerKeyTitle">阿里云 {{ translate("API 密钥") }}</h3>
+        <el-button :loading="keyLoading" :disabled="busy || keySaving" @click="loadProviderKey">{{ translate("刷新") }}</el-button>
+      </header>
+      <p>{{ translate("用于接入阿里云模型，使用产生的费用由您的阿里云账号承担。") }}</p>
+      <p v-if="keyStatus">{{ keyStatus.configured ? translate("已配置") : translate("未配置") }}</p>
+      <el-alert v-if="keyError" :title="keyError" type="error" :closable="false" showIcon />
+      <form @submit.prevent="saveProviderKey">
+        <el-input v-model="apiKey" type="password" autocomplete="off" :aria-label="translate('API 密钥')" :disabled="busy || keySaving" maxlength="4096" />
+        <el-button nativeType="submit" type="primary" :loading="keySaving" :disabled="busy || keyLoading || !keyStatus || keyConflict || !apiKey.trim()">{{ translate("保存") }}</el-button>
+      </form>
+    </section>
     <section v-if="role === 'user'" class="billingSection" aria-labelledby="accountBalanceTitle" :aria-busy="balanceLoading">
       <header class="sectionHeader">
         <h3 id="accountBalanceTitle">{{ translate("余额") }}</h3>
@@ -52,11 +65,12 @@
 <script setup lang="ts">
 import { locale, translate } from "@toonflow/i18n/vue";
 import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { ElAlert, ElButton, ElSkeleton } from "element-plus";
+import { ElAlert, ElButton, ElInput, ElSkeleton } from "element-plus";
 import type { BillingSnapshot, BillingTransaction } from "@toonflow/multi-tenant-billing/config";
 import type { UserRequest } from "./types";
 import "element-plus/es/components/alert/style/css";
 import "element-plus/es/components/button/style/css";
+import "element-plus/es/components/input/style/css";
 import "element-plus/es/components/skeleton/style/css";
 
 const props = defineProps<{ request: UserRequest; userName: string; role?: "admin" | "user" }>();
@@ -66,12 +80,63 @@ const requestError = ref("");
 const balance = ref<BillingSnapshot | null>(null);
 const balanceLoading = ref(false);
 const balanceError = ref("");
+const apiKey = ref("");
+const keyStatus = ref<{ configured: boolean; revision: number } | null>(null);
+const keyLoading = ref(false);
+const keySaving = ref(false);
+const keyConflict = ref(false);
+const keyError = ref("");
 const timeFormat = computed(() => new Intl.DateTimeFormat(locale.value, {
   year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
 }));
 const controller = new AbortController();
 let balanceRequest: AbortController | undefined;
+let keyRequest: AbortController | undefined;
 let disposed = false;
+
+async function loadProviderKey() {
+  if (props.role !== "user" || !props.userName || busy.value || keySaving.value || disposed) return;
+  keyRequest?.abort();
+  const request = new AbortController();
+  const userName = props.userName;
+  keyRequest = request;
+  keyLoading.value = true;
+  keyError.value = "";
+  try {
+    const result = await props.request<{ configured: boolean; revision: number }>({ method: "GET", url: "/api/multiTenant/user/providerKey", signal: request.signal });
+    if (!disposed && !request.signal.aborted && keyRequest === request && props.role === "user" && props.userName === userName) {
+      keyStatus.value = result;
+      keyConflict.value = false;
+    }
+  } catch {
+    if (!disposed && !request.signal.aborted && keyRequest === request) keyError.value = translate("读取失败，请重试");
+  } finally {
+    if (keyRequest === request) { keyRequest = undefined; keyLoading.value = false; }
+  }
+}
+
+async function saveProviderKey() {
+  if (!keyStatus.value || keyConflict.value || !apiKey.value.trim() || keyLoading.value || keySaving.value || busy.value) return;
+  const request = new AbortController();
+  const userName = props.userName;
+  keyRequest = request;
+  keySaving.value = true;
+  keyError.value = "";
+  try {
+    const result = await props.request<{ configured: boolean; revision: number }>({ method: "PUT", url: "/api/multiTenant/user/providerKey", data: { apiKey: apiKey.value, expectedRevision: keyStatus.value.revision }, signal: request.signal });
+    if (!disposed && !request.signal.aborted && keyRequest === request && props.role === "user" && props.userName === userName) {
+      keyStatus.value = result;
+      apiKey.value = "";
+    }
+  } catch (cause) {
+    if (!disposed && !request.signal.aborted && keyRequest === request) {
+      keyConflict.value = typeof cause === "object" && cause !== null && "status" in cause && cause.status === 409;
+      keyError.value = keyConflict.value ? `${translate("这条数据已发生变化，请刷新列表后重试。")} ${translate("保存失败，请重试；当前填写的内容已保留")}` : translate("保存失败，修改内容已保留，请重试");
+    }
+  } finally {
+    if (keyRequest === request) { keyRequest = undefined; keySaving.value = false; }
+  }
+}
 
 function formatTime(value: number) {
   const date = new Date(value);
@@ -104,17 +169,28 @@ async function loadBalance() {
 }
 
 watch(() => [props.userName, props.role], () => {
+  keyRequest?.abort();
+  keyRequest = undefined;
+  keyStatus.value = null;
+  apiKey.value = "";
+  keyLoading.value = false;
+  keySaving.value = false;
+  keyConflict.value = false;
+  keyError.value = "";
   balanceRequest?.abort();
   balanceRequest = undefined;
   balanceLoading.value = false;
   balance.value = null;
   balanceError.value = "";
   void loadBalance();
+  void loadProviderKey();
 }, { immediate: true });
 
 async function logout() {
   if (busy.value) return;
   balanceRequest?.abort();
+  keyRequest?.abort();
+  apiKey.value = "";
   busy.value = true;
   requestError.value = "";
   try {
@@ -129,6 +205,8 @@ onBeforeUnmount(() => {
   disposed = true;
   controller.abort();
   balanceRequest?.abort();
+  keyRequest?.abort();
+  apiKey.value = "";
 });
 </script>
 
@@ -179,6 +257,20 @@ onBeforeUnmount(() => {
 
       :deep(.el-alert__title) { line-height: 1.5; overflow-wrap: anywhere; }
     }
+  }
+
+  .providerSection {
+    display: grid;
+    gap: 16px;
+    min-width: 0;
+    padding-top: 24px;
+    border-top: 1px solid var(--el-border-color-light);
+
+    .sectionHeader { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+    h3 { margin: 0; font-size: 15px; font-weight: 600; }
+    p { margin: 0; color: var(--el-text-color-regular); font-size: 14px; }
+    form { display: flex; flex-wrap: wrap; gap: 12px; }
+    .el-input { flex: 1 1 220px; }
   }
 
   .billingSection {

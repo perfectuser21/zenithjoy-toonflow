@@ -6,9 +6,14 @@ import type { SkillContext, SkillLocation, SkillScope } from "@toonflow/tools-sc
 import conf from "@/utils/conf";
 import { directory, isEnabled } from "@/utils/skills/files";
 import { isWithin, lockWorkspaceFiles, resolveWorkspacePath, writeWorkspaceFile } from "@/utils/workspace/files";
+import { currentIdentity } from "@/utils/multiTenant/context";
 
 export function loadAgentSkills(cwd: string, scope?: SkillScope) {
   if (scope !== undefined && scope !== "workspace" && scope !== "global") throw new Error("技能范围无效");
+  if (currentIdentity()?.role === "user") {
+    if (scope === "global") throw Object.assign(new Error("无权访问全局技能"), { status: 403 });
+    scope = "workspace";
+  }
   const result = loadSkills({
     cwd,
     agentDir: join(cwd, ".agent"),
@@ -27,6 +32,9 @@ export function createSkillContext(cwd: string): SkillContext {
   const skillScope = (filePath: string): SkillScope => isWithin(join(cwd, "skill"), filePath) ? "workspace" : "global";
 
   async function locate(request: SkillLocation, create = false) {
+    if (currentIdentity()?.role === "user" && request.scope === "global") {
+      throw Object.assign(new Error("无权访问全局技能"), { status: 403 });
+    }
     const scope = create ? request.scope ?? "workspace" : request.scope;
     const skill = loadAgentSkills(cwd, scope).skills.find(skill => skill.name === request.name);
     if (!skill && !create) throw new Error(t`技能不存在：${request.name}`);

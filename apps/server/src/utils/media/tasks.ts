@@ -4,7 +4,7 @@ import { lstat, mkdir, readFile, realpath, writeAtomic } from "@toonflow/file";
 import type { ProviderTaskData } from "@toonflow/providers";
 import type { GeneratedMedia, MediaGenerationRequest } from "@toonflow/tools-scaffold/runtime";
 import type { AuthIdentity } from "@toonflow/multi-tenant-auth";
-import type { ModelOutcome } from "@toonflow/multi-tenant-gateway/types";
+import type { ModelActor, ModelOutcome } from "@toonflow/multi-tenant-gateway/types";
 import { audioGenerationSchema, imageGenerationSchema, videoGenerationSchema } from "@/utils/media/schemas";
 import { z } from "zod";
 import { error, errorFromCause, success } from "@/lib/responseFormat";
@@ -40,7 +40,7 @@ const recordSchema = z.strictObject({
   mediaType: mediaTypeSchema.optional(),
   request: z.union([imageGenerationSchema, videoGenerationSchema, audioGenerationSchema]).optional(),
   nodeId: z.string().min(1).max(512).optional(), canvasPath: relativePathSchema.optional(),
-  ownerUserId: z.uuid().optional(), modelRouteCipher: z.string().min(1).max(8 * 1024 * 1024).optional(),
+  ownerUserId: z.uuid().optional(), ownerAdminId: z.uuid().optional(), modelRouteCipher: z.string().min(1).max(8 * 1024 * 1024).optional(),
   chargeId: z.string().min(1).max(128).optional(),
   chargeStatus: z.enum(["settled", "released", "pendingReview"]).optional(),
   state: z.enum(["running", "interrupted", "succeeded", "failed", "cancelled"]),
@@ -50,6 +50,7 @@ const recordSchema = z.strictObject({
   result: z.strictObject({ code: z.number().int(), data: z.array(mediaSchema).nullable(), message: z.string() }).optional(),
 }).superRefine((record, context) => {
   const issue = (message: string) => context.addIssue({ code: "custom", message });
+  if (record.ownerUserId && record.ownerAdminId) issue("任务归属无效");
   if (!record.request || !record.mediaType) {
     if (record.state !== "cancelled" || record.request || record.mediaType) issue("任务缺少生成请求");
   } else if (!requestSchemas[record.mediaType].safeParse(record.request).success) issue("任务生成请求无效");
@@ -77,6 +78,7 @@ type MediaTask = {
   persistenceError?: unknown;
   completion?: Promise<void>;
   chargeFinalized?: boolean;
+  legacyAdminActor?: ModelActor;
 };
 type TaskOwner = { nodeId?: string; canvasPath?: string };
 
@@ -215,7 +217,12 @@ async function persist(task: MediaTask, exclusive = false) {
 
 async function load(cwd: string, taskId: string, key: string, owner?: AuthIdentity | null) {
   const cached = tasks.get(key);
-  if (cached) { assertOwner(cached, owner); cached.settledAt = cached.active ? undefined : Date.now(); return cached; }
+  if (cached) {
+    assertOwner(cached, owner);
+    if (!cached.record.ownerUserId && !cached.record.ownerAdminId && owner?.role === "admin") cached.legacyAdminActor = { id: owner.id, role: owner.role };
+    cached.settledAt = cached.active ? undefined : Date.now();
+    return cached;
+  }
   if (!await privateDirectory(dirname(key), false)) return undefined;
   let bytes: Buffer;
   try { bytes = await readPrivateFile(key, maxRecordSize); }
@@ -224,6 +231,7 @@ async function load(cwd: string, taskId: string, key: string, owner?: AuthIdenti
   const { blobs, ...record } = stored;
   const task: MediaTask = { key, record, blobs: blobs ?? [], active: false, settledAt: Date.now() };
   assertOwner(task, owner);
+  if (!stored.ownerUserId && !stored.ownerAdminId && owner?.role === "admin") task.legacyAdminActor = { id: owner.id, role: owner.role };
   if (identity(stored.cwd) !== identity(cwd) || stored.taskId.toLowerCase() !== taskId.toLowerCase()) invalid("任务不属于当前工作区", 403);
   if (stored.canvasPath) await resolveWorkspacePath(cwd, stored.canvasPath, true);
   tasks.set(key, task);
@@ -350,7 +358,7 @@ async function prepareCharge(task: MediaTask, recoverExisting = false) {
       record.modelRouteCipher, record.request, {
         actor: { id: record.ownerUserId, role: "user" }, requestId: record.taskId,
         payload: record.request, scope: record.cwd, recoverExisting,
-      });
+      }, record.ownerUserId);
   } catch (cause) {
     if ((cause as { status?: number } | null)?.status === 402) {
       record.state = "failed";
@@ -369,6 +377,10 @@ async function execute(task: MediaTask, resume: boolean) {
   try {
     const files = await generateMedia(record.cwd, record.mediaType!, record.request!, task.controller!.signal, {
       taskId: record.taskId, resume, checkpoint: record.checkpoint, modelRouteCipher: record.modelRouteCipher,
+      actor: record.ownerUserId ? { id: record.ownerUserId, role: "user" }
+        : record.ownerAdminId ? { id: record.ownerAdminId, role: "admin" }
+        : task.legacyAdminActor,
+      legacyTaskOwnerId: record.ownerUserId,
       save: patch => locked(task.key, async () => {
         if (record.state !== "running") throw new Error("生成已停止");
         Object.assign(record.checkpoint, patch);
@@ -478,12 +490,13 @@ export async function start(cwd: string, taskId: string, mediaType: "image" | "v
     }
     if (activeCount >= 1000) invalid("生成任务过多，请稍后重试", 429);
     const modelRouteCipher = modelGateway.enabled()
-      ? await modelGateway.capture(mediaType, parsed.providerId, parsed.modelId, parsed) : undefined;
+      ? await modelGateway.capture(mediaType, parsed.providerId, parsed.modelId, parsed, { actor: { id: owner!.id, role: owner!.role } }) : undefined;
     if (owner?.role === "user" && !modelRouteCipher) invalid("多租户模型路由尚未开启", 403);
     const now = Date.now();
     const task: MediaTask = { key, blobs: [], active: false, record: {
       version: 1, taskId, cwd, mediaType, request: parsed, ...attachment,
-      ownerUserId: owner?.role === "user" ? owner.id : undefined, modelRouteCipher,
+      ownerUserId: owner?.role === "user" ? owner.id : undefined,
+      ownerAdminId: owner?.role === "admin" ? owner.id : undefined, modelRouteCipher,
       state: "running", createdAt: now, updatedAt: now, checkpoint: {},
     } };
     try {

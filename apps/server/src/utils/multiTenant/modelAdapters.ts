@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
-import type { ModelAdapter, ModelExecution } from "@toonflow/multi-tenant-gateway/types";
+import type { ModelAdapter, ModelExecution, ModelType } from "@toonflow/multi-tenant-gateway/types";
 import { modelRouteSchema } from "@toonflow/multi-tenant-models/config";
 import type { ModelPrice, ModelRoute } from "@toonflow/multi-tenant-models/config";
 import { translateMessage } from "@/lib/i18n";
@@ -306,3 +307,43 @@ const mediaAdapter: ModelAdapter<MediaUpstream, MediaCapabilities, Cloud> = {
 export type ModelUpstreams = { text: TextUpstream; image: MediaUpstream; video: MediaUpstream; audio: MediaUpstream };
 export type ModelCapabilities = { text: TextCapabilities; image: MediaCapabilities; video: MediaCapabilities; audio: MediaCapabilities };
 export const modelAdapters = { text: textAdapter, image: mediaAdapter, video: mediaAdapter, audio: mediaAdapter };
+
+// ACT: 客户凭据只能交给本仓审计过的阿里云供应商版本；更新脚本时须重新审计并更新摘要。
+const aliyunMediaSourceSha256 = "70796ca86eba5f792ed6fecd603505ef705e531a84274dee3f21072656e5fb02";
+
+function requireAliyunEndpoint(value: unknown, paths: string[]) {
+  if (typeof value !== "string") fail("阿里云服务地址无效", 503);
+  let url: URL;
+  try { url = new URL(value); } catch { fail("阿里云服务地址无效", 503); }
+  const legacy = ["dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com", "dashscope-us.aliyuncs.com"];
+  const workspace = /^[a-z0-9-]+\.(cn-beijing|ap-southeast-1|ap-northeast-1|eu-central-1|us-east-1|cn-hongkong)\.maas\.aliyuncs\.com$/;
+  if (url.protocol !== "https:" || url.username || url.password || url.port || url.search || url.hash
+    || !paths.includes(url.pathname) || (!legacy.includes(url.hostname) && !workspace.test(url.hostname))) {
+    fail("阿里云服务地址须为官方 HTTPS 地址", 503);
+  }
+}
+
+export function applyUserProviderKey<K extends ModelType>(type: K, route: ModelRoute, upstream: ModelUpstreams[K], apiKey: string): ModelUpstreams[K] {
+  if (route.target !== "backend") fail("供应商配置不支持个人凭据", 503);
+  if (type === "text") {
+    const text = upstream as TextUpstream;
+    if (route.providerId !== "aliyunQwen" || text.provider.protocol !== "openai-completions"
+      || Object.keys(text.provider.headers ?? {}).length) fail("阿里云文本供应商配置不安全", 503);
+    requireAliyunEndpoint(text.provider.apiUrl, ["/compatible-mode/v1", "/compatible-mode/v1/"]);
+    const cloned = structuredClone(text);
+    cloned.provider.apiKey = apiKey;
+    return cloned as ModelUpstreams[K];
+  }
+  const media = upstream as MediaUpstream;
+  if (route.providerId !== "aliyun" || media.cloud
+    || createHash("sha256").update(media.source).digest("hex") !== aliyunMediaSourceSha256
+    || Object.keys(media.config).some(key => key !== "apiKey" && key !== "baseUrl")) {
+    fail("阿里云媒体供应商版本或配置不安全", 503);
+  }
+  const baseUrl = media.config.baseUrl ?? "https://dashscope.aliyuncs.com";
+  requireAliyunEndpoint(baseUrl, ["/", "/api/v1", "/api/v1/"]);
+  const cloned = structuredClone(media);
+  cloned.config = { ...cloned.config, baseUrl, apiKey };
+  cloned.secretValues.push(apiKey);
+  return cloned as unknown as ModelUpstreams[K];
+}

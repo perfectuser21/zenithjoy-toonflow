@@ -29,6 +29,7 @@ import * as mediaTasks from "@/utils/media/tasks";
 
 export function createAgentToolContext(cwd: string, config: Record<string, unknown> = {}, canvas?: CanvasContext, question?: QuestionContext, workspaceAvailable = true): ToolContext {
   const actor = currentIdentity();
+  if (actor?.role === "user") throw Object.assign(new Error("当前账号的画布助手尚未开放"), { status: 403 });
   const sourceCanvas = canvas;
   if (sourceCanvas) {
     canvas = {
@@ -169,6 +170,8 @@ export function createAgentToolContext(cwd: string, config: Record<string, unkno
 }
 
 export async function createAgentTools(cwd: string, canvas?: CanvasContext, question?: QuestionContext, includeMcp = true): Promise<ToolDefinition[]> {
+  // 普通账号的画布工具和回执尚未完成租户隔离审计，任何入口误开放时仍须默认拒绝。
+  if (currentIdentity()?.role === "user") throw Object.assign(new Error("当前账号的画布助手尚未开放"), { status: 403 });
   const tools = createPluginMarketTools(question);
   const names = new Set(tools.map(tool => tool.name));
   const context = createAgentToolContext(cwd, {}, canvas, question);
