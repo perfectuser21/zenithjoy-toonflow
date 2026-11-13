@@ -10,7 +10,7 @@ import { backgroundMediaPolicy } from "@/utils/multiTenant/backgroundAdmission";
 import { z } from "zod";
 import { error, errorFromCause, success } from "@/lib/responseFormat";
 import conf from "@/utils/conf";
-import { generateMedia, isMediaNotSubmitted, type MediaGenerationCheckpoint } from "@/utils/media/generation";
+import { generateMedia, isMediaNotSubmitted, validateWanVideoReferences, type MediaGenerationCheckpoint } from "@/utils/media/generation";
 import { lockWorkspaceFiles, resolveWorkspacePath } from "@/utils/workspace/files";
 import { modelGateway } from "@/utils/multiTenant/gateway";
 import { projectQuotaRoot } from "@/utils/workspace/projectQuota";
@@ -88,6 +88,15 @@ type MediaTask = {
   leaseTimer?: ReturnType<typeof setInterval>;
 };
 type TaskOwner = { nodeId?: string; canvasPath?: string; executionLeaseId?: string };
+
+type VideoTimingEvent = "received" | "started" | "provider_submit_attempted" | "provider_accepted" | "provider_result_received" | "provider_failed" | "completed" | "failed" | "interrupted" | "cancelled";
+function logVideoTiming(taskId: string, event: VideoTimingEvent, createdAt?: number) {
+  try {
+    const at = Date.now();
+    console.info(JSON.stringify({ category: "video_task_timing", taskId, event, at,
+      ...(createdAt === undefined ? {} : { elapsedMs: Math.max(0, at - createdAt) }) }));
+  } catch { /* 日志故障不能改变任务状态或计费行为 */ }
+}
 
 // ACT: 单进程最多 1000 个执行中任务；磁盘记录保留，结束后只释放五分钟未用的内存缓存。
 const tasks = new Map<string, MediaTask>();
@@ -400,6 +409,8 @@ async function execute(task: MediaTask, resume: boolean) {
   try {
     const files = await generateMedia(record.cwd, record.mediaType!, record.request!, task.controller!.signal, {
       taskId: record.taskId, resume, checkpoint: record.checkpoint, modelRouteCipher: record.modelRouteCipher,
+      onWanSubmit: record.mediaType === "video" ? () => logVideoTiming(record.taskId, "provider_submit_attempted", record.createdAt) : undefined,
+      onProviderResult: record.mediaType === "video" ? () => logVideoTiming(record.taskId, "provider_result_received", record.createdAt) : undefined,
       actor: record.ownerUserId ? { id: record.ownerUserId, role: "user" }
         : record.ownerAdminId ? { id: record.ownerAdminId, role: "admin" }
         : task.legacyAdminActor,
@@ -420,8 +431,10 @@ async function execute(task: MediaTask, resume: boolean) {
       save: patch => locked(task.key, async () => {
         if (record.state !== "running") throw new Error("生成已停止");
         if (task.executionLease && !await renewMediaLease(task.executionLease)) throw new Error("媒体任务租约已失效");
+        const accepted = record.mediaType === "video" && !record.checkpoint.providerData && patch.providerData?.kind === "aliyunWanVideo";
         Object.assign(record.checkpoint, patch);
         await persist(task);
+        if (accepted) logVideoTiming(record.taskId, "provider_accepted", record.createdAt);
       }),
     });
     await locked(task.key, async () => {
@@ -431,6 +444,7 @@ async function execute(task: MediaTask, resume: boolean) {
       record.state = "succeeded";
       record.result = success(files);
       await persist(task);
+      if (record.mediaType === "video") logVideoTiming(record.taskId, "completed", record.createdAt);
     });
   } catch (cause) {
     try {
@@ -442,6 +456,10 @@ async function execute(task: MediaTask, resume: boolean) {
         const result = errorFromCause(cause);
         record.result = { ...result, code: result.code === 200 ? 500 : result.code, data: null };
         await persist(task);
+        if (record.mediaType === "video") {
+          if ((cause as { code?: string } | null)?.code === "MEDIA_TASK_FAILED") logVideoTiming(record.taskId, "provider_failed", record.createdAt);
+          logVideoTiming(record.taskId, record.state === "failed" ? "failed" : "interrupted", record.createdAt);
+        }
         if (record.state === "failed") await releaseCharge(task, notSubmitted);
       });
     } catch (failure) { task.persistenceError = failure; console.error("保存媒体任务失败", failure); }
@@ -582,6 +600,7 @@ export async function start(cwd: string, taskId: string, mediaType: "image" | "v
   if (attachment.executionLeaseId && await backgroundMediaPolicy(cwd) !== "new") invalid("长视频换背景未开放新任务", 403);
   const key = taskPath(cwd, taskId, owner);
   const parsed = requestSchemas[mediaType].parse(request);
+  if (mediaType === "video") logVideoTiming(taskId, "received");
   if (attachment.nodeId !== undefined) z.string().min(1).max(512).parse(attachment.nodeId);
   if (attachment.executionLeaseId !== undefined) z.uuid().parse(attachment.executionLeaseId);
   if (attachment.canvasPath !== undefined) {
@@ -624,6 +643,7 @@ export async function start(cwd: string, taskId: string, mediaType: "image" | "v
     const modelRouteCipher = modelGateway.enabled()
       ? await modelGateway.capture(mediaType, parsed.providerId, parsed.modelId, parsed, { actor: { id: owner!.id, role: owner!.role } }) : undefined;
     if (owner?.role === "user" && !modelRouteCipher) invalid("多租户模型路由尚未开启", 403);
+    if (mediaType === "video") await validateWanVideoReferences(cwd, parsed, owner ? { id: owner.id, role: owner.role } : undefined, modelRouteCipher);
     const now = Date.now();
     const task: MediaTask = { key, blobs: [], active: false, record: {
       version: 1, taskId, cwd, mediaType, request: parsed, ...attachment,
@@ -636,6 +656,7 @@ export async function start(cwd: string, taskId: string, mediaType: "image" | "v
       // SQL 预占与文件提交不能原子完成；先保留提交意图，chargeId 成功落盘后才允许调用上游。
       await persist(task, true);
       tasks.set(key, task);
+      if (mediaType === "video") logVideoTiming(taskId, "started", now);
       if (task.record.executionLeaseId) {
         const ownerId = task.record.ownerUserId ?? task.record.ownerAdminId;
         if (!ownerId) invalid("媒体任务租约归属无效", 409);
