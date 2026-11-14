@@ -100,7 +100,9 @@ export function connectMysql(config: Extract<DataSource, { provider: "mysql" }>[
     async updateBackgroundJob(input) {
       const value = backgroundJobUpdateSchema.parse(input);
       const [result] = await db.update(mysqlBackgroundJob).set({ payload: value.payload, revision: sql`${mysqlBackgroundJob.revision} + 1` })
-        .where(and(backgroundLease(value), eq(mysqlBackgroundJob.revision, value.expectedRevision)));
+        .where(and(backgroundLease(value), eq(mysqlBackgroundJob.revision, value.expectedRevision),
+          value.requireDisabledUserId ? sql`EXISTS (SELECT 1 FROM ${mysqlUser} WHERE ${mysqlUser.id} = ${value.requireDisabledUserId} AND ${mysqlUser.disabled} = 1)` : undefined,
+          value.requireEnabledUserId ? sql`EXISTS (SELECT 1 FROM ${mysqlUser} WHERE ${mysqlUser.id} = ${value.requireEnabledUserId} AND ${mysqlUser.disabled} = 0)` : undefined));
       return result.affectedRows === 1;
     },
     async releaseBackgroundJobLease(input) {

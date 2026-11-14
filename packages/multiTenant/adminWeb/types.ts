@@ -5,4 +5,5 @@ export type AdminRequest = <T>(config: {
   params?: Record<string, string | number | boolean>;
   headers?: Record<string, string>;
   signal?: AbortSignal;
+  timeout?: number;
 }) => Promise<T>;

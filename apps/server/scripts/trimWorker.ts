@@ -50,6 +50,34 @@ const workerFence = await acquireWorkerFence(statePath);
 const workerFenceIdentity = await workerFence.stat();
 const lock = resolve(statePath, "active");
 const journal = resolve(lock, "lastJob.json");
+const seals = resolve(statePath, "sealed");
+try { await mkdir(seals, { mode: 0o700 }); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+const sealsInfo = await lstat(seals);
+if (!sealsInfo.isDirectory() || sealsInfo.isSymbolicLink() || sealsInfo.uid !== process.getuid?.() || (sealsInfo.mode & 0o077) || await realpath(seals) !== seals) throw new Error("裁剪封禁目录不安全");
+const stateDirectory = await open(statePath, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+try { await stateDirectory.sync(); } finally { await stateDirectory.close(); }
+async function sealedOperation(operationId: string, confirmDurable = false) {
+  const path = resolve(seals, operationId), info = await lstat(path).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
+  if (!info) return undefined;
+  if (!info.isFile() || info.isSymbolicLink() || info.uid !== process.getuid?.() || info.nlink !== 1 || (info.mode & 0o077) || info.size > 1024) throw new Error("裁剪封禁记录异常");
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const current = await file.stat();
+    if (!current.isFile() || current.dev !== info.dev || current.ino !== info.ino || current.uid !== info.uid || current.nlink !== 1 || (current.mode & 0o077) || current.size !== info.size) throw new Error("裁剪封禁记录已变化");
+    const value = JSON.parse(await file.readFile("utf8"));
+    if (!value || value.operationId !== operationId || typeof value.ownerId !== "string" || typeof value.workspaceHash !== "string") throw new Error("裁剪封禁记录异常");
+    if (confirmDurable) {
+      await file.sync();
+      const directory = await open(seals, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      try {
+        const currentDirectory = await directory.stat();
+        if (currentDirectory.dev !== sealsInfo.dev || currentDirectory.ino !== sealsInfo.ino || currentDirectory.uid !== sealsInfo.uid || (currentDirectory.mode & 0o077)) throw new Error("裁剪封禁目录已变化");
+        await directory.sync();
+      } finally { await directory.close(); }
+    }
+    return value as { operationId: string; ownerId: string; workspaceHash: string };
+  } finally { await file.close(); }
+}
 async function releaseActive() {
   await unlink(journal).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
   await rmdir(lock);
@@ -87,10 +115,21 @@ await serveTrimSocket(socketPath, "trimWorker", maxInput, async request => {
     // 未知创建状态须独立运维核验，普通应用无权解除。
     return denied(503);
   }
-  if (request.method !== "POST" || url.pathname !== "/trim") return denied(404);
+  if (request.method !== "POST" || !["/trim", "/seal"].includes(url.pathname)) return denied(404);
   const operationId = request.headers.get("x-trim-operation") ?? "";
   const ownerId = request.headers.get("x-trim-owner") ?? "", workspaceHash = request.headers.get("x-trim-workspace") ?? "";
   if (!/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(operationId) || !/^[a-zA-Z0-9_-]{1,64}$/.test(ownerId) || !/^[a-f0-9]{64}$/.test(workspaceHash)) return denied(400);
+  if (url.pathname === "/seal") {
+    if (request.headers.get("content-length") !== "0") return denied(400);
+    try { await mkdir(lock, { mode: 0o700 }); } catch { return denied(429); }
+    try {
+      const existing = await sealedOperation(operationId, true);
+      if (existing && (existing.ownerId !== ownerId || existing.workspaceHash !== workspaceHash)) return denied(409);
+      if (!existing) await writeDurableState(resolve(seals, operationId), { operationId, ownerId, workspaceHash });
+      return denied(204);
+    } catch { return denied(503); }
+    finally { await releaseActive().catch(() => {}); }
+  }
   const rawStart = request.headers.get("x-trim-start"), rawEnd = request.headers.get("x-trim-end");
   const start = Number(rawStart), end = Number(rawEnd);
   const length = Number(request.headers.get("content-length"));
@@ -103,6 +142,7 @@ await serveTrimSocket(socketPath, "trimWorker", maxInput, async request => {
   let safeToUnlock = true;
   let detachAbort = () => {};
   try {
+    if (await sealedOperation(operationId)) return denied(410);
     // active 与当前请求绑定，禁止恢复时把上一次作业的日志当成本次证据。
     const parent = await open(statePath!, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
     try { await parent.sync(); } finally { await parent.close(); }

@@ -76,7 +76,7 @@
         <span>{{ cancelling ? '正在取消处理…' : '正在处理视频…' }}</span>
       </div>
       <div class="panelActions">
-        <el-button v-if="accountMode === 'customer' && (pendingTrim?.recoverOnly || (pendingTrim && interruptedOperation === pendingTrim.operationId)) && !processing" @click="clearRecoverySelection">{{ pendingTrim && interruptedOperation === pendingTrim.operationId ? '释放空间并结束' : '放弃查看此记录' }}</el-button>
+        <el-button v-if="accountMode === 'customer' && (pendingTrim?.recoverOnly || (pendingTrim && (interruptedOperation === pendingTrim.operationId || unknownOperation === pendingTrim.operationId))) && !processing" @click="clearRecoverySelection">{{ pendingTrim && (interruptedOperation === pendingTrim.operationId || unknownOperation === pendingTrim.operationId) ? '结束任务并释放空间' : '放弃查看此记录' }}</el-button>
         <el-button :disabled="cancelling" @click="processing ? cancel() : visible = false">{{ processing ? '取消处理' : '取消' }}</el-button>
         <el-button type="primary" :loading="processing" :disabled="disabled || !file || (action === 'trim' && (accountMode === 'loading' || accountMode === 'error' || (!pendingTrim && !validRange)))" @click="run">{{ action === 'trim' && pendingTrim ? '检查并恢复' : actionLabels[action] }}</el-button>
       </div>
@@ -114,6 +114,7 @@ type Recovery = { operationId: string; source: string; start: number; end: numbe
 const recoveries = ref<Recovery[]>([]);
 const pendingTrim = computed(() => (node.data.pendingTrim ?? null) as PendingTrim | null);
 const interruptedOperation = ref("");
+const unknownOperation = ref("");
 let trimUserId = "";
 let trimDirectory = "";
 let trimCanvasId = "";
@@ -164,6 +165,7 @@ watch(visible, (value, _previous, onCleanup) => {
   if (action.value !== "trim") return;
   accountMode.value = "loading";
   interruptedOperation.value = "";
+  unknownOperation.value = "";
   recoveries.value = [];
   const check = new AbortController();
   onCleanup(() => check.abort());
@@ -456,8 +458,17 @@ async function trimForCustomer(workspace: WorkspaceFiles, source: string, start:
     const check = await fetch("/api/ffmpeg/trim/status", { method: "POST", headers: { "Content-Type": "application/json", "x-toonflow-workspace": "1" }, body: JSON.stringify({ directory, operationId: pending.operationId, source: pending.source, start: pending.start, end: pending.end }), signal });
     const state = await check.json();
     if (!check.ok || state?.code !== 200) throw new Error("无法确认上次裁剪状态，请稍后重试");
+    if (state.data?.cancellationResultPreserved === true) ElMessage.warning("视频结果已完整生成并通过校验，结束操作未生效，结果已保留");
     if (state.data?.status === "ready" && state.data.nodeId === pending.operationId && state.data.outputPath === `assets/${pending.operationId}/video.mp4`) return { nodeId: pending.operationId, outputPath: state.data.outputPath as string, duration: pending.end - pending.start, width: preview.value?.videoWidth ?? 0, height: preview.value?.videoHeight ?? 0 };
-    if (state.data?.status === "pending") throw new Error("上次裁剪状态尚未确认，请联系管理员");
+    if (state.data?.status === "pending") {
+      const capability = await fetch("/api/ffmpeg/trim/capabilities", { headers: { "x-toonflow-workspace": "1" }, signal });
+      const result = await capability.json();
+      if (capability.ok && result?.code === 200 && result?.data?.recoverUnknown === true) {
+        unknownOperation.value = pending.operationId;
+        throw new Error("上次截取状态尚未确认；如不再等待，可以选择结束任务并释放空间。");
+      }
+      throw new Error("上次截取状态尚未确认，请联系管理员处理。");
+    }
     if (state.data?.status === "interrupted") { interruptedOperation.value = pending.operationId; throw new Error("上次截取已中断，可放弃查看后重新截取"); }
     if (state.data?.status !== "notFound" || pending.recoverOnly) throw new Error("无法确认上次裁剪状态，请联系管理员");
   }
@@ -486,13 +497,13 @@ async function finishTrimRecord(signal: AbortSignal, expectedOperationId: string
 
 async function clearRecoverySelection() {
   const saved = pendingTrim.value;
-  if (processing.value || accountMode.value !== "customer" || !saved || !saved.recoverOnly && interruptedOperation.value !== saved.operationId) return;
+  if (processing.value || accountMode.value !== "customer" || !saved || !saved.recoverOnly && interruptedOperation.value !== saved.operationId && unknownOperation.value !== saved.operationId) return;
   const current = new AbortController();
   processing.value = true;
   try {
-    const interrupted = interruptedOperation.value === saved.operationId;
+    const interrupted = interruptedOperation.value === saved.operationId || unknownOperation.value === saved.operationId;
     if (interrupted) {
-      try { await ElMessageBox.confirm("此截取已中断且没有可恢复的结果。释放它预留的空间后，可以重新截取。", "释放中断任务空间", { confirmButtonText: "释放空间", cancelButtonText: "取消", type: "warning" }); }
+      try { await ElMessageBox.confirm(unknownOperation.value === saved.operationId ? "系统会先检查任务和结果是否安全。确认结束后，此任务将不能继续，未完成的结果无法恢复；如仍在处理或无法确认，系统会拒绝释放。" : "此截取已中断且没有可恢复的结果。释放它预留的空间后，可以重新截取。", "结束任务并释放空间", { confirmButtonText: "确认结束", cancelButtonText: "继续等待", type: "warning" }); }
       catch { return; }
     }
     if (await usesCustomerAccount(current.signal) !== trimUserId || saved.ownerId !== trimUserId || saved.directory !== trimDirectory || saved.canvasPath !== trimCanvasPath || getCanvas?.()?.id !== trimCanvasId) throw new Error("账号、工作区或画布已变化，请重新打开裁剪");
@@ -505,6 +516,7 @@ async function clearRecoverySelection() {
     }
     await finishTrimRecord(current.signal, saved.operationId);
     interruptedOperation.value = "";
+    unknownOperation.value = "";
     visible.value = false;
     ElMessage.success(interrupted ? "中断任务空间已释放" : "已放弃查看，原截取记录仍保留");
   } catch (error) { showNodeError(error, "无法放弃查看"); }

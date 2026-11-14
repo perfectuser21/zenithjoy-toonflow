@@ -37,11 +37,12 @@
         <el-table-column :label="translate('最近登录')" minWidth="170">
           <template #default="{ row }"><span class="timeText">{{ formatTime(row.lastLoginAt) }}</span></template>
         </el-table-column>
-        <el-table-column :label="translate('操作')" width="230" align="right">
+        <el-table-column :label="translate('操作')" width="310" align="right">
           <template #default="{ row }">
             <div class="rowActions">
               <el-button link type="primary" :disabled="mutationBusy || listLoading" @click="openBalance(row as UserItem)">{{ translate("余额") }}</el-button>
               <el-button link type="primary" :disabled="mutationBusy || listLoading" @click="openPassword(row as UserItem)">{{ translate("重置密码") }}</el-button>
+              <el-button link type="primary" :disabled="mutationBusy || listLoading" @click="openTrimRecovery(row as UserItem)">{{ translate("异常截取") }}</el-button>
               <el-button link :type="row.disabled ? 'primary' : 'danger'" :loading="stateTargetId === row.id" :disabled="mutationBusy || listLoading" @click="changeState(row as UserItem)">{{ row.disabled ? translate("启用") : translate("禁用") }}</el-button>
             </div>
           </template>
@@ -74,6 +75,17 @@
         <el-button :disabled="formSaving" @click="formVisible = false">{{ translate("取消") }}</el-button>
         <el-button type="primary" nativeType="submit" form="adminUserForm" :loading="formSaving" :disabled="formSaving">{{ formTarget ? translate("保存") : translate("创建") }}</el-button>
       </template>
+    </el-dialog>
+    <el-dialog v-model="trimRecoveryVisible" :title="translate('处理异常截取')" width="min(640px, calc(100vw - 32px))" alignCenter appendToBody destroyOnClose :closeOnClickModal="!trimRecoveryBusy" :closeOnPressEscape="!trimRecoveryBusy" :showClose="!trimRecoveryBusy">
+      <p>{{ trimRecoveryTarget?.userName }}</p>
+      <el-alert :title="translate('确认结束后任务不能继续；若系统暂不能确认安全，处理会保持等待，可稍后重试。')" type="warning" :closable="false" showIcon />
+      <el-table v-loading="trimRecoveryLoading" :data="trimRecoveryItems" :emptyText="translate('没有待处理的截取任务')">
+        <el-table-column prop="operationId" :label="translate('任务')" minWidth="240" />
+        <el-table-column :label="translate('状态')" width="110"><template #default="{ row }">{{ row.status === 'cancelling' ? translate('结束处理中') : translate('状态未确认') }}</template></el-table-column>
+        <el-table-column :label="translate('操作')" width="110"><template #default="{ row }"><el-button link type="warning" :loading="trimRecoveryActionId === row.operationId" :disabled="trimRecoveryBusy" @click="finishUnknownTrim(row as TrimRecoveryItem)">{{ row.status === 'cancelling' ? translate('重试结束') : translate('结束任务') }}</el-button></template></el-table-column>
+      </el-table>
+      <el-alert v-if="trimRecoveryError" :title="trimRecoveryError" type="error" :closable="false" showIcon />
+      <template #footer><el-button :disabled="trimRecoveryBusy" @click="loadTrimRecoveries">{{ translate("刷新") }}</el-button><el-button :disabled="trimRecoveryBusy" @click="trimRecoveryVisible = false">{{ translate("关闭") }}</el-button></template>
     </el-dialog>
 
     <el-dialog v-model="balanceVisible" :title="translate('账户余额')" width="min(760px, calc(100vw - 32px))" alignCenter appendToBody destroyOnClose :closeOnClickModal="!balanceSaving" :closeOnPressEscape="!balanceSaving" :showClose="!balanceSaving" @closed="!balanceVisible && clearBalance()">
@@ -159,6 +171,7 @@ import "element-plus/es/components/tag/style/css";
 type UserItem = { id: string; userName: string; disabled: boolean; createdAt: number; lastLoginAt: number };
 type UsersPage = { items: UserItem[]; total: number; page: number; pageSize: number };
 type UserStatus = "all" | "enabled" | "disabled";
+type TrimRecoveryItem = { operationId: string; workspaceHash: string; status: "unknown" | "cancelling" };
 const props = defineProps<{ enabled: boolean; saving: boolean; creationUrl: string; request: AdminRequest }>();
 const emit = defineEmits<{ changeEnabled: [enabled: boolean]; openCreation: []; sessionExpired: [] }>();
 const users = ref<UserItem[]>([]);
@@ -182,6 +195,13 @@ const passwordError = ref("");
 const confirmationError = ref("");
 const formError = ref("");
 const stateTargetId = ref<string | null>(null);
+const trimRecoveryVisible = ref(false);
+const trimRecoveryTarget = shallowRef<Pick<UserItem, "id" | "userName"> | null>(null);
+const trimRecoveryItems = ref<TrimRecoveryItem[]>([]);
+const trimRecoveryLoading = ref(false);
+const trimRecoveryActionId = ref<string | null>(null);
+const trimRecoveryError = ref("");
+const trimRecoveryBusy = computed(() => trimRecoveryLoading.value || trimRecoveryActionId.value !== null);
 const balanceVisible = ref(false);
 const balanceTarget = shallowRef<Pick<UserItem, "id" | "userName"> | null>(null);
 const balanceSnapshot = shallowRef<BillingSnapshot | null>(null);
@@ -199,7 +219,7 @@ const creditAmountInput = ref<InputInstance>();
 const releaseTargetId = ref<string | null>(null);
 const releaseError = ref("");
 const balanceSaving = computed(() => creditSaving.value || releaseTargetId.value !== null);
-const mutationBusy = computed(() => props.saving || formSaving.value || stateTargetId.value !== null || balanceSaving.value || balanceLoading.value);
+const mutationBusy = computed(() => props.saving || formSaving.value || stateTargetId.value !== null || balanceSaving.value || balanceLoading.value || trimRecoveryBusy.value);
 const userNameInput = ref<InputInstance>();
 const passwordInput = ref<InputInstance>();
 const confirmationInput = ref<InputInstance>();
@@ -211,6 +231,8 @@ let mutationRequest: AbortController | undefined;
 let balanceRequest: AbortController | undefined;
 let creditRequest: AbortController | undefined;
 let releaseRequest: AbortController | undefined;
+let trimRecoveryRequest: AbortController | undefined;
+let trimRecoveryPrompting = false;
 let closeReleasePrompt: (() => void) | undefined;
 const releaseReasons = new Map<string, string>();
 let confirmingState = false;
@@ -512,6 +534,67 @@ async function changeState(user: UserItem) {
   }
 }
 
+async function openTrimRecovery(user: UserItem) {
+  if (mutationBusy.value || listLoading.value) return;
+  trimRecoveryTarget.value = { id: user.id, userName: user.userName };
+  trimRecoveryItems.value = [];
+  trimRecoveryError.value = "";
+  trimRecoveryVisible.value = true;
+  await loadTrimRecoveries();
+}
+
+async function loadTrimRecoveries() {
+  const target = trimRecoveryTarget.value;
+  if (!target || !trimRecoveryVisible.value) return;
+  const request = new AbortController();
+  trimRecoveryRequest = request;
+  trimRecoveryLoading.value = true;
+  trimRecoveryError.value = "";
+  try {
+    const data = await props.request<{ items: TrimRecoveryItem[] }>({ method: "POST", url: "/api/multiTenant/users/trimRecovery", data: { action: "list", userId: target.id }, signal: request.signal });
+    if (disposed || request.signal.aborted || trimRecoveryTarget.value?.id !== target.id) return;
+    if (!Array.isArray(data.items) || data.items.some(item => !/^[a-f0-9-]{36}$/.test(item.operationId) || !/^[a-f0-9]{64}$/.test(item.workspaceHash) || !["unknown", "cancelling"].includes(item.status))) throw new Error(translate("异常任务数据无效"));
+    trimRecoveryItems.value = data.items;
+  } catch (cause) {
+    if (!disposed && !request.signal.aborted) trimRecoveryError.value = errorMessage(cause, translate("读取异常截取失败，请重试"));
+  } finally { if (trimRecoveryRequest === request) { trimRecoveryRequest = undefined; trimRecoveryLoading.value = false; } }
+}
+
+async function finishUnknownTrim(item: TrimRecoveryItem) {
+  const target = trimRecoveryTarget.value;
+  if (!target || !trimRecoveryVisible.value || trimRecoveryBusy.value) return;
+  trimRecoveryPrompting = true;
+  try {
+    const { value } = await ElMessageBox.prompt(translate("确认后将不可逆地结束此截取任务。若暂时无法确认安全，任务会保持处理中，可稍后重试。请输入处理原因。"), translate("确认结束截取"), {
+      type: "warning", confirmButtonText: translate("确认结束"), cancelButtonText: translate("继续等待"), closeOnClickModal: false,
+      inputValue: translate("管理员确认结束此账号无法继续的异常截取任务"),
+      inputValidator: value => !!value?.trim() && value.trim().length >= 16 && value.trim().length <= 500 || translate("请输入 16 到 500 个字符的处理原因"),
+    });
+    trimRecoveryPrompting = false;
+    if (disposed || !trimRecoveryVisible.value || trimRecoveryTarget.value?.id !== target.id) return;
+    const request = new AbortController();
+    trimRecoveryRequest = request;
+    trimRecoveryActionId.value = item.operationId;
+    trimRecoveryError.value = "";
+    try {
+      const result = await props.request<{ status: "released" | "cancelling" | "resultPreserved" }>({ method: "POST", url: "/api/multiTenant/users/trimRecovery", timeout: 110000, signal: request.signal,
+        data: { action: "release", userId: target.id, workspaceHash: item.workspaceHash, operationId: item.operationId, reason: value.trim(), confirm: true } });
+      if (disposed || request.signal.aborted || trimRecoveryTarget.value?.id !== target.id) return;
+      if (result.status === "resultPreserved") ElMessage.warning(translate("结果已完整生成并通过校验，取消未生效，结果已保留"));
+      else if (result.status === "released") ElMessage.success(translate("任务已结束，空间已释放"));
+      else if (result.status === "cancelling") ElMessage.warning(translate("已确认结束，正在等待安全处理，请稍后重试"));
+      else throw new Error(translate("任务处理状态无法确认，请刷新后查看"));
+    } catch (cause) {
+      if (!disposed && !request.signal.aborted) trimRecoveryError.value = errorMessage(cause, translate("任务处理状态无法确认，请刷新后查看"));
+    } finally {
+      if (trimRecoveryRequest === request) { trimRecoveryRequest = undefined; trimRecoveryActionId.value = null; }
+    }
+    if (!disposed && trimRecoveryVisible.value && trimRecoveryTarget.value?.id === target.id) await loadTrimRecoveries();
+  } catch (cause) {
+    if (cause !== "cancel" && cause !== "close" && !disposed) trimRecoveryError.value = errorMessage(cause, translate("无法确认结束任务"));
+  } finally { trimRecoveryPrompting = false; }
+}
+
 onMounted(() => { void loadUsers(); });
 onBeforeUnmount(() => {
   disposed = true;
@@ -520,8 +603,9 @@ onBeforeUnmount(() => {
   balanceRequest?.abort();
   creditRequest?.abort();
   releaseRequest?.abort();
+  trimRecoveryRequest?.abort();
   closeReleasePrompt?.();
-  if (confirmingState) ElMessageBox.close();
+  if (confirmingState || trimRecoveryPrompting) ElMessageBox.close();
   formPassword.value = "";
   passwordConfirm.value = "";
 });

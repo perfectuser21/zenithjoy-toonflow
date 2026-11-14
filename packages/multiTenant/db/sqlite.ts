@@ -64,7 +64,9 @@ export function connectSqlite(file: string): AdminDatabase {
     async updateBackgroundJob(input) {
       const value = backgroundJobUpdateSchema.parse(input);
       return db.update(sqliteBackgroundJob).set({ payload: value.payload, revision: sql`${sqliteBackgroundJob.revision} + 1` })
-        .where(and(backgroundLease(value), eq(sqliteBackgroundJob.revision, value.expectedRevision)))
+        .where(and(backgroundLease(value), eq(sqliteBackgroundJob.revision, value.expectedRevision),
+          value.requireDisabledUserId ? sql`EXISTS (SELECT 1 FROM ${sqliteUser} WHERE ${sqliteUser.id} = ${value.requireDisabledUserId} AND ${sqliteUser.disabled} = 1)` : undefined,
+          value.requireEnabledUserId ? sql`EXISTS (SELECT 1 FROM ${sqliteUser} WHERE ${sqliteUser.id} = ${value.requireEnabledUserId} AND ${sqliteUser.disabled} = 0)` : undefined))
         .returning({ jobId: sqliteBackgroundJob.jobId }).get() !== undefined;
     },
     async releaseBackgroundJobLease(input) {
