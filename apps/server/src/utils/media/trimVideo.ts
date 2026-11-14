@@ -106,6 +106,7 @@ async function trimVideoFromSource(cwd: string, sourcePath: string, start: numbe
         if (identity(await sourceFile.stat()) !== identity(info) || !sealedPath && await verifiedFd(cwd, sourceFile.fd) !== source.path) invalid("原视频在裁剪前已变化", 409);
         active.throwIfAborted();
         if (!await databaseAccess(() => markTrimDispatched(database, lease))) invalid("裁剪租约已失效", 409);
+        active.throwIfAborted();
         const sourceHash = createHash("sha256");
         let upload: Promise<void> | undefined;
         const response = await new Promise<import("node:http").IncomingMessage>((resolveResponse, reject) => {
