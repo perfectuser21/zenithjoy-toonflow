@@ -5,6 +5,7 @@ import { chmod, constants, lstat, mkdir, open, readdir, realpath, statfs } from 
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import { createConnection } from "node:net";
 import { chown } from "node:fs/promises";
+import { installTrimSocketShutdown } from "./trimSocketShutdown";
 
 const socket = process.env.TOONFLOW_TRIM_STORE_SOCKET, token = process.env.TOONFLOW_TRIM_STORE_TOKEN;
 const quotaRoot = process.env.TOONFLOW_PROJECT_QUOTA_ROOT, appGid = Number(process.env.TOONFLOW_TRIM_ACCESS_GID);
@@ -75,7 +76,7 @@ async function rootFor(owner: string) {
   }
   return { root, project };
 }
-Bun.serve({ unix: socket, maxRequestBodySize: maxBytes, async fetch(request) {
+const server = Bun.serve({ unix: socket, maxRequestBodySize: maxBytes, async fetch(request) {
   if (processLock.fd < 0) return deny(503);
   const currentLock = await lstat(resolve(quotaRoot!, ".trimStore.lock")).catch(() => null);
   if (!currentLock?.isFile() || currentLock.isSymbolicLink() || currentLock.uid !== 0 || currentLock.nlink !== 1 || currentLock.mode & 0o022 || currentLock.dev !== lockInfo.dev || currentLock.ino !== lockInfo.ino) return deny(503);
@@ -175,4 +176,5 @@ Bun.serve({ unix: socket, maxRequestBodySize: maxBytes, async fetch(request) {
 } });
 await chown(socket, storeUid, appGid);
 await chmod(socket, 0o660);
+await installTrimSocketShutdown(socket, server);
 console.log("裁剪私有存储已启动");

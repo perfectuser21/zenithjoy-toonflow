@@ -7,6 +7,7 @@ import { chmod, lstat, mkdir, realpath, rmdir } from "@toonflow/file";
 import { writeDurableState } from "./trimWorkerState";
 import { acquireWorkerFence } from "./trimWorkerFence";
 import { trimNeedsFrameNormalization } from "./trimDuration";
+import { installTrimSocketShutdown } from "./trimSocketShutdown";
 
 const socketPath = process.env.TOONFLOW_TRIM_SOCKET;
 const token = process.env.TOONFLOW_TRIM_TOKEN;
@@ -173,4 +174,5 @@ const server = Bun.serve({ unix: socketPath, maxRequestBodySize: maxInput, async
   } finally { detachAbort(); if (safeToUnlock) await releaseActive().catch(() => {}); }
 } });
 await chmod(socketPath, 0o660);
+await installTrimSocketShutdown(socketPath, server);
 console.log("隔离裁剪管理器已启动");
