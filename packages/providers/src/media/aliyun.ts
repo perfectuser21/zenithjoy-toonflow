@@ -218,6 +218,16 @@ export default {
       durationResolutionMap: [{ duration: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30], resolution: ["480P", "720P", "1080P"] }],
     },
   ],
+  validateVideoRequest(request: ReferencedRequest) {
+    this.signal?.throwIfAborted();
+    validateRequest(request);
+    promptFor(request);
+  },
+  async prepareVideoReference(request: { model: string; input: Extract<MediaInput, { type: "binary" }>; signal?: AbortSignal }) {
+    this.signal?.throwIfAborted();
+    if (!modelIds.includes(request.model) || request.input.type !== "binary") throw new Error("视频素材配置无效");
+    return mediaUrl(this, request.input, "video", request.model, AbortSignal.any([signalFor(this, 10 * 60 * 1000), ...(request.signal ? [request.signal] : [])]));
+  },
   async generateImage(request: ImageRequest) {
     if (!imageModelIds.includes(request.model) || !request.prompt.trim() || request.prompt.length > 20000) throw new Error("请选择千问图像模型并填写图片要求");
     if (request.images && request.images.length > (request.model.startsWith("qwen-image-3.0") ? 3 : 10)) throw new Error("参考图片数量超过模型限制");

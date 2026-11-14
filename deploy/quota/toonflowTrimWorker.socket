@@ -1,0 +1,13 @@
+[Unit]
+Description=Toonflow isolated trim worker socket
+
+[Socket]
+ListenStream=/run/toonflow-trim-worker/worker.sock
+SocketUser=toonflow-trim-worker
+SocketGroup=toonflow-trim-access
+SocketMode=0660
+FileDescriptorName=trimWorker
+RemoveOnStop=no
+
+[Install]
+WantedBy=sockets.target

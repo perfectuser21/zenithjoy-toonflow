@@ -235,6 +235,10 @@ interface ProviderDefinition<TRules extends readonly ProviderFormRule[] = readon
   /** 未实现的方法保持缺省，调用方据此判断能力是否可用。 */
   generateImage?: GenerateMedia<ImageRequest, ProviderConfig<TRules>>;
   generateVideo?: GenerateMedia<VideoRequest, ProviderConfig<TRules>>;
+  /** 可信阿里云适配器可在上传私有素材前校验视频请求。 */
+  validateVideoRequest?: (this: ProviderContext<ProviderConfig<TRules>>, request: VideoRequest) => void;
+  /** 可信阿里云适配器用于先上传托管视频，再以临时地址提交异步生成。 */
+  prepareVideoReference?: (this: ProviderContext<ProviderConfig<TRules>>, request: { model: string; input: Extract<MediaInput, { type: "binary" }>; signal?: AbortSignal }) => Promise<string>;
   generateAudio?: GenerateMedia<AudioRequest, ProviderConfig<TRules>>;
   /** 恢复原任务的等待，结果顺序与原 generate 保持一致；不重复提交已接单阶段。明确失败终态可抛出 code 为 MEDIA_TASK_FAILED 的错误。 */
   resumeTask?: (this: ProviderContext<ProviderConfig<TRules>>, data: ProviderTaskData) => Promise<MediaAsset[]>;

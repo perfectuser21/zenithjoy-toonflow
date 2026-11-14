@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { aliyunUploadSourceSha256 } from "@/utils/media/aliyunTrustedVersion";
 import { z } from "zod";
 import type { ModelAdapter, ModelExecution, ModelType } from "@toonflow/multi-tenant-gateway/types";
 import { modelRouteSchema } from "@toonflow/multi-tenant-models/config";
@@ -309,7 +310,7 @@ export type ModelCapabilities = { text: TextCapabilities; image: MediaCapabiliti
 export const modelAdapters = { text: textAdapter, image: mediaAdapter, video: mediaAdapter, audio: mediaAdapter };
 
 // ACT: 客户凭据只能交给本仓审计过的阿里云供应商版本；更新脚本时须重新审计并更新摘要。
-const aliyunMediaSourceSha256 = new Set(["70796ca86eba5f792ed6fecd603505ef705e531a84274dee3f21072656e5fb02", "e154f127b760f34cbd32be97b0c6b8519eabf4c80a41fea246f7287d8e2ee530"]);
+const aliyunMediaSourceSha256 = new Set(["70796ca86eba5f792ed6fecd603505ef705e531a84274dee3f21072656e5fb02", "e154f127b760f34cbd32be97b0c6b8519eabf4c80a41fea246f7287d8e2ee530", aliyunUploadSourceSha256]);
 
 function requireAliyunEndpoint(value: unknown, paths: string[]) {
   if (typeof value !== "string") fail("阿里云服务地址无效", 503);

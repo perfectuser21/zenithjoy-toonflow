@@ -63,16 +63,22 @@
           <label><span>结束时间</span><input v-model.number="end" class="timeInput" type="number" min="0" :max="clipLimit" step="0.01" :disabled="processing || !duration" aria-label="片段结束时间" @input="seekPreview(($event.target as HTMLInputElement).valueAsNumber)" /><span>秒</span></label>
           <span class="selectionDuration">时长 {{ validRange ? (end - start).toFixed(2) : '—' }} 秒</span>
         </div>
-        <p class="actionHint">{{ validRange ? '截取后生成新视频节点，原视频会保留。' : '请选择有效的起止时间。' }}</p>
+        <p class="actionHint">{{ accountMode === 'loading' ? '正在确认账号…' : accountMode === 'error' ? accountError : pendingTrim ? '上次截取尚未确认，可检查并恢复结果。' : accountMode === 'customer' && duration > 120 ? '当前客户模式仅支持不超过 120 秒的源视频。' : validRange ? '截取后生成新视频节点，原视频会保留。' : '请选择有效的起止时间。' }}</p>
+        <p v-if="accountMode === 'customer' && !pendingTrim && validRange && end - start >= 14.85 && end - start <= 15.00000001" class="actionHint">接近 15 秒的片段会转换为整数帧率，避免实际时长超出万相限制；如需保持原帧率，可截短到 14.85 秒以内。</p>
+        <div v-if="accountMode === 'customer' && !pendingTrim && recoveries.length" class="actionHint">
+          <p>以下是此工作区的历史截取记录。素材可能已被移动或替换，请根据路径核对结果：</p>
+          <el-button v-for="item in recoveries" :key="item.operationId" :disabled="processing" @click="selectRecovery(item)">{{ item.source }} · {{ item.start.toFixed(2) }}–{{ item.end.toFixed(2) }} 秒 · {{ item.state === 'committed' ? '查看结果' : item.state === 'interrupted' ? '已中断' : '检查状态' }}</el-button>
+        </div>
       </template>
       <p v-else class="actionHint">{{ action === 'extractAudio' ? '提取音轨并生成音频节点，保留原视频。' : '生成静音视频和音频两个节点，保留原视频。' }}</p>
       <div v-if="processing" class="processingStatus" role="status" aria-live="polite">
         <el-progress :percentage="100" :indeterminate="true" :showText="false" />
-        <span>{{ cancelling ? '正在取消并清理文件…' : '正在处理视频…' }}</span>
+        <span>{{ cancelling ? '正在取消处理…' : '正在处理视频…' }}</span>
       </div>
       <div class="panelActions">
+        <el-button v-if="accountMode === 'customer' && (pendingTrim?.recoverOnly || (pendingTrim && interruptedOperation === pendingTrim.operationId)) && !processing" @click="clearRecoverySelection">{{ pendingTrim && interruptedOperation === pendingTrim.operationId ? '释放空间并结束' : '放弃查看此记录' }}</el-button>
         <el-button :disabled="cancelling" @click="processing ? cancel() : visible = false">{{ processing ? '取消处理' : '取消' }}</el-button>
-        <el-button type="primary" :loading="processing" :disabled="disabled || !file || (action === 'trim' && !validRange)" @click="run">{{ actionLabels[action] }}</el-button>
+        <el-button type="primary" :loading="processing" :disabled="disabled || !file || (action === 'trim' && (accountMode === 'loading' || accountMode === 'error' || (!pendingTrim && !validRange)))" @click="run">{{ action === 'trim' && pendingTrim ? '检查并恢复' : actionLabels[action] }}</el-button>
       </div>
     </div>
   </el-dialog>
@@ -81,16 +87,19 @@
 <script setup lang="ts">
 import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { useNode, useVueFlow, type Node } from "@vue-flow/core";
-import { ElButton, ElDialog, ElMessage, ElProgress } from "element-plus";
+import { ElButton, ElDialog, ElMessage, ElMessageBox, ElProgress } from "element-plus";
 import { useNodeFiles, useNodeFfmpeg, useNodeEvent, type WorkspaceFiles, type NodeMediaValue } from "@toonflow/nodes-scaffold/runtime";
 import { showNodeError } from "@toonflow/node-shared/showNodeError";
 import { processVideo } from "../videoProcessing";
+import { canClearUnsubmittedTrim } from "./trimNotSubmitted";
 import { useMediaPreview } from "@toonflow/node-shared/mediaPreview";
+import { useNodePersistence } from "@toonflow/nodes-scaffold/nodeDocument";
 
 const props = defineProps<{ file?: NodeMediaValue; src: string; disabled?: boolean }>();
 const { node } = useNode();
 const { addNodes, addEdges, removeNodes, findNode, getNodes, nodeTypes, removeSelectedElements, addSelectedNodes, nodesSelectionActive, fitView, setCenter } = useVueFlow();
 const files = useNodeFiles();
+const getPersistence = useNodePersistence();
 const loadFfmpeg = useNodeFfmpeg();
 const nodeEvent = useNodeEvent();
 const getCanvas = inject<(() => { id: string } | undefined) | undefined>("canvas", undefined);
@@ -98,6 +107,17 @@ const batchHistory = inject<(action: () => Promise<void>) => Promise<void>>("bat
 const actionLabels = { extractAudio: "提取音轨", separate: "分离音视频", trim: "截取片段" };
 const action = ref<keyof typeof actionLabels>("trim");
 const visible = ref(false);
+const accountMode = ref<"loading" | "customer" | "other" | "error">("loading");
+const accountError = ref("无法确认账号，请关闭后重试。");
+type PendingTrim = { operationId: string; source: string; start: number; end: number; ownerId: string; directory: string; canvasPath: string; recoverOnly?: boolean };
+type Recovery = { operationId: string; source: string; start: number; end: number; state: string };
+const recoveries = ref<Recovery[]>([]);
+const pendingTrim = computed(() => (node.data.pendingTrim ?? null) as PendingTrim | null);
+const interruptedOperation = ref("");
+let trimUserId = "";
+let trimDirectory = "";
+let trimCanvasId = "";
+let trimCanvasPath = "";
 const { src: playbackSrc, preparing: preparingPreview, error: previewError, handleError, handleLoaded } = useMediaPreview(() => visible.value && action.value === "trim" ? props.src : "", "video");
 const processing = ref(false);
 const creatingAnalysis = ref(false);
@@ -115,7 +135,7 @@ const clipLimit = computed(() => duration.value < 0.01 ? duration.value : Math.f
 const minimumLength = computed(() => Math.min(0.01, clipLimit.value));
 const startPercent = computed(() => duration.value && Number.isFinite(start.value) ? Math.min(100, Math.max(0, start.value / duration.value * 100)) : 0);
 const endPercent = computed(() => duration.value && Number.isFinite(end.value) ? Math.min(100, Math.max(0, end.value / duration.value * 100)) : 100);
-const validRange = computed(() => Number.isFinite(start.value) && Number.isFinite(end.value) && start.value >= 0 && end.value > start.value && end.value <= duration.value);
+const validRange = computed(() => accountMode.value !== "loading" && accountMode.value !== "error" && !(accountMode.value === "customer" && duration.value > 120) && Number.isFinite(start.value) && Number.isFinite(end.value) && start.value >= 0 && end.value > start.value && end.value <= duration.value);
 let controller: AbortController | undefined;
 let job: Promise<void> | undefined;
 let thumbnailVideo: HTMLVideoElement | undefined;
@@ -139,13 +159,58 @@ watch(() => props.file?.url, reset, { flush: "sync" });
 watch(() => props.src, reset, { flush: "sync" });
 watch(() => props.disabled, disabled => { if (disabled) reset(); }, { flush: "sync" });
 watch(() => getCanvas?.()?.id, reset, { flush: "sync" });
-watch(visible, value => { if (!value) clearPreview(); });
+watch(visible, (value, _previous, onCleanup) => {
+  if (!value) { clearPreview(); return; }
+  if (action.value !== "trim") return;
+  accountMode.value = "loading";
+  interruptedOperation.value = "";
+  recoveries.value = [];
+  const check = new AbortController();
+  onCleanup(() => check.abort());
+  trimUserId = "";
+  trimDirectory = "";
+  trimCanvasId = "";
+  trimCanvasPath = "";
+  void usesCustomerAccount(check.signal).then(async userId => {
+    if (check.signal.aborted) return;
+    if (!userId) { if (pendingTrim.value) throw new Error("请使用原账号恢复未完成的截取"); accountMode.value = "other"; return; }
+    const { directory } = await files.getWorkspaceFiles().list();
+    const canvas = getCanvas?.()?.id;
+    const persistence = getPersistence?.();
+    if (!canvas || !persistence || persistence.directory !== directory) throw new Error("无法确认当前画布");
+    if (await usesCustomerAccount(check.signal) !== userId || getCanvas?.()?.id !== canvas || getPersistence?.()?.canvasPath !== persistence.canvasPath) throw new Error("账号或画布已变化");
+    trimDirectory = directory;
+    trimCanvasId = canvas;
+    trimCanvasPath = persistence.canvasPath;
+    trimUserId = userId;
+    const saved = pendingTrim.value;
+    if (saved) {
+      if (!/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(saved.operationId) || typeof saved.source !== "string" || !Number.isFinite(saved.start) || !Number.isFinite(saved.end)
+        || saved.ownerId !== userId || saved.directory !== directory || (saved.source !== props.file?.url && saved.recoverOnly !== true)) throw new Error("裁剪记录与当前账号、工作区或视频不一致");
+    }
+    if (!saved) {
+      const response = await fetch("/api/ffmpeg/trim/recoveries", { method: "POST", headers: { "Content-Type": "application/json", "x-toonflow-workspace": "1" }, body: JSON.stringify({ directory }), signal: check.signal });
+      const body = await response.json();
+      if (!response.ok || body?.code !== 200 || !Array.isArray(body.data)) throw new Error("无法读取截取记录，请稍后重试");
+      if (await usesCustomerAccount(check.signal) !== userId || getCanvas?.()?.id !== canvas || getPersistence?.()?.canvasPath !== persistence.canvasPath) throw new Error("账号或画布已变化");
+      recoveries.value = body.data.flatMap((item: any) => {
+        const request = item?.trimRequest;
+        return /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(item?.operationId) && ["reserved", "committed", "interrupted"].includes(item?.state)
+          && typeof request?.source === "string" && request.source.length > 0 && request.source.length <= 4096 && Number.isFinite(request.start) && Number.isFinite(request.end) && request.start >= 0 && request.end > request.start && request.end <= 120
+          ? [{ operationId: item.operationId, source: request.source, start: request.start, end: request.end, state: item.state }] : [];
+      });
+    }
+    if (!check.signal.aborted) accountMode.value = "customer";
+  })
+    .catch(error => { if (!check.signal.aborted) { accountError.value = error instanceof Error ? error.message : "无法确认账号，请关闭后重试。"; accountMode.value = "error"; } });
+});
 watch(playbackSrc, () => { clearPreview(); duration.value = 0; frames.value = []; });
 onBeforeUnmount(() => { cancel(); clearPreview(); });
 nodeEvent.on("save", reason => {
   if (reason === "reload" && processing.value) throw new Error("视频处理中，请完成或取消后再刷新节点");
 });
-nodeEvent.on("delete", async () => { cancel(); await job; });
+nodeEvent.on("delete", async () => { cancel(); await job; if (pendingTrim.value) throw new Error("请先恢复未完成的截取，再删除节点"); });
+nodeEvent.on("copy", () => ({ pendingTrim: undefined }));
 
 function open(value: keyof typeof actionLabels) {
   if (processing.value || creatingAnalysis.value || props.disabled || !props.file) return;
@@ -339,22 +404,126 @@ function seekTrack(event: PointerEvent) {
 }
 
 function run() {
-  if (processing.value || props.disabled || !props.file || (action.value === "trim" && !validRange.value)) return;
+  if (processing.value || props.disabled || !props.file || (action.value === "trim" && !pendingTrim.value && !validRange.value)) return;
   job = process();
+}
+
+async function selectRecovery(item: Recovery) {
+  if (processing.value || pendingTrim.value || accountMode.value !== "customer") return;
+  const current = new AbortController();
+  processing.value = true;
+  try {
+    const persistence = getPersistence?.();
+    if (await usesCustomerAccount(current.signal) !== trimUserId || !persistence || persistence.directory !== trimDirectory || persistence.canvasPath !== trimCanvasPath
+      || getCanvas?.()?.id !== trimCanvasId || !props.file || !recoveries.value.includes(item)) throw new Error("账号、画布或视频已变化");
+    node.data.pendingTrim = { operationId: item.operationId, source: item.source, start: item.start, end: item.end, ownerId: trimUserId, directory: trimDirectory, canvasPath: trimCanvasPath, recoverOnly: true } satisfies PendingTrim;
+    await persistence.save(current.signal);
+    ElMessage.success("已选中截取记录，请点击检查并恢复");
+  } catch (error) { showNodeError(error, "选择截取记录失败"); }
+  finally { processing.value = false; }
+}
+
+async function usesCustomerAccount(signal: AbortSignal) {
+  const response = await fetch("/api/multiTenant/user/session", { headers: { "x-toonflow-workspace": "1" }, signal });
+  const body = await response.json();
+  if (!response.ok || body?.code !== 200 || typeof body.data?.publicWeb !== "boolean" || typeof body.data?.enabled !== "boolean") throw new Error("无法确认当前账号，请刷新后重试");
+  if (body.data?.publicWeb && !body.data?.user) throw new Error("请先登录后重试");
+  if (body.data?.publicWeb && !["user", "admin"].includes(body.data?.user?.role)) throw new Error("无法确认当前账号，请刷新后重试");
+  if (body.data.publicWeb === true && body.data.user?.role === "user") {
+    if (typeof body.data.user.id !== "string" || !/^[a-f0-9-]{36}$/.test(body.data.user.id)) throw new Error("无法确认当前账号，请刷新后重试");
+    return body.data.user.id as string;
+  }
+  return null;
+}
+
+async function trimForCustomer(workspace: WorkspaceFiles, source: string, start: number, end: number, signal: AbortSignal) {
+  const { directory } = await workspace.list();
+  if (directory !== trimDirectory || getCanvas?.()?.id !== trimCanvasId) throw new Error("工作区或画布已变化，请重新打开裁剪");
+  const previous = pendingTrim.value;
+  if (!previous) {
+    const capabilities = await fetch("/api/ffmpeg/trim/capabilities", { headers: { "x-toonflow-workspace": "1" }, signal });
+    const body = await capabilities.json();
+    if (!capabilities.ok || body?.code !== 200 || body?.data?.create !== true) throw new Error("截取暂处于只读模式，请稍后重试");
+    if (await usesCustomerAccount(signal) !== trimUserId || getCanvas?.()?.id !== trimCanvasId) throw new Error("账号或画布已变化，请重新打开裁剪");
+  }
+  const pending = previous ? { ...previous, canvasPath: trimCanvasPath } : { operationId: crypto.randomUUID(), source, start, end, ownerId: trimUserId, directory: trimDirectory, canvasPath: trimCanvasPath };
+  const persistence = getPersistence?.();
+  if (!persistence || persistence.directory !== trimDirectory || persistence.canvasPath !== trimCanvasPath) throw new Error("无法保存裁剪恢复记录");
+  node.data.pendingTrim = pending;
+  // 每次重试都先确认记录已落盘；之前一次保存失败不能只凭内存标记继续提交。
+  await persistence.save(signal);
+  if (previous) {
+    const check = await fetch("/api/ffmpeg/trim/status", { method: "POST", headers: { "Content-Type": "application/json", "x-toonflow-workspace": "1" }, body: JSON.stringify({ directory, operationId: pending.operationId, source: pending.source, start: pending.start, end: pending.end }), signal });
+    const state = await check.json();
+    if (!check.ok || state?.code !== 200) throw new Error("无法确认上次裁剪状态，请稍后重试");
+    if (state.data?.status === "ready" && state.data.nodeId === pending.operationId && state.data.outputPath === `assets/${pending.operationId}/video.mp4`) return { nodeId: pending.operationId, outputPath: state.data.outputPath as string, duration: pending.end - pending.start, width: preview.value?.videoWidth ?? 0, height: preview.value?.videoHeight ?? 0 };
+    if (state.data?.status === "pending") throw new Error("上次裁剪状态尚未确认，请联系管理员");
+    if (state.data?.status === "interrupted") { interruptedOperation.value = pending.operationId; throw new Error("上次截取已中断，可放弃查看后重新截取"); }
+    if (state.data?.status !== "notFound" || pending.recoverOnly) throw new Error("无法确认上次裁剪状态，请联系管理员");
+  }
+  const response = await fetch("/api/ffmpeg/trim", { method: "POST", headers: { "Content-Type": "application/json", "x-toonflow-workspace": "1" }, body: JSON.stringify({ directory, operationId: pending.operationId, source: pending.source, start: pending.start, end: pending.end }), signal });
+  const body = await response.json();
+  if (canClearUnsubmittedTrim(!previous, response.status, body, pending.operationId)) {
+    const cleanupSignal = AbortSignal.timeout(10000);
+    if (await usesCustomerAccount(cleanupSignal) !== trimUserId || (await workspace.list()).directory !== trimDirectory || getCanvas?.()?.id !== trimCanvasId) throw new Error("账号、工作区或画布已变化，请重新打开裁剪");
+    await finishTrimRecord(cleanupSignal, pending.operationId);
+    throw new Error("截取暂处于只读模式，请稍后重试");
+  }
+  if (!response.ok || body?.code !== 200) throw new Error(typeof body?.message === "string" ? body.message : "裁剪暂不可用，请稍后重试");
+  const data = body.data;
+  if (!data || data.nodeId !== pending.operationId || data.outputPath !== `assets/${data.nodeId}/video.mp4`
+    || !Number.isFinite(data.duration) || !Number.isFinite(data.width) || !Number.isFinite(data.height)) throw new Error("裁剪结果无效");
+  return data as { nodeId: string; outputPath: string; duration: number; width: number; height: number };
+}
+
+async function finishTrimRecord(signal: AbortSignal, expectedOperationId: string) {
+  const persistence = getPersistence?.(), saved = pendingTrim.value;
+  if (!saved || saved.operationId !== expectedOperationId || saved.ownerId !== trimUserId || !persistence || persistence.directory !== saved.directory || persistence.canvasPath !== saved.canvasPath || getCanvas?.()?.id !== trimCanvasId) throw new Error("账号、画布或裁剪记录已变化，请重新打开");
+  delete node.data.pendingTrim;
+  try { await persistence.save(signal); }
+  catch (error) { if (!pendingTrim.value) node.data.pendingTrim = saved; throw error; }
+}
+
+async function clearRecoverySelection() {
+  const saved = pendingTrim.value;
+  if (processing.value || accountMode.value !== "customer" || !saved || !saved.recoverOnly && interruptedOperation.value !== saved.operationId) return;
+  const current = new AbortController();
+  processing.value = true;
+  try {
+    const interrupted = interruptedOperation.value === saved.operationId;
+    if (interrupted) {
+      try { await ElMessageBox.confirm("此截取已中断且没有可恢复的结果。释放它预留的空间后，可以重新截取。", "释放中断任务空间", { confirmButtonText: "释放空间", cancelButtonText: "取消", type: "warning" }); }
+      catch { return; }
+    }
+    if (await usesCustomerAccount(current.signal) !== trimUserId || saved.ownerId !== trimUserId || saved.directory !== trimDirectory || saved.canvasPath !== trimCanvasPath || getCanvas?.()?.id !== trimCanvasId) throw new Error("账号、工作区或画布已变化，请重新打开裁剪");
+    if (pendingTrim.value?.operationId !== saved.operationId) throw new Error("裁剪记录已变化，请重新打开");
+    if (interrupted) {
+      const response = await fetch("/api/ffmpeg/trim/discard", { method: "POST", headers: { "Content-Type": "application/json", "x-toonflow-workspace": "1" }, body: JSON.stringify({ directory: trimDirectory, operationId: saved.operationId, confirm: true }), signal: current.signal });
+      const body = await response.json();
+      if (!response.ok || body?.code !== 200 || body?.data?.released !== true) throw new Error("暂无法确认空间已释放，请稍后重试");
+      if (await usesCustomerAccount(current.signal) !== trimUserId || pendingTrim.value?.operationId !== saved.operationId) throw new Error("账号或裁剪记录已变化，请重新打开");
+    }
+    await finishTrimRecord(current.signal, saved.operationId);
+    interruptedOperation.value = "";
+    visible.value = false;
+    ElMessage.success(interrupted ? "中断任务空间已释放" : "已放弃查看，原截取记录仍保留");
+  } catch (error) { showNodeError(error, "无法放弃查看"); }
+  finally { processing.value = false; }
 }
 
 async function process() {
   const operation = action.value;
   const requiredTypes = operation === "extractAudio" ? ["remote-audioNode"] : operation === "trim" ? ["remote-videoNode"] : ["remote-videoNode", "remote-audioNode"];
   if (requiredTypes.some(type => !nodeTypes?.value?.[type])) return void ElMessage.error("请先启用所需的视频或音频节点插件");
-  const source = props.file!.url;
-  const clipStart = start.value;
-  const clipEnd = end.value;
+  const previous = operation === "trim" ? pendingTrim.value : null;
+  const source = previous?.source ?? props.file!.url;
+  const clipStart = previous?.start ?? start.value;
+  const clipEnd = previous?.end ?? end.value;
   const current = controller = new AbortController();
   processing.value = true;
   cancelling.value = false;
   preview.value?.pause();
-  const outputs = requiredTypes.map(type => {
+  let outputs: { id: string; type: string; audio: boolean; path: string }[] = requiredTypes.map(type => {
     const id = crypto.randomUUID();
     const audio = type === "remote-audioNode";
     return { id, type, audio, path: `assets/${id}/${audio ? "audio.m4a" : "video.mp4"}` };
@@ -364,24 +533,42 @@ async function process() {
   let committed = false;
   try {
     workspace = files.getWorkspaceFiles();
-    const ffmpeg = await loadFfmpeg(current.signal);
-    current.signal.throwIfAborted();
-    await workspace.mkdir("assets").catch(error => { if (error?.response?.data?.data?.code !== "EEXIST") throw error; });
-    for (const output of outputs) {
+    let media: { duration: number; width?: number; height?: number };
+    const currentUser = operation === "trim" ? await usesCustomerAccount(current.signal) : null;
+    if (operation === "trim" && (currentUser ?? "") !== trimUserId) throw new Error("账号已变化，请重新打开裁剪");
+    if (operation === "trim" && currentUser) {
+      const result = await trimForCustomer(workspace, source, clipStart, clipEnd, current.signal);
+      const existing = findNode(result.nodeId);
+      if (existing) {
+        if (existing.type !== "remote-videoNode" || existing.data?.outputs?.video?.dataType !== "VIDEO" || existing.data?.outputs?.video?.value?.url !== result.outputPath) throw new Error("裁剪节点编号冲突，请联系管理员");
+        await finishTrimRecord(current.signal, result.nodeId);
+        visible.value = false;
+        ElMessage.success("截取结果已保存");
+        return;
+      }
+      outputs = [{ id: result.nodeId, type: "remote-videoNode", audio: false, path: result.outputPath }];
+      media = result;
+    } else {
+      const ffmpeg = await loadFfmpeg(current.signal);
       current.signal.throwIfAborted();
-      const directory = `assets/${output.id}`;
-      await workspace.mkdir(directory);
-      createdDirectories.push(directory);
+      await workspace.mkdir("assets").catch(error => { if (error?.response?.data?.data?.code !== "EEXIST") throw error; });
+      for (const output of outputs) {
+        current.signal.throwIfAborted();
+        const directory = `assets/${output.id}`;
+        await workspace.mkdir(directory);
+        createdDirectories.push(directory);
+      }
+      current.signal.throwIfAborted();
+      media = await processVideo(ffmpeg, source, {
+        action: operation,
+        audioPath: outputs.find(output => output.audio)?.path,
+        videoPath: outputs.find(output => !output.audio)?.path,
+        start: clipStart,
+        end: clipEnd,
+      }, current.signal);
     }
     current.signal.throwIfAborted();
-    const media = await processVideo(ffmpeg, source, {
-      action: operation,
-      audioPath: outputs.find(output => output.audio)?.path,
-      videoPath: outputs.find(output => !output.audio)?.path,
-      start: clipStart,
-      end: clipEnd,
-    }, current.signal);
-    current.signal.throwIfAborted();
+    if (currentUser && ((await usesCustomerAccount(current.signal)) !== trimUserId || (await workspace.list()).directory !== trimDirectory || getCanvas?.()?.id !== trimCanvasId)) throw new Error("账号、工作区或画布已变化，结果可在原画布恢复");
     const width = Math.max(320, media.width && media.height ? 240 * media.width / media.height + 18 : 320);
     const x = node.computedPosition.x + node.dimensions.width + 80;
     const height = outputs.length * 320;
@@ -395,7 +582,7 @@ async function process() {
       type: output.type,
       position: { x, y: y + index * 320 },
       data: {
-        label: `${node.data.label || "视频"} · ${output.audio ? "音轨" : operation === "separate" ? "静音视频" : `${clipStart.toFixed(2)}–${clipEnd.toFixed(2)} 秒`}`,
+        label: `${previous?.recoverOnly ? `历史素材 ${source.split(/[\\/]/).pop() || source}` : node.data.label || "视频"} · ${output.audio ? "音轨" : operation === "separate" ? "静音视频" : `${clipStart.toFixed(2)}–${clipEnd.toFixed(2)} 秒`}`,
         outputs: { [output.audio ? "audio" : "video"]: { dataType: output.audio ? "AUDIO" : "VIDEO", value: { url: output.path, mimeType: output.audio ? "audio/mp4" : "video/mp4" } } },
       },
     }));
@@ -405,6 +592,7 @@ async function process() {
       addNodes(nodes);
       committed = true;
     });
+    if (currentUser) await finishTrimRecord(current.signal, outputs[0]!.id);
     visible.value = false;
     ElMessage.success(`${actionLabels[operation]}完成，已生成 ${nodes.length} 个节点`);
   } catch (error) {

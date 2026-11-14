@@ -13,7 +13,7 @@ export function projectQuotaRoot() {
   return value ? resolve(value) : undefined;
 }
 
-export async function ensureProjectQuota(userId: string, operation: "enroll" | "check") {
+export async function ensureProjectQuota(userId: string, operation: "enroll" | "check" | "trimInit") {
   const root = projectQuotaRoot();
   if (!root) return;
   if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(userId)) throw Object.assign(new Error("账号标识无效"), { status: 403 });

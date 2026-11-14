@@ -17,7 +17,7 @@ async function run(message: Exclude<FfmpegWorkerRequest, { type: "cancel" }>, si
   if (message.type === "version") {
     const child = Bun.spawn([message.path, "-version"], {
       stdin: "ignore", stdout: "pipe", stderr: "ignore", windowsHide: true, timeout: 15000, signal,
-      env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== "FFREPORT")),
+      env: Object.fromEntries(Object.entries(process.env).filter(([key]) => !["FFREPORT", "TOONFLOW_TRIM_TOKEN", "TOONFLOW_TRIM_STORE_TOKEN"].includes(key.toUpperCase()))),
     });
     // 取消可能先关闭输出流；仍等子进程退出后，调用方才能替换或清理可执行文件。
     const [output, code] = await Promise.all([child.stdout.text(), child.exited]).finally(() => child.exited);

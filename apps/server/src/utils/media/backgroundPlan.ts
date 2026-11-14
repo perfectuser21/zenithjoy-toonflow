@@ -31,7 +31,7 @@ export async function inspectBackgroundVideo(source: string, signal: AbortSignal
   const paths = await prepareWorkspaceFfmpeg(signal);
   return withFileAccess([source], "read", async () => {
     const options = { stdin: "ignore" as const, stdout: "pipe" as const, stderr: "pipe" as const, windowsHide: true,
-      signal, env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== "FFREPORT")) };
+      signal, env: Object.fromEntries(Object.entries(process.env).filter(([key]) => !["FFREPORT", "TOONFLOW_TRIM_TOKEN", "TOONFLOW_TRIM_STORE_TOKEN"].includes(key.toUpperCase()))) };
     const probe = Bun.spawn([paths.ffprobe, "-v", "error", "-protocol_whitelist", "file", "-f", "mov", "-format_whitelist", "mov",
       "-enable_drefs", "0", "-use_absolute_path", "0", "-select_streams", "V:0", "-show_entries", "stream=duration,avg_frame_rate,width,height:format=duration", "-of", "json", source], options);
     const [out, probeExit] = await Promise.all([probe.stdout.text(), probe.exited]);
@@ -103,7 +103,7 @@ export async function splitBackgroundVideo(cwd: string, source: string, planId: 
         "-map", "0:a:0?", "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-vf", "fps=30,pad=ceil(iw/2)*2:ceil(ih/2)*2", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-movflags", "+faststart", "-fs", String(maximum), file], {
         stdin: "ignore", stdout: "ignore", stderr: "ignore", windowsHide: true, signal,
-        env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== "FFREPORT")),
+        env: Object.fromEntries(Object.entries(process.env).filter(([key]) => !["FFREPORT", "TOONFLOW_TRIM_TOKEN", "TOONFLOW_TRIM_STORE_TOKEN"].includes(key.toUpperCase()))),
       });
       if (await child.exited !== 0) invalid("视频切片失败，已生成的片段已保留", 422);
     }, signal);
@@ -168,7 +168,7 @@ export async function mergeBackgroundVideo(cwd: string, source: string, paths: s
       "-map", "[v]", "-map", `${files.length}:a:0?`, "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p",
       "-c:a", "aac", "-movflags", "+faststart", "-map_metadata", "-1", "-fs", String(maxBytes), target.path], {
       stdin: "ignore", stdout: "ignore", stderr: "ignore", windowsHide: true, signal,
-      env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== "FFREPORT")),
+      env: Object.fromEntries(Object.entries(process.env).filter(([key]) => !["FFREPORT", "TOONFLOW_TRIM_TOKEN", "TOONFLOW_TRIM_STORE_TOKEN"].includes(key.toUpperCase()))),
     });
     if (await child.exited !== 0) invalid("视频合成失败，原片及分段均已保留", 422);
   }, signal);

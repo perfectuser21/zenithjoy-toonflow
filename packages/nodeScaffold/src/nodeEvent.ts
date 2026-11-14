@@ -70,7 +70,7 @@ export function useNodeEvent(nodeId = useNodeId(), canvas = useVueFlow()) {
     if (args[0] === "copy") {
       return (async () => {
         const node = canvas.findNode(nodeId);
-        const data: Record<string, unknown> = {};
+        const data: Record<string, unknown> = node?.data?.pendingTrim ? { pendingTrim: undefined } : {};
         for (const callback of [...events?.copy ?? []]) Object.assign(data, await callback());
         if (canvas.findNode(nodeId) !== node || registry.get(nodeId) !== events) throw new Error("节点已切换，请重新复制");
         return data;
@@ -79,6 +79,7 @@ export function useNodeEvent(nodeId = useNodeId(), canvas = useVueFlow()) {
     return (async () => {
       if (args[0] === "delete") {
         const node = canvas.findNode(nodeId);
+        if (node?.data?.pendingTrim) throw new Error("请先恢复未完成的截取，再删除节点");
         // 删除前完成已有文件写入，保证立即撤销时能读回最新内容。
         for (const callback of [...events?.save ?? []]) await callback();
         if (canvas.findNode(nodeId) !== node || registry.get(nodeId) !== events) throw new Error("节点已切换，请重新操作");

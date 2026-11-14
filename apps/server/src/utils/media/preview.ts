@@ -62,7 +62,7 @@ export async function createVideoFrame(source: string, timeSeconds: number, sign
         "-f", "mov", "-format_whitelist", "mov", "-enable_drefs", "0", "-use_absolute_path", "0", "-ss", String(timeSeconds), "-i", source,
         "-map", "0:V:0", "-frames:v", "1", "-c:v", "png", "-f", "image2", "-update", "1", "-map_metadata", "-1", "-fs", String(10 * 1024 * 1024), output], {
         cwd: directory, stdin: "ignore", stdout: "ignore", stderr: "ignore", windowsHide: true, signal: active,
-        env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== "FFREPORT")),
+        env: Object.fromEntries(Object.entries(process.env).filter(([key]) => !["FFREPORT", "TOONFLOW_TRIM_TOKEN", "TOONFLOW_TRIM_STORE_TOKEN"].includes(key.toUpperCase()))),
       });
       if (await child.exited !== 0) throw Object.assign(new Error("视频抽帧失败，请检查视频格式和时间"), { status: 422 });
     }, active);
@@ -111,7 +111,7 @@ export async function createPreview(content: Buffer, kind: PreviewKind, signal: 
       "-protocol_whitelist", "file", "-max_streams", "32", ...inputOptions, "-i", source,
       ...outputOptions, "-map_metadata", "-1", "-fs", String(previewLimit), output], {
       cwd: directory, stdin: "ignore", stdout: "ignore", stderr: "pipe", windowsHide: true, signal: active,
-      env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== "FFREPORT")),
+      env: Object.fromEntries(Object.entries(process.env).filter(([key]) => !["FFREPORT", "TOONFLOW_TRIM_TOKEN", "TOONFLOW_TRIM_STORE_TOKEN"].includes(key.toUpperCase()))),
     });
     const readErrors = async () => {
       const decoder = new TextDecoder();

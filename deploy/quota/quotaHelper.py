@@ -5,6 +5,7 @@ import fcntl
 import json
 import os
 import re
+import selectors
 import socket
 import sqlite3
 import stat
@@ -17,6 +18,13 @@ import time
 if len(sys.argv) != 6 or os.geteuid() != 0:
     raise SystemExit("需要 root 及固定的卷根目录、socket、服务 UID、服务 GID")
 root, socket_path, service_uid, service_gid, auth_db_path = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
+trim_store_uid = int(os.environ.get('TOONFLOW_TRIM_STORE_UID', '0'))
+trim_store_gid = int(os.environ.get('TOONFLOW_TRIM_STORE_GID', '0'))
+trim_access_gid = int(os.environ.get('TOONFLOW_TRIM_ACCESS_GID', '0'))
+if any((trim_store_uid, trim_store_gid, trim_access_gid)) and (min(trim_store_uid, trim_store_gid, trim_access_gid) <= 0 or trim_store_uid == service_uid or trim_access_gid == service_gid or trim_store_gid == service_gid):
+    raise SystemExit('裁剪服务须使用独立的用户及窄权限组')
+if trim_store_uid:
+    from trimQuota import ensure_trim_directory, attributes
 if service_uid <= 0 or service_gid <= 0:
     raise SystemExit("服务必须使用非 root UID 和 GID")
 root = os.path.realpath(root)
@@ -107,6 +115,53 @@ def quota_row(project_id, inode=False):
     if len(rows) != 1 or len(rows[0]) < 5:
         raise ValueError("项目配额状态异常")
     return [int(value) for value in rows[0][1:4]]
+
+
+def read_active_account(user_id):
+    """以服务 UID 只读账号数据库，关闭账号不能创建或使用私有裁剪空间。"""
+    reader = """import json,os,sqlite3,stat,sys
+p,u=sys.argv[1:]
+f=os.open(p,os.O_RDONLY|os.O_NOFOLLOW)
+try:
+ s=os.fstat(f)
+ if not stat.S_ISREG(s.st_mode) or s.st_nlink!=1: raise ValueError()
+ d=sqlite3.connect('file:/proc/self/fd/%d?mode=ro' % f,uri=True,timeout=1)
+ try: v=d.execute('SELECT disabled FROM multiTenantUser WHERE id=?',(u,)).fetchone()
+ finally: d.close()
+ print(json.dumps(v))
+finally: os.close(f)
+"""
+    def drop_privileges():
+        os.setgroups([])
+        os.setgid(service_gid)
+        os.setuid(service_uid)
+    result = subprocess.run([sys.executable, '-c', reader, auth_db_path, user_id], check=True,
+                            capture_output=True, text=True, timeout=5, preexec_fn=drop_privileges)
+    account = json.loads(result.stdout)
+    if account is None or account[0]:
+        raise ValueError('账号不存在或已禁用')
+
+
+def read_ready_project(user_id):
+    """只读检查已登记账号和配额，不执行 enroll、mkdir 或 chown。"""
+    if not isinstance(user_id, str) or not re.fullmatch(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}', user_id):
+        raise ValueError('账号标识无效')
+    record = db.execute('SELECT projectId,ready FROM projects WHERE userId=?', (user_id,)).fetchone()
+    if not record or record[1] != 1 or not 0 < record[0] <= 2147483647:
+        raise ValueError('账号配额尚未准备')
+    read_active_account(user_id)
+    path = f'/proc/self/fd/{workspaces_fd}/{user_id}'
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != service_uid or info.st_dev != root_stat.st_dev:
+            raise ValueError('账号配额目录异常')
+        _, flags, project_id = attributes(fd)
+        if project_id != record[0] or not flags & 0x200 or quota_row(project_id)[2] != 5 * 1024 * 1024 or quota_row(project_id, True)[2] != 100000:
+            raise ValueError('账号配额状态异常')
+    finally:
+        os.close(fd)
+    return project_id
 
 
 def provision(user_id, operation):
@@ -206,65 +261,83 @@ finally: os.close(f)
     return {"ready": True, "projectId": project_id}
 
 
-server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-if os.path.dirname(socket_path) != root or os.path.basename(socket_path) in ("", ".", ".."):
-    raise SystemExit("socket 必须位于受保护的数据根目录")
-name = os.path.basename(socket_path)
-try:
-    stale = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
-except FileNotFoundError:
-    stale = None
-if stale is not None:
-    if not stat.S_ISSOCK(stale.st_mode) or stale.st_uid != 0 or stale.st_gid != service_gid or stat.S_IMODE(stale.st_mode) != 0o660:
-        raise SystemExit("已有 socket 类型或权限异常")
-    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    probe.settimeout(0.5)
+def listen(path, group):
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    if os.path.dirname(path) != root or os.path.basename(path) in ("", ".", ".."):
+        raise SystemExit("socket 必须位于受保护的数据根目录")
+    name = os.path.basename(path)
     try:
-        result = probe.connect_ex(f"/proc/self/fd/{root_fd}/{name}")
+        stale = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        stale = None
+    if stale is not None:
+        if not stat.S_ISSOCK(stale.st_mode) or stale.st_uid != 0 or stale.st_gid != group or stat.S_IMODE(stale.st_mode) != 0o660:
+            raise SystemExit("已有 socket 类型或权限异常")
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        probe.settimeout(0.5)
+        try:
+            result = probe.connect_ex(f"/proc/self/fd/{root_fd}/{name}")
+        finally:
+            probe.close()
+        if result != errno.ECONNREFUSED:
+            raise SystemExit("已有 socket 不可安全回收")
+        current = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != (stale.st_dev, stale.st_ino):
+            raise SystemExit("socket 已发生变化")
+        os.unlink(name, dir_fd=root_fd)
+    previous_mask = os.umask(0o117)
+    try:
+        server.bind(f"/proc/self/fd/{root_fd}/{name}")
     finally:
-        probe.close()
-    if result != errno.ECONNREFUSED:
-        raise SystemExit("已有 socket 不可安全回收")
-    current = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
-    if (current.st_dev, current.st_ino) != (stale.st_dev, stale.st_ino):
-        raise SystemExit("socket 已发生变化")
-    os.unlink(name, dir_fd=root_fd)
-previous_mask = os.umask(0o117)
-try:
-    server.bind(f"/proc/self/fd/{root_fd}/{name}")
-finally:
-    os.umask(previous_mask)
-os.chown(name, 0, service_gid, dir_fd=root_fd, follow_symlinks=False)
-socket_stat = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
-if not stat.S_ISSOCK(socket_stat.st_mode) or socket_stat.st_uid != 0 or socket_stat.st_gid != service_gid or stat.S_IMODE(socket_stat.st_mode) != 0o660:
-    raise SystemExit("socket 身份或权限无效")
-server.listen(16)
+        os.umask(previous_mask)
+    os.chown(name, 0, group, dir_fd=root_fd, follow_symlinks=False)
+    socket_stat = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+    if not stat.S_ISSOCK(socket_stat.st_mode) or socket_stat.st_uid != 0 or socket_stat.st_gid != group or stat.S_IMODE(socket_stat.st_mode) != 0o660:
+        raise SystemExit("socket 身份或权限无效")
+    server.listen(16)
+    return server
+
+selector = selectors.DefaultSelector()
+selector.register(listen(socket_path, service_gid), selectors.EVENT_READ, "app")
+if trim_store_uid:
+    selector.register(listen(os.path.join(root, "quotaTrimRead.sock"), trim_store_gid), selectors.EVENT_READ, "trim")
 while True:
-    conn, _ = server.accept()
-    with conn:
-        try:
-            _, uid, _ = struct.unpack("3i", conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
-            if uid != service_uid:
-                raise ValueError("调用者无权限")
-            conn.settimeout(5)
-            data = b""
-            while not data.endswith(b"\n") and len(data) < 1024:
-                part = conn.recv(1024 - len(data))
-                if not part:
-                    break
-                data += part
-            request = json.loads(data)
-            if request == {"operation": "health"}:
-                verify_volume()
-                response = {"ready": True}
-            elif isinstance(request, dict) and set(request) == {"userId", "operation"} and request["operation"] in ("enroll", "check"):
-                verify_volume()
-                response = provision(request["userId"], request["operation"])
-            else:
-                raise ValueError("请求无效")
-        except Exception:
-            response = {"ready": False}
-        try:
-            conn.sendall(json.dumps(response, separators=(",", ":")).encode() + b"\n")
-        except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
-            pass
+    for key, _ in selector.select():
+        conn, _ = key.fileobj.accept()
+        with conn:
+            try:
+                _, uid, _ = struct.unpack("3i", conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+                if uid != (service_uid if key.data == "app" else trim_store_uid):
+                    raise ValueError("调用者无权限")
+                conn.settimeout(5)
+                data = b""
+                while not data.endswith(b"\n") and len(data) < 1024:
+                    part = conn.recv(1024 - len(data))
+                    if not part:
+                        break
+                    data += part
+                request = json.loads(data)
+                if key.data == "app" and request == {"operation": "health"}:
+                    verify_volume()
+                    response = {"ready": True}
+                elif isinstance(request, dict) and set(request) == {"userId", "operation"}:
+                    operation = request["operation"]
+                    verify_volume()
+                    if key.data == "app" and operation in ("enroll", "check"):
+                        response = provision(request["userId"], operation)
+                    elif trim_store_uid and key.data == "app" and operation == "trimInit":
+                        project_id = read_ready_project(request["userId"])
+                        ensure_trim_directory(root_fd, root_stat.st_dev, request["userId"], project_id, trim_store_uid, trim_access_gid)
+                        response = {"ready": True, "projectId": project_id}
+                    elif key.data == "trim" and operation == "trimCheck":
+                        response = {"ready": True, "projectId": read_ready_project(request["userId"])}
+                    else:
+                        raise ValueError("请求无效")
+                else:
+                    raise ValueError("请求无效")
+            except Exception:
+                response = {"ready": False}
+            try:
+                conn.sendall(json.dumps(response, separators=(",", ":")).encode() + b"\n")
+            except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
+                pass

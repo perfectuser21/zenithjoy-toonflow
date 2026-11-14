@@ -1,0 +1,13 @@
+[Unit]
+Description=Toonflow isolated trim store socket
+
+[Socket]
+ListenStream=/run/toonflow-trim-store/store.sock
+SocketUser=toonflow-trim-store
+SocketGroup=toonflow-trim-access
+SocketMode=0660
+FileDescriptorName=trimStore
+RemoveOnStop=no
+
+[Install]
+WantedBy=sockets.target
