@@ -6,10 +6,29 @@ import { z } from "zod";
 import u from "@/utils";
 import { validateFields } from "@/lib/middleware";
 import { success } from "@/lib/responseFormat";
+import { requestIdentity } from "@/utils/multiTenant/runtime";
+import { authenticateWeb } from "@/utils/multiTenant";
+import { withManagedTrim } from "@/utils/media/trimVideo";
 
 const router = Router();
 
 export default router.get("/", validateFields({ directory: z.string().min(1).max(4096), path: z.string().max(4096), snapshot: z.enum(["true"]).optional(), maxBytes: z.coerce.number().int().positive().max(20 * 1024 * 1024).optional() }, "query"), async (req, res, next) => {
+  const actor = requestIdentity(req);
+  if (actor?.role === "user") {
+    const directory = await u.workspace.resolveWorkspace(req, req.query.directory as string);
+    const managed = await withManagedTrim(directory, actor.id, req.query.path as string, AbortSignal.timeout(30000), async bytes => {
+      const current = await authenticateWeb(req);
+      if (!current || current.id !== actor.id || current.role !== "user" || await u.workspace.resolveWorkspace(req, req.query.directory as string) !== directory) throw Object.assign(new Error("账号或工作区权限已变化"), { status: 403 });
+      if (req.query.snapshot === "true") throw Object.assign(new Error("视频不是文本文件"), { status: 415 });
+      await new Promise<void>(done => {
+        const timer = setTimeout(() => { res.destroy(); done(); }, 30000);
+        const finish = () => { clearTimeout(timer); done(); };
+        res.once("finish", finish); res.once("close", finish);
+        res.set("Cache-Control", "no-store").type("video/mp4").send(bytes);
+      });
+    });
+    if (managed.managed) return;
+  }
   const { path } = await u.workspaceFile.resolveWorkspaceFile(req, req.query.directory as string, req.query.path as string);
   const file = await lstat(path);
   if (!file.isFile()) throw Object.assign(new Error("只能读取文件"), { status: 400 });

@@ -6,6 +6,7 @@ import { acquireFileAccess, withFileAccess, withSyncFileAccess } from "./access.
 
 export { withFileAccess } from "./access.ts";
 export { constants } from "node:fs";
+export const readlink = promises.readlink;
 export type { Dirent, Stats, PathLike, Dir, ReadStream, WriteStream } from "node:fs";
 export type { FileHandle } from "node:fs/promises";
 

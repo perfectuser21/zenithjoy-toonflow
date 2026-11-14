@@ -50,6 +50,7 @@ export function createSandboxContext({ files, resolvePath }: Pick<ToolContext, "
         const child = execFile(process.execPath, [fileURLToPath(entry)], {
           encoding: "utf8", windowsHide: true, signal, killSignal: "SIGKILL",
           timeout: request.timeoutMs, maxBuffer: 32 * 1024 * 1024,
+          env: Object.fromEntries(Object.entries(process.env).filter(([key]) => !["TOONFLOW_TRIM_TOKEN", "TOONFLOW_TRIM_STORE_TOKEN"].includes(key.toUpperCase()))),
         }, (error, stdout, stderr) => {
           if (signal?.aborted) reject(signal.reason);
           else if (error?.killed && !inputError && error.code !== "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") reject(new Error(`沙盒执行超过 ${request.timeoutMs} 毫秒，进程已终止`, { cause: error }));

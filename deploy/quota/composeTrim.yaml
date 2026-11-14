@@ -1,0 +1,20 @@
+# 仅供专用隔离测试卷；先完成独立服务和素材回退验收。
+services:
+  toonflow:
+    image: ${TOONFLOW_IMAGE:?需要固定候选镜像}
+    group_add:
+      - ${TOONFLOW_TRIM_ACCESS_GID:?需要裁剪访问组 GID}
+    environment:
+      TOONFLOW_SECURE_TRIM_ENABLED: "1"
+      TOONFLOW_SECURE_TRIM_READ_ONLY: ${TOONFLOW_SECURE_TRIM_READ_ONLY:-0}
+      TOONFLOW_SECURE_TRIM_SINGLE_INSTANCE: "1"
+      TOONFLOW_TRIM_SOCKET: /run/toonflow-trim-worker/worker.sock
+      TOONFLOW_TRIM_HELPER_UID: ${TOONFLOW_TRIM_HELPER_UID:?需要裁剪 worker UID}
+      TOONFLOW_TRIM_TOKEN_FILE: /run/toonflow-trim-secrets/worker
+      TOONFLOW_TRIM_STORE_SOCKET: /run/toonflow-trim-store/store.sock
+      TOONFLOW_TRIM_STORE_UID: ${TOONFLOW_TRIM_STORE_UID:?需要裁剪存储 UID}
+      TOONFLOW_TRIM_STORE_TOKEN_FILE: /run/toonflow-trim-secrets/store
+    volumes:
+      - /run/toonflow-trim-worker:/run/toonflow-trim-worker:ro
+      - /run/toonflow-trim-store:/run/toonflow-trim-store:ro
+      - /etc/toonflow-trim/secrets:/run/toonflow-trim-secrets:ro

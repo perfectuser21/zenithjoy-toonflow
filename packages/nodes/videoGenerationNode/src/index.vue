@@ -12,12 +12,12 @@
     <template #topActions>
       <el-button :icon="IconMusic" text :disabled="!outputFile || generating || deleting || uploading || actions?.processing" @click.stop="actions?.open('extractAudio')">提取音轨</el-button>
       <el-button :icon="IconLayersSubtract" text :disabled="!outputFile || generating || deleting || uploading || actions?.processing" @click.stop="actions?.open('separate')">分离音视频</el-button>
-      <el-button :icon="IconScissors" text :disabled="!outputFile || generating || deleting || uploading || actions?.processing" @click.stop="actions?.open('trim')">截取片段</el-button>
+      <el-button :icon="IconScissors" text :disabled="!outputFile || generating || deleting || uploading || (pendingRecovery && !hasPendingTrim) || actions?.processing" @click.stop="actions?.open('trim')">截取片段</el-button>
       <el-button text title="自动生成背景候选，调用图片模型的费用由您的阿里云账号承担" :disabled="!outputFile || !previewUrl || generating || deleting || uploading || actions?.processing" @click.stop="backgroundVisible = true">换背景</el-button>
       <el-button :icon="IconMovie" text :loading="actions?.creatingAnalysis" :disabled="!outputFile || generating || deleting || uploading || actions?.processing || actions?.creatingAnalysis" @click.stop="actions?.createFrameAnalysis()">逐帧拉片</el-button>
-      <mediaHistory mediaType="video" :current="outputFile" :disabled="generating || deleting || uploading" @select="outputs.video = { dataType: 'VIDEO', value: $event }" />
-      <el-button :icon="IconTransfer" :loading="uploading" :disabled="generating || deleting" text title="替换视频" aria-label="替换视频" @click.stop="fileInput?.click()">替换视频</el-button>
-      <input ref="fileInput" type="file" accept="video/*" hidden aria-label="选择替换视频" :disabled="generating || deleting || uploading" @change="replaceOutput" />
+      <mediaHistory mediaType="video" :current="outputFile" :disabled="generating || deleting || uploading || hasPendingTrim" @select="!hasPendingTrim && (outputs.video = { dataType: 'VIDEO', value: $event })" />
+      <el-button :icon="IconTransfer" :loading="uploading" :disabled="generating || deleting || hasPendingTrim" text title="替换视频" aria-label="替换视频" @click.stop="fileInput?.click()">替换视频</el-button>
+      <input ref="fileInput" type="file" accept="video/*" hidden aria-label="选择替换视频" :disabled="generating || deleting || uploading || hasPendingTrim" @change="replaceOutput" />
     </template>
     <template #topRightActions>
       <el-dropdown trigger="click" placement="bottom-end" :disabled="!player?.ready || player?.capturing || generating || deleting || uploading" @command="player?.captureFrame($event)">
@@ -94,7 +94,7 @@
             <el-button
               class="sendButton"
               :icon="generating ? IconPlayerStop : IconArrowUp"
-              :disabled="cancelling || deleting || uploading || (!generating && !pendingRecovery && (!generationPrompt || !selectedModel))"
+              :disabled="cancelling || deleting || uploading || hasPendingTrim || (!generating && !pendingRecovery && (!generationPrompt || !selectedModel))"
               :title="generating ? '停止生成' : pendingRecovery ? '复查任务' : '生成视频'"
               :aria-label="generating ? '停止生成' : pendingRecovery ? '复查任务' : '生成视频'"
               @click="generating ? generationState.cancel().catch(error => showNodeError(error, '停止生成失败')) : startGeneration().catch((error) => showNodeError(error, '视频生成失败'))" />
@@ -103,7 +103,7 @@
       </el-card>
     </template>
   </nodeSkeleton>
-  <videoActions ref="actions" :file="outputFile" :src="previewUrl" :disabled="generating || deleting || uploading" />
+  <videoActions ref="actions" :file="outputFile" :src="previewUrl" :disabled="generating || deleting || uploading || (pendingRecovery && !hasPendingTrim)" />
   <videoBackground v-if="backgroundVisible" v-model="backgroundVisible" :file="outputFile" :src="previewUrl" :disabled="generating || deleting || uploading" />
 </template>
 
@@ -156,6 +156,7 @@ const { refList, referenceMentions, materialMentions, selectMaterialReference, s
 const models = shallowRef<NodeMediaModel[]>([]);
 const modelsLoading = ref(false);
 const uploading = ref(false);
+const hasPendingTrim = computed(() => Boolean((node.data as typeof node.data & { pendingTrim?: unknown }).pendingTrim));
 const fileInput = ref<HTMLInputElement>();
 let disposed = false;
 const deleting = ref(false);
@@ -164,7 +165,10 @@ const actions = ref<InstanceType<typeof videoActions>>();
 const backgroundVisible = ref(false);
 const videoWidth = ref(0);
 let generationController: AbortController | undefined;
-const generationState = useNodeGeneration(outputs, () => generationController?.abort(), { ai });
+const generationState = useNodeGeneration(outputs, () => generationController?.abort(), { ai, async recover(results) {
+  if (hasPendingTrim.value) throw new Error("请先恢复未完成的截取，再恢复生成结果");
+  return results;
+} });
 const { generating, pendingRecovery, cancelling } = generationState;
 let generation: Promise<void> | undefined;
 let modelsRequest: Promise<void> | undefined;
@@ -312,6 +316,7 @@ async function replaceOutput(event: Event) {
   const file = input.files?.[0];
   input.value = "";
   if (!file || generating.value || deleting.value || uploading.value || disposed) return;
+  if (hasPendingTrim.value) return void showNodeError("请先恢复未完成的截取", "视频替换失败");
   const mimeType = getMediaMimeType(file);
   if (!mimeType.startsWith("video/")) return void showNodeError("请选择视频文件", "视频替换失败");
   if (!file.size || file.size > 100 * 1024 * 1024) return void showNodeError("视频不能为空且不能超过 100 MB", "视频替换失败");
@@ -351,6 +356,7 @@ function loadModels() {
 }
 
 async function startGeneration() {
+  if (hasPendingTrim.value) throw new Error("请先恢复未完成的截取，再生成视频");
   if (cancelling.value) throw new Error("任务正在取消，请稍后重试");
   if (generating.value) throw new Error("视频正在生成，请等待完成");
   if (uploading.value) throw new Error("视频正在替换，请等待完成");
@@ -389,6 +395,7 @@ async function startGeneration() {
     .then(([result]) => {
       controller.signal.throwIfAborted();
       if (!result) throw new Error("供应商未返回视频");
+      if (hasPendingTrim.value) throw new Error("请先恢复未完成的截取；生成结果已保留");
       outputs.value.video = { dataType: "VIDEO", value: { url: result.path, mimeType: result.mimeType } };
     }))
     .catch((error) => showNodeError(error, "视频生成失败"))
@@ -402,6 +409,7 @@ nodeEvent.on("save", (reason) => {
   if (reason === "reload" && (generating.value || uploading.value || deleting.value)) throw new Error("视频处理中，请完成后再刷新节点");
 });
 nodeEvent.on("delete", async () => {
+  if (hasPendingTrim.value) throw new Error("请先恢复未完成的截取，再删除节点");
   if (uploading.value) throw new Error("视频正在替换，请稍后删除节点");
   deleting.value = true;
   try {

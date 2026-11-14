@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { assertPreparedCleanupReservation } from "@/utils/media/backgroundCleanupGuard";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { lstat, mkdir, readdir, realpath, rmdir, stat, unlink } from "@toonflow/file";
@@ -15,6 +16,8 @@ import { modelGateway } from "@/utils/multiTenant/gateway";
 import { createVideoFrame } from "@/utils/media/preview";
 import { writeWorkspaceFile } from "@/utils/workspace/files";
 import { backgroundMediaPolicy } from "@/utils/multiTenant/backgroundAdmission";
+import { withManagedTrim } from "@/utils/media/trimVideo";
+import { withSealedMedia } from "@/utils/media/sealedMedia";
 
 const partSchema = z.strictObject({ path: z.string().min(1), mimeType: z.literal("video/mp4"), duration: z.number().positive(),
   startSeconds: z.number().nonnegative(), endSeconds: z.number().positive(), fileRevision: z.string().min(1), taskId: z.uuid(), leaseId: z.uuid(),
@@ -47,10 +50,16 @@ async function revision(path: string) {
   if (!info.isFile() || !info.size) invalid("原视频不存在或为空");
   return `${info.size}:${info.mtimeMs}:${info.ctimeMs}`;
 }
-async function source(cwd: string, payload: Payload) {
-  const file = await resolveWorkspacePath(cwd, payload.sourcePath);
-  if (await revision(file.path) !== payload.sourceRevision) invalid("原视频已改变，请重新准备项目", 409);
-  return file.path;
+async function withVideoSource<T>(cwd: string, reference: string, actor: AuthIdentity, signal: AbortSignal, use: (path: string, version: string) => Promise<T>): Promise<T> {
+  if (actor.role === "user") {
+    const managed = await withManagedTrim(cwd, actor.id, reference, signal, bytes => withSealedMedia(bytes, path => use(path, `sha256:${createHash("sha256").update(bytes).digest("hex")}`)));
+    if (managed.managed) return managed.value;
+  }
+  const file = await resolveWorkspacePath(cwd, reference);
+  return use(file.path, await revision(file.path));
+}
+async function verifySource(cwd: string, payload: Payload, actor: AuthIdentity, signal: AbortSignal) {
+  await withVideoSource(cwd, payload.sourcePath, actor, signal, async (_path, version) => { if (version !== payload.sourceRevision) invalid("原视频已改变，请重新准备项目", 409); });
 }
 function jobFolder(jobId: string) { return `assets/generated/background${jobId.replaceAll("-", "")}`; }
 async function jobBytes(cwd: string, jobId: string) {
@@ -108,18 +117,16 @@ async function withBudget<T>(cwd: string, actor: AuthIdentity, kind: "plan" | "p
 }
 
 export async function planBackgroundJob(cwd: string, sourcePath: string, actor: AuthIdentity, signal: AbortSignal) {
-  const target = await resolveWorkspacePath(cwd, sourcePath);
   return withBudget(cwd, actor, "plan", signal, async (_id, active, check) => {
     await check();
-    return { value: await inspectBackgroundVideo(target.path, active) };
+    return { value: await withVideoSource(cwd, sourcePath, actor, active, path => inspectBackgroundVideo(path, active)) };
   });
 }
 
 export async function createBackgroundFrame(cwd: string, sourcePath: string, timeSeconds: number, actor: AuthIdentity, signal: AbortSignal) {
-  const source = await resolveWorkspacePath(cwd, sourcePath);
   return withBudget(cwd, actor, "frame", signal, async (operationId, active, check) => {
     await check();
-    const frame = await createVideoFrame(source.path, timeSeconds, active, operationId);
+    const frame = await withVideoSource(cwd, sourcePath, actor, active, path => createVideoFrame(path, timeSeconds, active, operationId));
     const output = await resolveWorkspacePath(cwd, "assets/generated", true);
     await mkdir(output.path, { recursive: true });
     const path = `assets/generated/frame${operationId.replaceAll("-", "")}.png`;
@@ -141,6 +148,7 @@ export async function listOwnBackgroundReservations(cwd: string, actor: AuthIden
     if (!reservations) invalid("资源预留状态已变化", 409);
     const result = [];
     for (const reservation of reservations) {
+      if (reservation.kind === "trim") continue; // 裁剪预留及其分组不属于换背景任务。
       await check();
       const row = reservation.kind === "prepare" ? await databaseAccess(() => database.getBackgroundJob(access(cwd, reservation.operationId, actor))) : undefined;
       const stage = row ? payloadSchema.safeParse(row.payload) : undefined;
@@ -171,7 +179,7 @@ export async function prepareBackgroundJob(cwd: string, sourcePath: string, acto
   if (existing) {
     const payload = payloadSchema.parse(existing.payload);
     if (payload.sourcePath !== sourcePath) invalid("相同项目编号不能用于不同的视频", 409);
-    await source(cwd, payload);
+    await verifySource(cwd, payload, actor, signal);
     return withBudget(cwd, actor, "plan", signal, async (_id, _active, check, lease, database) => {
       const reservations = await databaseAccess(() => listBackgroundReservations(database, lease));
       if (!reservations) invalid("资源预留状态已变化", 409);
@@ -185,15 +193,12 @@ export async function prepareBackgroundJob(cwd: string, sourcePath: string, acto
     });
   }
   return withBudget(cwd, actor, "prepare", signal, async (jobId, active, check) => {
-  const target = await resolveWorkspacePath(cwd, sourcePath);
-  const info = await lstat(target.path);
-  if (!info.isFile() || !info.size) invalid("原视频须为非空普通文件");
-  const initial = await revision(target.path);
+  return withVideoSource(cwd, sourcePath, actor, active, async (sourceFile, initial) => {
   await check();
-  const plan = await inspectBackgroundVideo(target.path, active);
+  const plan = await inspectBackgroundVideo(sourceFile, active);
   if (plan.segments.length > 100) invalid("分段超过 100 段，请先缩短视频", 400);
-  const files = await splitBackgroundVideo(cwd, target.path, jobId, plan.segments, active, check);
-  if (await revision(target.path) !== initial) invalid("原视频在切分过程中改变，请重新准备", 409);
+  const files = await splitBackgroundVideo(cwd, sourceFile, jobId, plan.segments, active, check);
+  if (!initial.startsWith("sha256:") && await revision(sourceFile) !== initial) invalid("原视频在切分过程中改变，请重新准备", 409);
   const parts: Payload["parts"] = [];
   for (const file of files) {
     const taskId = randomUUID(), leaseId = randomUUID();
@@ -205,6 +210,7 @@ export async function prepareBackgroundJob(cwd: string, sourcePath: string, acto
   if (!await databaseAccess(async () => (await db()).createBackgroundJob({ ...key, payload }))) invalid("项目编号冲突，请重新准备", 409);
   // 完整预留持续覆盖后续生成片段、失败残留及最终合成，清理后再对账。
   return { value: { jobId, ...payload }, bytes: 512 * 1024 * 1024 };
+  });
   }, async operationId => {
     const target = await resolveWorkspacePath(cwd, `assets/generated/background${operationId.replaceAll("-", "")}`, true);
     const temp = join(await realpath(tmpdir()), `toonflowBackground${operationId.replaceAll("-", "")}`);
@@ -239,7 +245,7 @@ export async function confirmBackgroundJob(cwd: string, jobId: string, actor: Au
   options: { image: { path: string; mimeType: string }; modelId: string; prompt: string }) {
   return leased(cwd, jobId, actor, async ({ payload, save }) => {
     if (payload.stage !== "prepared") invalid("该项目已确认，不能更换模型或背景", 409);
-    await source(cwd, payload);
+    await verifySource(cwd, payload, actor, AbortSignal.timeout(30000));
     await withBudget(cwd, actor, "plan", AbortSignal.timeout(30000), async (_id, _active, _check, lease, database) => {
       const reservations = await databaseAccess(() => listBackgroundReservations(database, lease));
       const reservation = reservations?.find(item => item.operationId === jobId);
@@ -275,7 +281,7 @@ export async function advanceBackgroundJob(cwd: string, jobId: string, actor: Au
     if (payload.stage !== "confirmed" || !payload.image || !payload.imageRevision || !payload.modelId || !payload.mode || !payload.prompt) return { jobId, ...payload };
     const imageFile = await resolveWorkspacePath(cwd, payload.image.path);
     if (await revision(imageFile.path) !== payload.imageRevision) invalid("所选背景已变化，请重新准备项目", 409);
-    await source(cwd, payload);
+    await verifySource(cwd, payload, actor, AbortSignal.timeout(30000));
     for (const part of payload.parts) {
       if (part.state === "pending") {
         if (!allowNew) break;
@@ -321,15 +327,17 @@ export async function finishBackgroundJob(cwd: string, jobId: string, actor: Aut
   return leased(cwd, jobId, actor, async ({ payload, save }) => {
     if (payload.stage === "completed") return { jobId, ...payload };
     if (payload.stage !== "confirmed" || payload.parts.some(part => part.state !== "succeeded" || !part.resultPath || !part.resultRevision)) invalid("所有片段成功后才能合成", 409);
-    const original = await source(cwd, payload);
     for (const part of payload.parts) {
       if (await revision((await resolveWorkspacePath(cwd, part.resultPath!)).path) !== part.resultRevision) invalid("生成片段已变化，无法安全合成", 409);
     }
     const remaining = 512 * 1024 * 1024 - await jobBytes(cwd, jobId);
     return withBudget(cwd, actor, "plan", signal, async (_operationId, active, check) => {
       await check();
-      const result = await mergeBackgroundVideo(cwd, original, payload.parts.map(part => part.resultPath!), randomUUID(), active,
-        payload.parts.map(part => part.endSeconds - part.startSeconds), jobFolder(jobId), remaining);
+      const result = await withVideoSource(cwd, payload.sourcePath, actor, active, async (original, version) => {
+        if (version !== payload.sourceRevision) invalid("原视频已改变，请重新准备项目", 409);
+        return mergeBackgroundVideo(cwd, original, payload.parts.map(part => part.resultPath!), randomUUID(), active,
+          payload.parts.map(part => part.endSeconds - part.startSeconds), jobFolder(jobId), remaining);
+      });
       await check();
       payload.resultPath = result.path;
       payload.stage = "completed";
@@ -366,6 +374,9 @@ export async function cleanupPreparedBackgroundJob(cwd: string, jobId: string, a
     if (payload.stage === "prepared" && payload.parts.some(part => part.state !== "pending")) invalid("任务曾进入执行阶段，暂不能自动清理", 409);
     if (finished && (!payload.resultPath || payload.parts.some(part => part.state !== "succeeded" || !part.resultPath))) invalid("任务结果不完整，不能自动清理", 409);
     return withBudget(cwd, actor, "plan", signal, async (_operationId, active, check, lease, database) => {
+      const reservationsBeforeCleanup = await databaseAccess(() => listBackgroundReservations(database, lease));
+      if (!reservationsBeforeCleanup) invalid("资源预留状态已变化", 409);
+      assertPreparedCleanupReservation(reservationsBeforeCleanup, jobId);
       let removedBytes = 0;
       const mediaLeases: MediaLease[] = [];
       try {

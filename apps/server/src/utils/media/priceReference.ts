@@ -4,6 +4,9 @@ import type { MediaReference } from "@toonflow/tools-scaffold/runtime";
 import conf from "@/utils/conf";
 import { getStatus } from "@/utils/ffmpeg";
 import { resolveWorkspacePath } from "@/utils/workspace/files";
+import { currentIdentity } from "@/utils/multiTenant/context";
+import { withManagedTrim } from "@/utils/media/trimVideo";
+import { withSealedMedia } from "@/utils/media/sealedMedia";
 
 const references = new Map<string, { revision: string; expires: number; value: Promise<ProviderPriceReference> }>();
 let probeStatus: { config: string; expires: number; value: Promise<string | null> } | undefined;
@@ -67,7 +70,7 @@ async function probeMedia(path: string, mediaType: string, config: string, signa
       "-select_streams", mediaType === "video" ? "V:0" : "a:0", "-show_entries",
       "stream=width,height,duration,avg_frame_rate:format=duration", "-of", "json", "-i", path], {
       stdin: "ignore", stdout: "pipe", stderr: "ignore", windowsHide: true, timeout: 5000, signal,
-      env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== "FFREPORT")),
+      env: Object.fromEntries(Object.entries(process.env).filter(([key]) => !["FFREPORT", "TOONFLOW_TRIM_TOKEN", "TOONFLOW_TRIM_STORE_TOKEN"].includes(key.toUpperCase()))),
     });
     const [output, code] = await Promise.all([child.stdout.text(), child.exited]);
     signal.throwIfAborted();
@@ -86,7 +89,16 @@ async function probeMedia(path: string, mediaType: string, config: string, signa
 
 async function loadPriceReference(cwd: string, reference: MediaReference, mediaType: string, signal?: AbortSignal): Promise<ProviderPriceReference> {
   signal?.throwIfAborted();
+  const actor = currentIdentity();
+  if (actor?.role === "user") {
+    const managed = await withManagedTrim(cwd, actor.id, reference.path, signal ?? AbortSignal.timeout(30000), bytes => withSealedMedia(bytes, path => loadPriceReferencePath(path, reference, mediaType, signal, false)));
+    if (managed.managed) return managed.value;
+  }
   const { path } = await resolveWorkspacePath(cwd, reference.path);
+  return loadPriceReferencePath(path, reference, mediaType, signal, true);
+}
+
+async function loadPriceReferencePath(path: string, reference: MediaReference, mediaType: string, signal: AbortSignal | undefined, cache: boolean): Promise<ProviderPriceReference> {
   signal?.throwIfAborted();
   const info = await stat(path);
   signal?.throwIfAborted();
@@ -96,7 +108,7 @@ async function loadPriceReference(cwd: string, reference: MediaReference, mediaT
   const revision = `${info.mtimeMs}:${info.ctimeMs}:${info.size}`;
   const now = Date.now();
   for (const [key, cached] of references) if (cached.expires <= now) references.delete(key);
-  const cached = references.get(key);
+  const cached = cache ? references.get(key) : undefined;
   if (cached?.revision === revision) return cached.value;
   const value = (async () => {
     const header = Buffer.alloc(16);
@@ -120,6 +132,7 @@ async function loadPriceReference(cwd: string, reference: MediaReference, mediaT
     if (`${latest.mtimeMs}:${latest.ctimeMs}:${latest.size}` !== revision) throw new Error("参考媒体已变化，请重试估价");
     return metadata;
   })();
+  if (!cache) return value;
   const entry = { revision, expires: now + 30000, value };
   // ACT: 元信息缓存最多 500 项 / 30 秒；每次核对 mtime/ctime/size，不保存素材内容。
   if (references.size >= 500) references.delete(references.keys().next().value!);

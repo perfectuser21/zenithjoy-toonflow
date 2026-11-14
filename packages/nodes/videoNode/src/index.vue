@@ -16,7 +16,7 @@
       <el-button
         :icon="IconTransfer"
         :loading="uploading"
-        :disabled="exporting"
+        :disabled="exporting || hasPendingTrim"
         text
         title="替换视频"
         aria-label="替换视频"
@@ -44,7 +44,7 @@
         ref="player"
         :src="previewUrl"
         @loadedmetadata="resizeVideo" />
-      <input ref="fileInput" class="fileInput" type="file" accept="video/*" aria-label="选择视频" :disabled="uploading || exporting" @change="uploadVideo" />
+      <input ref="fileInput" class="fileInput" type="file" accept="video/*" aria-label="选择视频" :disabled="uploading || exporting || hasPendingTrim" @change="uploadVideo" />
       <el-button
         v-if="!exporting && !outputs.video"
         class="nodrag nopan"
@@ -79,6 +79,7 @@ defineOptions({
 const { node, nodeProps, outputs, nodeEvent, files, updateNodeInternals } = useNode({
   label: "视频",
 });
+const hasPendingTrim = computed(() => Boolean((node.data as typeof node.data & { pendingTrim?: unknown }).pendingTrim));
 const fileInput = ref<HTMLInputElement>();
 const uploading = ref(false);
 const player = ref<InstanceType<typeof videoPlayer>>();
@@ -99,6 +100,7 @@ nodeEvent.on("save", (reason) => {
   if (reason === "reload" && exporting.value) throw new Error("视频正在导出，请完成后再刷新节点");
 });
 nodeEvent.on("delete", () => {
+  if (hasPendingTrim.value) throw new Error("请先恢复未完成的截取，再删除节点");
   if (uploading.value) throw new Error("视频上传中，请稍后删除节点");
   uploading.value = true;
   return files.removeNodeFiles().finally(() => {
@@ -115,6 +117,7 @@ nodeTools.register({
   }),
   async execute({ path, mimeType }, { signal }) {
     signal?.throwIfAborted();
+    if (hasPendingTrim.value) throw new Error("请先恢复未完成的截取，再替换视频");
     if (uploading.value || exporting.value) throw new Error("视频处理中，请稍后重试");
     uploading.value = true;
     try {
@@ -142,6 +145,7 @@ async function uploadVideo(event: Event) {
   const file = input.files?.[0];
   input.value = "";
   if (!file || uploading.value || exporting.value) return;
+  if (hasPendingTrim.value) return void ElMessage.error("请先恢复未完成的截取，再替换视频");
   const mimeType = getMediaMimeType(file);
   if (!mimeType.startsWith("video/")) return void ElMessage.error("请选择视频文件");
   if (!file.size || file.size > 100 * 1024 * 1024) return void ElMessage.error("视频不能为空且不能超过 100 MB");

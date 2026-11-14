@@ -4,7 +4,7 @@
 
 1. 运维预先准备固定容量的专用 ext4 文件系统，以 `prjquota` 挂载；确认项目配额的 accounting/enforcement 均开启。不得把现有用户目录或不明项目 ID 直接作为新卷使用。卷满只应影响 Toonflow，容量规划需为公共 SQLite、WAL、临时文件和系统维护保留空间；它们不计入单个用户的 5 GiB 项目配额。
 2. 在卷内建立 `projectQuota`，由 root 持有、模式 0711；建立 `tmp` 和服务数据目录，由容器 UID/GID 1000:1000 持有且可写。检查卷路径及其父目录权限，确认服务账号不能替换 root helper 的控制目录。先固定独立测试卷与空的 SQLite 数据源，旧账号或历史媒体任务未归属时禁止启用。
-3. 将 `quotaHelper.py` 以 root 拥有且不可由服务用户修改的方式安装到 `/opt/toonflow/quota/`，将 `toonflowQuota.service` 安装到 systemd；配置 `/etc/toonflowQuota.env`（root 拥有、0600）：
+3. 将同一候选版本的 `quotaHelper.py` 与 `trimQuota.py` 一起安装到 root 拥有且服务用户不可修改的版本目录；核对两文件后原子切换启动路径，不得只替换其中一个。裁剪未启用时旧版单文件安装仍可启动。将两个文件以 root 拥有且不可由服务用户修改的方式安装到 `/opt/toonflow/quota/`，将 `toonflowQuota.service` 安装到 systemd；配置 `/etc/toonflowQuota.env`（root 拥有、0600）：
 
    ```ini
    TOONFLOW_QUOTA_VOLUME=/srv/toonflow-data
@@ -22,3 +22,23 @@
 6. 写入返回 503 且怀疑锁遗留时，按 [锁的离线恢复手册](lockRecovery.md) 停止全部写入并核验后恢复；不要自动删除锁。
 
 7. 换背景使用 helper 在 `projectQuota/backgroundAdmission.flock` 建立的 root 持有进程锁；服务进程持锁，退出后由内核释放，锁文件不得删除或替换。数据目录及其直接子目录 `projectQuota` 均须作为独立 bind 挂载点，同处受支持的数据卷；服务的有效、许可、继承和环境权限均不得包含 `CAP_SYS_ADMIN`，并须启用 `no-new-privileges`。随附 Compose 配置建立这两个挂载点，缺失时换背景拒绝准入，以防整个锁目录被替换。部署前必须完全停止并禁止重启所有旧版应用和 worker，确保它们无法再访问该卷；旧版不识别进程锁，不能与新版并行。旧版的 `multiTenant/backgroundAdmission.lock` 如存在，新版始终拒绝启用：运维须在全量停写、防重启并核对挂载与全部实例后，离线将旧标记移交到卷外安全位置留存，不能根据 PID 或文件时间自动清理。之后启动新版 helper 和唯一应用实例并核验；回退旧版前同样须全量停机，不能混跑。云端已提交但结果未知的任务需按原有只读恢复规则处理，不能因重启重新提交。
+
+## 隔离测试卷启用裁剪（实验配置）
+
+`toonflowTrimWorker.service`、`toonflowTrimStore.service` 和 `composeTrim.yaml` 是候选配置，不代表已经通过 staging 或生产验收。服务文件中的 `/srv/toonflow-data/projectQuota` 是示例：若测试卷实际路径不同，必须在安装前将 store 单元的 `ReadWritePaths` 改成该卷的实际配额根目录，并检查该根目录及各级父目录由 root 持有、不可被应用修改。先完成上面的 ext4 项目配额前置条件；不得对已有客户卷执行身份、目录或配额的自动迁移。
+
+2026-11-14 只读核对：香港隔离测试卷为 `/srv/aivideo-isolated-stage-539`，现有配额服务为 `aivideo-stage-quota-persistent-539.service`，不是本示例的 `toonflowQuota.service`。部署该测试环境时还须将 store 单元的 `After`/`Requires` 改为实际配额服务，并确保应用依赖该卷及两个裁剪服务；不得让现有 539 版与候选版同时访问同一卷。该测试卷可用空间约 2.9 GiB，接近 store 保留 2 GiB 的阈值，发送素材前须再次检查剩余空间。
+
+1. 为 worker、store 和应用访问分别准备独立系统用户/组：`toonflow-trim-worker`、`toonflow-trim-store`（主组同名）、`toonflow-trim-access`。worker 的主组为访问组，store 的附加组为访问组；应用仍为 UID/GID 1000，但额外加入访问组。worker 另需加入 Docker socket 所属的 `docker` 组，具有宿主 Docker 管理权限，应视同宿主 root：不向应用或客户开放该账号、Docker socket 或它的凭据。明确记录各 UID/GID，确认与已有账号无冲突。
+2. 安装来自同一固定候选版本的 Linux Bun 和构建产物 `trimWorker.js`、`trimStore.js`、`provisionTrimStore.js` 到 root 持有、仅 root 可写的版本目录；`/opt/toonflow-trim/current` 指向该版本。预先固定包含 ffmpeg、ffprobe、awk、timeout 的作业镜像本地 image ID，使用 `sha256:...` 格式且不得自动拉取。构建产物、镜像与目标架构需一致。
+3. 由 root 预建 `/var/lib/toonflow-trim`，模式 0755；其 `worker` 子目录归 worker 用户、访问组，模式 0700。预建 `/run/toonflow-trim-worker`（worker:访问组）及 `/run/toonflow-trim-store`（store:访问组），模式均为 0750；其祖先均由 root 持有且不可被其他账号写入。`/run` 重启后会消失，可安装 `toonflowTrim.conf` 到 systemd-tmpfiles 配置目录并核实重建结果；不能在不知道旧进程状态时删除残留 socket 或锁。
+4. 在 root 持有且不可被其他账号写入的 `/etc/toonflow-trim` 保存环境文件。`worker.env` 至少包括 `TOONFLOW_TRIM_SOCKET=/run/toonflow-trim-worker/worker.sock`、`TOONFLOW_TRIM_STATE=/var/lib/toonflow-trim/worker`、`TOONFLOW_TRIM_DOCKER=/usr/bin/docker`、固定的 `TOONFLOW_TRIM_IMAGE` 和随机 64 位十六进制 `TOONFLOW_TRIM_TOKEN`；实际 Docker CLI 必须是 root 持有、非符号链接、不可被其他账号写入的绝对路径。`store.env` 至少包括 `TOONFLOW_TRIM_STORE_SOCKET=/run/toonflow-trim-store/store.sock`、实际的 `TOONFLOW_PROJECT_QUOTA_ROOT`、store 主组数字 `TOONFLOW_TRIM_STORE_GID`、访问组数字 `TOONFLOW_TRIM_ACCESS_GID` 和独立随机的 64 位十六进制 `TOONFLOW_TRIM_STORE_TOKEN`。先按凭据规范将两个 token 存入 1Password，再写环境文件；两个文件 root:root、0600；密钥不得放进仓库、命令输出、命令参数或聊天。
+5. 在 root 持有的 `/etc/toonflow-trim/secrets` 下建立 `worker` 和 `store` 文件，分别与对应环境文件中的 token 字节一致，64 字节且不带换行；每个文件 root:访问组、0640。不要把 token 放入应用环境变量。向配额 helper 的 root 环境文件添加 store UID、store 主组 GID 和访问组 GID（`TOONFLOW_TRIM_STORE_UID`、`TOONFLOW_TRIM_STORE_GID`、`TOONFLOW_TRIM_ACCESS_GID`），与服务身份一致。对隔离测试卷使用同候选版本的 `provisionTrimStore.js <配额根目录> <访问组 GID> --confirm-trim-store-provision`，只准备锁文件；账号裁剪目录仍由配额 helper 校验后建立。
+6. 应用和两个服务不能混用不同候选。启动配额 helper、worker、store，确认它们以预期身份运行、各 socket 的 owner/group/mode 正确，再用 `compose.yaml` 和 `composeTrim.yaml` 组合启动单实例。设置 `TOONFLOW_QUOTA_VOLUME`、固定候选 `TOONFLOW_IMAGE`、`TOONFLOW_TRIM_ACCESS_GID`、`TOONFLOW_TRIM_HELPER_UID`、`TOONFLOW_TRIM_STORE_UID`；运行 Compose 时禁止现场重新构建或拉取不明镜像。补充域名、端口、注册、反向代理等环境既有配置；这些不由裁剪 overlay 决定。应用不能挂载 Docker socket。
+7. 实测登录、上传、裁剪、节点预览和继续生成的业务链，以及另一账号无法访问、原素材不变、异常重启和磁盘水位；任何一个未通过都不得晋级。当前 Mac 隔离环境只验证了 worker 执行和 store 按项目配额保存/读取，尚未验证整套 systemd、画布或香港环境。
+
+### 故障处理和回退
+
+出现错误时先保留原卷、数据库、锁及素材，禁止与旧应用并行；停止自动重试，确认 worker 不再有未知状态的沙箱。可将 `TOONFLOW_SECURE_TRIM_READ_ONLY=1` 并以**同一兼容镜像**重新创建应用容器，继续读取已有结果、禁止新裁剪；仍需原 store、配额 helper 和数据库可用。此设置不能恢复未知任务，也不能代替备份。
+
+已有私有裁剪素材或新账本后，旧镜像不能识别这些数据，不得直接降级或用旧快照覆盖现有数据。隔离测试可在单独保留新数据的前提下切换到事先验证的独立旧版副本；真实客户环境需要先完成无损迁移工具、全量一致备份和独立恢复演练，当前均未验收。未知容器创建或状态不明时保持锁并人工核对，不得仅因 PID 消失而释放。

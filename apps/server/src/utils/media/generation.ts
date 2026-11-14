@@ -1,6 +1,7 @@
 import { t, translateMessage } from "@/lib/i18n";
-import { createReadStream, mkdir, readFile, realpath, stat, statfs, unlink } from "@toonflow/file";
+import { createReadStream, mkdir, open, readFile, readlink, realpath, stat, statfs, unlink } from "@toonflow/file";
 import { join, relative } from "node:path";
+import { constants } from "node:fs";
 import { createHash } from "node:crypto";
 import { mediaProviders, type Provider, type ProviderTaskData } from "@toonflow/providers";
 import type { GeneratedMedia, MediaGenerationRequest, MediaModel, MediaReference } from "@toonflow/tools-scaffold/runtime";
@@ -15,6 +16,10 @@ import { currentIdentity } from "@/utils/multiTenant/context";
 import { modelGateway } from "@/utils/multiTenant/gateway";
 import { downloadPublicFile } from "@/utils/workspace/download";
 import { prepareWorkspaceFfmpeg } from "@/utils/ffmpeg";
+import { assertWanReferenceDuration, parseWanProbeDuration } from "@/utils/media/wanDuration";
+import { assertActiveTrimOwner, listTrimRecoveries, withManagedTrim } from "@/utils/media/trimVideo";
+import { assertReferenceHash, assertSingleManagedReference, assertVideoHashes, assertWanReferenceMeta, guardedTrimUploadFetch, useUploadedTrim } from "@/utils/media/uploadedTrim";
+import { aliyunUploadSourceSha256 } from "@/utils/media/aliyunTrustedVersion";
 
 const maxMediaSize = 100 * 1024 * 1024;
 let activeVideoInspections = 0;
@@ -58,12 +63,12 @@ function invalid(message: string): never {
 
 // 万相限制的是参考视频总时长，与输出时长参数无关。
 export async function validateWanVideoReferences(cwd: string, request: MediaGenerationRequest,
-  actor?: ModelActor, modelRouteCipher?: string, signal?: AbortSignal) {
+  actor?: ModelActor, modelRouteCipher?: string, signal?: AbortSignal, legacyTaskOwnerId?: string) {
   if (!request.videos?.length) return;
   let providerId = request.providerId, modelId = request.modelId;
   if (modelRouteCipher) {
     if (!actor) invalid("缺少模型请求身份");
-    const execution = await modelGateway.resolve("video", providerId, modelId, modelRouteCipher, request, { actor });
+    const execution = await modelGateway.resolve("video", providerId, modelId, modelRouteCipher, request, { actor, legacyTaskOwnerId });
     if (execution.route.target !== "backend") return;
     providerId = execution.route.providerId;
     modelId = execution.upstream.upstreamModelId;
@@ -87,21 +92,29 @@ export async function validateWanVideoReferences(cwd: string, request: MediaGene
     let total = 0;
     const hashes: string[] = [];
     for (const reference of request.videos) {
-      const { path } = await resolveWorkspacePath(cwd, reference.path);
-      // 受管流的读取与锁等待均支持取消；最多读取预检大小加一字节，文件变化则拒绝。
-      const info = await stat(path);
-      if (!info.isFile() || !info.size || info.size > maxMediaSize) invalid("参考视频须为不超过 100 MB 的文件");
-      const buffer = Buffer.allocUnsafe(info.size + 1);
-      let length = 0;
-      const stream = createReadStream(path, { start: 0, end: info.size, signal: deadline });
-      for await (const part of stream) {
-        const chunk = Buffer.isBuffer(part) ? part : Buffer.from(part);
-        if (length + chunk.length > info.size) invalid("参考视频在检查时发生变化，请重新确认素材后重试");
-        chunk.copy(buffer, length);
-        length += chunk.length;
+      // 私有裁剪素材不在工作区实体目录，读取后仅在有界探测期间保留字节。
+      const managed = actor?.role === "user"
+        ? await withManagedTrim(cwd, actor.id, reference.path, deadline, async bytes => bytes)
+        : { managed: false as const };
+      let bytes: Buffer;
+      if (managed.managed) bytes = managed.value;
+      else {
+        const { path } = await resolveWorkspacePath(cwd, reference.path);
+        const info = await stat(path);
+        if (!info.isFile() || !info.size || info.size > maxMediaSize) invalid("参考视频须为不超过 100 MB 的文件");
+        const buffer = Buffer.allocUnsafe(info.size + 1);
+        let length = 0;
+        const stream = createReadStream(path, { start: 0, end: info.size, signal: deadline });
+        for await (const part of stream) {
+          const chunk = Buffer.isBuffer(part) ? part : Buffer.from(part);
+          if (length + chunk.length > info.size) invalid("参考视频在检查时发生变化，请重新确认素材后重试");
+          chunk.copy(buffer, length);
+          length += chunk.length;
+        }
+        if (length !== info.size) invalid("参考视频在检查时发生变化，请重新确认素材后重试");
+        bytes = buffer.subarray(0, length);
       }
-      if (length !== info.size) invalid("参考视频在检查时发生变化，请重新确认素材后重试");
-      const bytes = buffer.subarray(0, length);
+      if (!bytes.length || bytes.length > maxMediaSize) invalid("参考视频须为不超过 100 MB 的文件");
       const hash = createHash("sha256").update(bytes).digest("hex");
       // 探测固定内存字节，避免创建磁盘快照，也避免文件替换竞态。
       const probe = Bun.spawn([ffprobe, "-v", "error", "-protocol_whitelist", "pipe", "-f", "mov", "-format_whitelist", "mov",
@@ -124,19 +137,12 @@ export async function validateWanVideoReferences(cwd: string, request: MediaGene
         if (probe.exitCode === null) { try { probe.kill(); } catch {} }
         await probe.exited.catch(() => {});
       }
-      if (code !== 0 || out.length > 100000) invalid("无法读取参考视频时长，请尝试将视频重新封装为 MP4 后重试");
-      let value: { streams?: { duration?: string }[]; format?: { duration?: string } };
-      try { value = JSON.parse(out); } catch { return invalid("无法读取参考视频时长，请检查文件"); }
-      const values = [value.streams?.[0]?.duration, value.format?.duration].map(Number).filter(item => Number.isFinite(item) && item > 0);
-      if (!value.streams?.length || !values.length) invalid("无法确认参考视频时长，请尝试将视频重新封装为 MP4 后重试");
-      const duration = Math.max(...values);
+      const duration = parseWanProbeDuration(out, code);
       total += duration;
       hashes.push(hash);
-      if (total > 15) invalid(`万相参考视频总时长不能超过 15 秒，已达到 ${(Math.ceil(total * 1000) / 1000).toFixed(3)} 秒。请先截取或分段后再生成。`);
+      assertWanReferenceDuration(total);
     }
-    if (typeof request.duration === "number" && request.duration > 0 && total + request.duration > 30) {
-      invalid("万相参考视频与生成视频的总时长不能超过 30 秒，请缩短参考视频或生成时长。");
-    }
+    assertWanReferenceDuration(total, request.duration);
     return hashes;
   } catch (cause) {
     checkDeadline();
@@ -183,6 +189,8 @@ export async function listMediaModels(): Promise<MediaModel[]> {
 
 export async function readReference(cwd: string, reference: MediaReference, mediaType: string, signal?: AbortSignal): Promise<Extract<MediaInput, { type: "base64" }>> {
   signal?.throwIfAborted();
+  const actor = currentIdentity();
+  if (actor?.role === "user") await withManagedTrim(cwd, actor.id, reference.path, signal ?? AbortSignal.timeout(30000), async () => { throw Object.assign(new Error("托管裁剪素材的生成接入尚未开放"), { status: 503 }); });
   const { path } = await resolveWorkspacePath(cwd, reference.path);
   const info = await stat(path);
   if (!info.isFile() || info.size > maxMediaSize) invalid("参考媒体须为不超过 100 MB 的文件");
@@ -347,7 +355,7 @@ export async function generateMedia(
   const checkpoint = task?.checkpoint;
   let submitted = task?.resume === true || !!checkpoint?.providerData || checkpoint?.assetCount !== undefined || !!checkpoint?.files?.length;
   try {
-    const videoHashes = !submitted && mediaType === "video" ? await validateWanVideoReferences(cwd, request, task?.actor, task?.modelRouteCipher, signal) : undefined;
+    const videoHashes = !submitted && mediaType === "video" ? await validateWanVideoReferences(cwd, request, task?.actor ?? currentIdentity(), task?.modelRouteCipher, signal, task?.legacyTaskOwnerId) : undefined;
     return await executeMedia(cwd, mediaType, request, signal, task, () => { submitted = true; }, videoHashes);
   } catch (cause) {
     // ACT: 仅宿主确认尚未调用供应商的异常证明未提交；供应商错误码不能伪造此证据。
@@ -395,7 +403,13 @@ async function executeMedia(
   }
   let finish = () => {};
   const resumeAssets = async () => {
-    const { provider } = await configuredProvider(request, mediaType, signal, directory, data => task!.save({ providerData: data }), true, modelRouteCipher, task?.actor, task?.legacyTaskOwnerId, task?.beforeNetwork);
+    const resumeActor = task?.actor ?? currentIdentity();
+    const needsOwnerCheck = mediaType === "video" && resumeActor?.role === "user" && request.videos?.some(item => /^assets\/[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}\/video\.mp4$/.test(item.path));
+    const beforeResumeNetwork = async () => {
+      await task?.beforeNetwork?.();
+      if (needsOwnerCheck && resumeActor?.role === "user") await assertActiveTrimOwner(resumeActor.id);
+    };
+    const { provider } = await configuredProvider(request, mediaType, signal, directory, data => task!.save({ providerData: data }), true, modelRouteCipher, task?.actor, task?.legacyTaskOwnerId, beforeResumeNetwork);
     if (!checkpoint?.providerData || !provider.resumeTask) invalid("该任务没有可恢复的供应商凭据，不能重新提交生成");
     requireGenerationMode(task);
     finish();
@@ -413,26 +427,150 @@ async function executeMedia(
     if (task?.resume) {
       assets = checkpoint?.assets ?? await resumeAssets();
     } else {
+      let beforeManagedNetwork: (() => Promise<void>) | undefined;
       const { provider, request: upstreamRequest } = await configuredProvider(request, mediaType, signal, directory,
-        task ? data => task.save({ providerData: data }) : undefined, false, modelRouteCipher, task?.actor, task?.legacyTaskOwnerId, task?.beforeNetwork, task?.onWanSubmit);
+        task ? data => task.save({ providerData: data }) : undefined, false, modelRouteCipher, task?.actor, task?.legacyTaskOwnerId,
+        async () => { await task?.beforeNetwork?.(); await beforeManagedNetwork?.(); }, task?.onWanSubmit);
       const generate = mediaType === "image" ? provider.generateImage : mediaType === "video" ? provider.generateVideo : provider.generateAudio;
       if (typeof generate !== "function") invalid(t`此供应商不支持${translateMessage({ image: "图片", video: "视频", audio: "音频" }[mediaType])}生成`);
       const rules = Array.isArray(provider.rules) ? provider.rules : [];
       if (provider.id !== "toonflow" && rules.some(rule => rule.field === "apiKey")
         && (typeof provider.config.apiKey !== "string" || !provider.config.apiKey.trim())) invalid("请先在媒体模型设置中配置供应商 API Key");
-      const { type, ...parameters } = await prepareRequest(directory, mediaType, upstreamRequest, readReference, signal);
-      if (videoHashes && (!("videos" in parameters) || parameters.videos?.length !== videoHashes.length || parameters.videos.some((item, index) =>
-        item.type !== "base64" || createHash("sha256").update(Buffer.from(item.data, "base64")).digest("hex") !== videoHashes[index]))) {
-        invalid("参考视频在校验后发生变化，请重新确认素材再生成");
+      const uploadedVideoHashes = new Map<string, string>();
+      const submit = async (reader: (cwd: string, reference: MediaReference, type: string, signal?: AbortSignal) => Promise<MediaInput>, afterPrepare?: () => void) => {
+        let prepared: Awaited<ReturnType<typeof prepareRequest<MediaInput>>>;
+        try {
+          prepared = await prepareRequest(directory, mediaType, upstreamRequest, reader, signal);
+          if (videoHashes) assertVideoHashes("videos" in prepared ? prepared.videos : undefined, videoHashes, uploadedVideoHashes);
+        } finally { afterPrepare?.(); }
+        const { type, ...parameters } = prepared;
+        signal?.throwIfAborted();
+        requireGenerationMode(task);
+        if (!modelRouteCipher) finish = beginGeneration(provider);
+        await task?.beforeSubmit?.();
+        markSubmitted();
+        const assets = type === "audio" ? await provider.generateAudio!(parameters as AudioRequest)
+          : type === "image" ? await provider.generateImage!(parameters as ImageRequest) : await provider.generateVideo!(parameters as VideoRequest);
+        if (mediaType === "video" && provider.id === "aliyun") task?.onProviderResult?.();
+        return assets;
+      };
+      const actor = task?.actor ?? currentIdentity();
+      const references = [...(upstreamRequest.images ?? []), ...(upstreamRequest.videos ?? []), ...(upstreamRequest.audios ?? []), ...(upstreamRequest.firstFrame ? [upstreamRequest.firstFrame] : []), ...(upstreamRequest.lastFrame ? [upstreamRequest.lastFrame] : [])];
+      let handled = false;
+      if (actor?.role === "user" && directory) for (const reference of references) {
+        // 只信任通过源码摘要验证的阿里云适配器；上传结束后再释放大素材内存，轮询不占读取锁。
+        if (mediaType === "video" && provider.id === "aliyun" && provider.sourceRevision === aliyunUploadSourceSha256 && provider.prepareVideoReference && provider.validateVideoRequest) {
+          let releaseInputs: (() => void) | undefined;
+          const otherReferenceHashes = new Map<string, string>();
+          try {
+          const managed = await useUploadedTrim(
+            consume => withManagedTrim(directory, actor.id, reference.path, signal ?? AbortSignal.timeout(120000), consume),
+            async bytes => {
+              if (references.filter(item => item.path === reference.path).length !== 1) invalid("托管裁剪素材不能重复作为参考");
+              const existingTrims = await listTrimRecoveries(directory, actor.id);
+              const managedPaths = new Set(existingTrims.map(item => `assets/${item.operationId}/video.mp4`));
+              assertSingleManagedReference(references, managedPaths);
+              const ordinaryPaths = await Promise.all(references.filter(item => item.path !== reference.path).map(async item => (await resolveWorkspacePath(directory, item.path)).path));
+              releaseInputs = lockWorkspaceFiles([...new Set(ordinaryPaths)]);
+              let totalAudioDuration = 0;
+              const { type: previewType, ...preview } = await prepareRequest(directory, mediaType, upstreamRequest, async (cwd, item, type, active) => {
+                active?.throwIfAborted();
+                if (item.path !== reference.path) {
+                  const source = await resolveWorkspacePath(cwd, item.path);
+                  const file = await open(source.path, constants.O_RDONLY | constants.O_NOFOLLOW);
+                  try {
+                    const before = await file.stat();
+                    if (!before.isFile() || !before.size || before.size > maxMediaSize) invalid("参考媒体须为不超过 100 MB 的非空文件");
+                    if (process.platform === "linux" && await readlink(`/proc/self/fd/${file.fd}`) !== source.path) invalid("参考媒体位置已变化，请重新选择");
+                    const header = Buffer.alloc(16), read = await file.read(header, 0, header.length, 0);
+                    const after = await file.stat();
+                    if (after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size
+                      || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs) invalid("参考媒体已变化，请重新选择");
+                    const mime = detectMimeType(header.subarray(0, read.bytesRead), item.mimeType);
+                    let dimensions: { width?: number; height?: number } | undefined;
+                    if (type === "image") {
+                      try { dimensions = await new Bun.Image(process.platform === "linux" ? `/proc/self/fd/${file.fd}` : source.path).metadata(); }
+                      catch { invalid("无法读取参考图片尺寸，请重新选择"); }
+                    }
+                    assertWanReferenceMeta(type, mime, before.size, dimensions);
+                    if (type === "audio") {
+                      const metadata = await readPriceReference(cwd, item, type, active);
+                      if (!metadata.duration || !Number.isFinite(metadata.duration) || metadata.duration <= 0) invalid("无法确认参考音频时长，请重新选择素材");
+                      totalAudioDuration += metadata.duration;
+                    }
+                    const digest = createHash("sha256"); let size = 0;
+                    for await (const chunk of file.createReadStream({ autoClose: false, start: 0 })) {
+                      active?.throwIfAborted(); size += chunk.length;
+                      if (size > before.size) invalid("参考媒体已变化，请重新选择");
+                      digest.update(chunk);
+                    }
+                    if (size !== before.size) invalid("参考媒体已变化，请重新选择");
+                    otherReferenceHashes.set(`${type}\0${item.path}`, digest.digest("hex"));
+                    if (process.platform === "linux" && await readlink(`/proc/self/fd/${file.fd}`) !== source.path) invalid("参考媒体位置已变化，请重新选择");
+                    const named = await stat(source.path);
+                    if (named.dev !== before.dev || named.ino !== before.ino || named.size !== before.size
+                      || named.mtimeMs !== before.mtimeMs || named.ctimeMs !== before.ctimeMs) invalid("参考媒体已变化，请重新选择");
+                  } finally { await file.close(); }
+                }
+                active?.throwIfAborted();
+                return { type: "url" as const, url: "https://example.invalid/placeholder" };
+              }, signal);
+              if (previewType !== "video") invalid("裁剪视频只能用于视频生成");
+              if (totalAudioDuration > 15) invalid("万相参考音频总时长不能超过 15 秒");
+              provider.validateVideoRequest!(preview as VideoRequest);
+              await assertActiveTrimOwner(actor.id);
+              await task?.beforeNetwork?.();
+              const videoIndex = upstreamRequest.videos?.findIndex(item => item.path === reference.path) ?? -1;
+              if (videoIndex < 0) invalid("裁剪视频只能用作视频参考");
+              const digest = createHash("sha256").update(bytes).digest("hex");
+              if (!videoHashes) invalid("无法确认参考视频时长，请重新选择素材");
+              if (videoHashes[videoIndex] !== digest) invalid("参考视频在校验后发生变化，请重新确认素材再生成");
+              if (bytes.length > maxMediaSize) invalid("参考媒体须为不超过 100 MB 的文件");
+              const mimeType = detectMimeType(bytes, reference.mimeType);
+              assertWanReferenceMeta("video", mimeType, bytes.length);
+              signal?.throwIfAborted();
+              let url: string;
+              const scopedProvider = { ...provider, tool: { ...provider.tool, fetch: guardedTrimUploadFetch(provider.tool.fetch, () => assertActiveTrimOwner(actor.id), signal) } };
+              try { url = await provider.prepareVideoReference!.call(scopedProvider, { model: upstreamRequest.modelId, input: { type: "binary", data: bytes, mimeType, name: reference.path }, signal: AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(5 * 60 * 1000)]) }); }
+              catch { signal?.throwIfAborted(); throw new Error("参考视频上传失败，请检查阿里云配置后重试"); }
+              if (!/^oss:\/\/dashscope-instant\/[A-Za-z0-9_./-]+$/.test(url) || url.includes("..")) invalid("参考视频上传结果无效");
+              uploadedVideoHashes.set(url, digest);
+              // 此后每一次供应商网络请求（包括最终提交）都重新确认账号。
+              beforeManagedNetwork = () => assertActiveTrimOwner(actor.id);
+              return url;
+            },
+            async url => {
+              await assertActiveTrimOwner(actor.id);
+              signal?.throwIfAborted();
+              return submit(async (cwd, item, type, active) => {
+                if (item.path === reference.path) return { type: "url", url, mimeType: "video/mp4", name: item.path };
+                const value = await readReference(cwd, item, type, active);
+                const expected = otherReferenceHashes.get(`${type}\0${item.path}`);
+                assertReferenceHash(expected, value.data);
+                return value;
+              }, () => { releaseInputs?.(); releaseInputs = undefined; });
+            },
+          );
+          if (managed.managed) { assets = managed.value; handled = true; break; }
+          } finally { releaseInputs?.(); }
+          continue;
+        }
+        const managed = await withManagedTrim(directory, actor.id, reference.path, signal ?? AbortSignal.timeout(120000), bytes => {
+          if (references.filter(item => item.path === reference.path).length !== 1) invalid("托管裁剪素材不能重复作为参考");
+          return submit(async (cwd, item, type, active) => {
+          if (item.path !== reference.path) {
+            try { return await readReference(cwd, item, type, active); }
+            catch (error) { if ((error as { status?: number })?.status === 429) invalid("每次生成目前最多使用一个托管裁剪素材"); throw error; }
+          }
+          if (bytes.length > maxMediaSize) invalid("参考媒体须为不超过 100 MB 的文件");
+          const mimeType = detectMimeType(bytes, item.mimeType);
+          if (!mimeType.startsWith(`${type}/`)) invalid(t`参考媒体类型须为 ${type}`);
+          return { type: "base64", data: bytes.toString("base64"), mimeType, name: item.path };
+          });
+        });
+        if (managed.managed) { assets = managed.value; handled = true; break; }
       }
-      signal?.throwIfAborted();
-      requireGenerationMode(task);
-      if (!modelRouteCipher) finish = beginGeneration(provider);
-      await task?.beforeSubmit?.();
-      markSubmitted();
-      assets = type === "audio" ? await provider.generateAudio!(parameters as AudioRequest)
-        : type === "image" ? await provider.generateImage!(parameters as ImageRequest) : await provider.generateVideo!(parameters as VideoRequest);
-      if (mediaType === "video" && provider.id === "aliyun") task?.onProviderResult?.();
+      if (!handled) assets = await submit(readReference);
     }
     if (!Array.isArray(assets) || !assets.length) invalid("供应商未返回生成结果");
     if (checkpoint?.assetCount !== undefined && checkpoint.assetCount !== assets.length) invalid("恢复任务的结果数量发生变化");

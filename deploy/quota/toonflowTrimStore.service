@@ -1,0 +1,21 @@
+[Unit]
+Description=Toonflow private video trim store
+After=toonflowQuota.service local-fs.target
+Requires=toonflowQuota.service
+
+[Service]
+Type=simple
+User=toonflow-trim-store
+Group=toonflow-trim-store
+SupplementaryGroups=toonflow-trim-access
+EnvironmentFile=/etc/toonflow-trim/store.env
+ExecStart=/opt/toonflow-trim/current/bun /opt/toonflow-trim/current/trimStore.js
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/run/toonflow-trim-store /srv/toonflow-data/projectQuota
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
