@@ -40,12 +40,11 @@ export default router.get("/", validateFields({ directory: z.string().min(1).max
     && process.env.NODE_ENV !== "dev" && !getRuntimePlatform().desktop) {
     throw Object.assign(new Error("用户存储配置缺失，无法安全导出"), { status: 503 });
   }
-  if (!trimMode().read && actor?.role === "user" && quotaRoot) throw Object.assign(new Error("裁剪功能暂未开放，无法安全导出项目"), { status: 503 });
   if (actor?.role !== "user" && quotaRoot) {
     const workspaces = resolve(quotaRoot, "quotaWorkspaces");
     if (workspaceTreesOverlap(workspaces, directory)) throw Object.assign(new Error("请使用项目所属账号导出，避免遗漏裁剪素材"), { status: 403 });
   }
-  const managedOwner = trimMode().read && actor?.role === "user" ? actor.id : undefined;
+  const managedOwner = quotaRoot && actor?.role === "user" ? actor.id : undefined;
   const stillAuthorized = async () => {
     if (!managedOwner) return true;
     const current = await authenticateWeb(req);
@@ -54,6 +53,7 @@ export default router.get("/", validateFields({ directory: z.string().min(1).max
   };
   if (!await stillAuthorized()) throw Object.assign(new Error("账号或工作区权限已变化"), { status: 403 });
   const snapshot = managedOwner ? await listTrimRecoveries(directory, managedOwner) : [];
+  if (!trimMode().read && snapshot.length) throw Object.assign(new Error("裁剪功能暂未开放，无法安全导出含裁剪素材的项目"), { status: 503 });
   if (snapshot.some(item => item.state !== "committed")) throw Object.assign(new Error("项目中有尚未完成的裁剪，请完成或处理后再导出"), { status: 409 });
   const files: Record<string, Uint8Array> = Object.create(null);
   const canvasTrimReferences = new Set<string>();
@@ -106,7 +106,7 @@ export default router.get("/", validateFields({ directory: z.string().min(1).max
   }
 
   await collectFiles(directory);
-  if (managedOwner) {
+  if (managedOwner && trimMode().read) {
     await addManagedTrimToExport(files, snapshot, { entries, bytes: totalBytes, maxBytes }, async path => {
       controller.signal.throwIfAborted();
       const result = await withManagedTrim(directory, managedOwner, path, AbortSignal.any([controller.signal, AbortSignal.timeout(30000)]), async bytes => bytes);
