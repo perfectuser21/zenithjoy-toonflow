@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import type { AdminDatabase } from "./schema";
@@ -565,6 +565,64 @@ export async function preserveCancelledTrimResult(db: AdminDatabase, ownerId: st
     delete payload.holder;
     return await db.updateBackgroundJob({ ...budgetKey, leaseOwner, generation, expectedRevision: row.revision, payload: payloadSchema.parse(payload), ...(actor === ownerId ? { requireEnabledUserId: ownerId } : {}) });
   } finally { if (generation !== undefined) await db.releaseBackgroundJobLease({ ...budgetKey, leaseOwner, generation }).catch(() => {}); }
+}
+
+/** 对外部终止动作发起前立即续租；租约未知或已过期时不执行动作。 */
+export async function withLiveTrimCancellationLease<T>(stillLeased: () => Promise<boolean>, action: () => Promise<T>): Promise<T> {
+  if (!await stillLeased()) throw new Error("取消租约已失效");
+  return action();
+}
+
+/** 仅供离线受控运维入口：持预算租约核验已确认的取消意图与独立审计。 */
+export async function withConfirmedTrimCancellation(db: AdminDatabase, ownerId: string, workspaceHash: string, operationId: string, operation: (stillLeased: () => Promise<boolean>, recordVerified: () => Promise<boolean>, hasVerified: () => Promise<boolean>) => Promise<boolean>) {
+  if (typeof process.getuid !== "function" || process.getuid() !== 0) return false;
+  z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/).parse(ownerId); workspaceSchema.parse(workspaceHash); z.uuid().parse(operationId);
+  const leaseOwner = randomUUID();
+  if (!await db.acquireBackgroundJobLease({ ...budgetKey, leaseOwner, ttlMs: 120000 })) return false;
+  let generation: number | undefined, failed = false, primary: unknown;
+  try {
+    const row = await db.getBackgroundJob(budgetKey);
+    if (!row || row.leaseOwner !== leaseOwner) throw new Error("已获取的取消租约身份不可核验");
+    generation = row.leaseGeneration;
+    const payload = payloadSchema.parse(row.payload);
+    // 离线恢复前必须确认没有其他未决资源，不能将无日志的 active 归属于猜测的任务。
+    const pending = payload.reservations.filter(entry => entry.state === "reserved" || entry.state === undefined);
+    if (pending.length !== 1 || payload.holder && (payload.holder.kind !== "trim" || payload.holder.operationId !== operationId || payload.holder.ownerId !== ownerId || payload.holder.workspaceHash !== workspaceHash)) return false;
+    const item = pending[0];
+    if (item?.kind !== "trim" || item.ownerId !== ownerId || item.workspaceHash !== workspaceHash || item.operationId !== operationId || !item.cancelIntent) return false;
+    const audit = await db.getBackgroundJob({ ...budgetKey, jobId: item.cancelIntent.attemptId });
+    if (!audit || !isDeepStrictEqual(audit.payload, { kind: "trimCancellationAttempt", operationId, ownerId, workspaceHash, intent: item.cancelIntent })) return false;
+    const stillLeased = () => db.renewBackgroundJobLease({ ...budgetKey, leaseOwner, generation: generation!, ttlMs: 120000 });
+    if (!await stillLeased()) return false;
+    const eventId = randomUUID(), eventKey = { ...budgetKey, jobId: eventId };
+    const attempt = { kind: "trimOfflineRecoveryAttempt", operationId, ownerId, workspaceHash, cancelAttemptId: item.cancelIntent.attemptId, actor: "uid:0", at: Date.now() };
+    await db.createBackgroundJob({ ...eventKey, payload: attempt });
+    if (!isDeepStrictEqual((await db.getBackgroundJob(eventKey))?.payload, attempt)) return false;
+    // 固定 ID 绑定取消意图：崩溃后只读回已有证明，不从目录名推断已核验。
+    const digest = createHash("sha256").update(`trim-offline-verified-v1:${item.cancelIntent.attemptId}`).digest();
+    digest[6] = (digest[6]! & 0x0f) | 0x40; digest[8] = (digest[8]! & 0x3f) | 0x80;
+    const hex = digest.subarray(0, 16).toString("hex");
+    const verifiedId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    const verifiedKey = { ...budgetKey, jobId: verifiedId };
+    const verifiedEvent = { kind: "trimOfflineRecoveryVerifiedV1", operationId, ownerId, workspaceHash, cancelAttemptId: item.cancelIntent.attemptId, actor: "uid:0" };
+    const hasVerified = async () => isDeepStrictEqual((await db.getBackgroundJob(verifiedKey))?.payload, verifiedEvent);
+    const recordVerified = async () => {
+      if (!await stillLeased()) return false;
+      await db.createBackgroundJob({ ...verifiedKey, payload: verifiedEvent });
+      return hasVerified();
+    };
+    return await operation(stillLeased, recordVerified, hasVerified);
+  } catch (error) {
+    failed = true; primary = error; throw error;
+  } finally {
+    try {
+      if (generation === undefined) throw new Error("取消租约代次未知，无法确认释放");
+      if (!await db.releaseBackgroundJobLease({ ...budgetKey, leaseOwner, generation })) throw new Error("取消租约释放未确认，可能需等待超时");
+    } catch (error) {
+      if (failed) throw new AggregateError([primary, error], "恢复操作和取消租约释放均失败");
+      throw error;
+    }
+  }
 }
 
 /** 仅释放已封禁且无结果文件的中断任务预留；保留账本记录。 */

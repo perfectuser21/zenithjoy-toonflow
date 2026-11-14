@@ -65,3 +65,13 @@
 worker 和 store 收到停止信号时拒绝新请求并等待已受理的请求结束，达到上限后退出且保留持久锁和任务状态。socket 由 systemd 持有，服务退出不删除 socket；服务停止期间排队的请求可能超时，客户端将执行结果视为未知，不自动释放预留或重复提交。强杀、崩溃、连接中断或任务状态未知时，运维需核对进程、监听、文件身份和作业终态后再按恢复流程处理，不得自动删除未知 socket 或锁。
 
 已有私有裁剪素材或新账本后，旧镜像不能识别这些数据，不得直接降级或用旧快照覆盖现有数据。隔离测试可在单独保留新数据的前提下切换到事先验证的独立旧版副本；真实客户环境需要先完成无损迁移工具、全量一致备份和独立恢复演练，当前均未验收。未知容器创建或状态不明时保持锁并人工核对，不得仅因 PID 消失而释放。
+
+### 专用 daemon 与离线恢复（实验，尚不可用）
+
+`toonflowTrimDocker.service` 和 `toonflowTrimMaintenance.service` 仅为专用裁剪 daemon 的实验单元，不能替换或重启宿主共享 Docker。两者启动前使用同版本 `prepareTrimCgroup.js` 验证 cgroup v2 并预建固定作业组；普通模式遇现有作业时拒绝启动，维护模式允许后续身份核验，绝不因此认定任务已结束。cgroup 不存在、状态无法读取或身份不符时，恢复仍须拒绝。
+
+服务端构建产物包含 `recoverTrimActive.js`、`inspectTrimRecovery.js` 和 `prepareTrimCgroup.js`；部署时只能从同一固定源码提交和镜像提取到 root 持有、仅 root 可写的版本目录，记录并比对提交、镜像 ID、Bun 和各程序的 SHA-256。不得在机器上临时运行工作区脚本或混用不同版本。实验候选源码已用实际核验取代字面量硬关闭，但尚未通过独立复审和完整端到端；不得部署或用于客户数据。
+
+实验单元应安装到 systemd 的供应商单元目录（例如 `/usr/local/lib/systemd/system`），不要将同名单元文件放入优先级高于 `/run/systemd/system` 的 `/etc/systemd/system`，否则 `mask --runtime` 可能不生效。维护前必须实际读回四个普通 worker/socket、dockerd、containerd 单元的 `UnitFileState=masked` 或 `masked-runtime` 和 `ActiveState=inactive`；不能只看 mask 命令的成功输出。维护运行时的前置检查不自动停止任何普通单元；普通运行时也拒绝与维护服务并存。若单元缺失、状态不确定或尚未屏蔽，应停止而非强行切换。
+
+账本身份核验实验仅接受 SQLite：`/etc/toonflow-trim/recoveryBinding.json` 必须由 root 持有、模式 0600，内容严格包含版本、数据目录和 SQLite 文件的设备号与 inode、应用 UID、数据源配置 SHA-256、应用容器完整 ID/镜像 ID、应用 systemd 单元。应用必须已停止并屏蔽，容器禁止自动重启，任何运行中或配置自动重启且挂载目标目录（包括父子目录）的容器均拒绝；应用 UID 仍有任意进程时也拒绝。数据库复制或重建导致 inode 变化时应重新履行完整部署核验，不能直接沿用旧清单。MySQL 暂不支持该离线核验，禁止将数据库配置异常当作空数据。即使上述核验通过，也不证明其后其他自动化不会重新启动写入者；正式恢复仍须验收受信维护窗口及实际隔离条件；实验候选尚不可用于客户数据。

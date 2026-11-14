@@ -14,8 +14,9 @@ const token = process.env.TOONFLOW_TRIM_TOKEN;
 const image = process.env.TOONFLOW_TRIM_IMAGE;
 const statePath = process.env.TOONFLOW_TRIM_STATE;
 const docker = process.env.TOONFLOW_TRIM_DOCKER;
+const daemonPath = process.env.TOONFLOW_TRIM_DAEMON_SOCKET;
 if (!socketPath || !socketPath.startsWith("/") || !statePath || !statePath.startsWith("/") || !token || !/^[a-f0-9]{64}$/.test(token)
-  || !image || !/^sha256:[a-f0-9]{64}$/.test(image) || !docker || !docker.startsWith("/")) throw new Error("隔离裁剪管理器配置不完整");
+  || !image || !/^sha256:[a-f0-9]{64}$/.test(image) || !docker || !docker.startsWith("/") || !daemonPath?.startsWith("/") || resolve(daemonPath) !== daemonPath || daemonPath === "/var/run/docker.sock" || daemonPath === "/run/docker.sock") throw new Error("隔离裁剪管理器配置不完整");
 if (dirname(resolve(socketPath)) === resolve(statePath)) throw new Error("socket 和状态目录必须分离");
 const dockerInfo = await lstat(docker);
 if (!dockerInfo.isFile() || dockerInfo.isSymbolicLink() || await realpath(docker) !== docker || dockerInfo.uid !== 0 || (dockerInfo.mode & 0o022) !== 0) throw new Error("容器执行程序无效");
@@ -26,13 +27,18 @@ for (let directory = dirname(docker);;) {
   if (parent === directory) break;
   directory = parent;
 }
-const dockerEnv = { PATH: "/usr/bin:/bin", HOME: statePath, DOCKER_HOST: "unix:///var/run/docker.sock", DOCKER_CONFIG: resolve(statePath, "dockerConfig") };
-// 确认所有命令使用同一个 socket 实例；daemon 重启或 socket 被替换时不作终态推断。
-const daemonSocket = await lstat("/var/run/docker.sock");
-if (!daemonSocket.isSocket() || daemonSocket.isSymbolicLink()) throw new Error("容器服务 socket 无效");
+const dockerEnv = { PATH: "/usr/bin:/bin", HOME: statePath, DOCKER_HOST: `unix://${daemonPath}`, DOCKER_CONFIG: resolve(statePath, "dockerConfig") };
+// 专用 socket 的目录、权限和 inode 必须由 root 控制，不回落共享 daemon。
+for (let parent = dirname(daemonPath);;) {
+  const info = await lstat(parent);
+  if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== 0 || (info.mode & 0o022) || await realpath(parent) !== parent) throw new Error("专用容器服务目录不安全");
+  const next = dirname(parent); if (next === parent) break; parent = next;
+}
+const daemonSocket = await lstat(daemonPath);
+if (!daemonSocket.isSocket() || daemonSocket.isSymbolicLink() || daemonSocket.uid !== 0 || (daemonSocket.mode & 0o777) !== 0o660 || typeof process.getgroups !== "function" || !process.getgroups().includes(daemonSocket.gid)) throw new Error("专用容器服务 socket 无效");
 async function sameDaemonSocket() {
-  const current = await lstat("/var/run/docker.sock").catch(() => null);
-  return !!current && current.isSocket() && !current.isSymbolicLink() && current.dev === daemonSocket.dev && current.ino === daemonSocket.ino;
+  const current = await lstat(daemonPath!).catch(() => null);
+  return !!current && current.isSocket() && !current.isSymbolicLink() && current.uid === 0 && current.gid === daemonSocket.gid && (current.mode & 0o777) === 0o660 && current.dev === daemonSocket.dev && current.ino === daemonSocket.ino;
 }
 for (const directory of [resolve(statePath)]) {
   const info = await lstat(directory);
@@ -159,7 +165,7 @@ await serveTrimSocket(socketPath, "trimWorker", maxInput, async request => {
     void aborted.catch(() => {});
     await writeDurableState(journal, { name, operationId, ownerId, workspaceHash, image, managerPid: process.pid, phase: "creating", protocolVersion: 2, startedAt: Date.now() });
     safeToUnlock = false;
-    const creation = Bun.spawn([docker, "create", "--init", "--rm", "--pull=never", "--name", name, "--label", `com.zenithjoy.trim.operation=${operationId}`, "--label", "com.zenithjoy.trim.protocol=2", "--network=none", "--read-only", "--user=65534:65534", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=32", "--memory=1g", "--cpus=1", "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=768m,mode=1777", "-i", "--env", `START=${start}`, "--env", `END=${end}`, "--env", `DURATION=${end-start}`, "--env", `NORMALIZE_FPS=${trimNeedsFrameNormalization(start, end) ? 1 : 0}`, image, "timeout", "-k", "5s", "180s", "/bin/sh", "-c", script], { stdin: "ignore", stdout: "pipe", stderr: "ignore", env: dockerEnv });
+    const creation = Bun.spawn([docker, "create", "--init", "--rm", "--pull=never", "--name", name, "--label", `com.zenithjoy.trim.operation=${operationId}`, "--label", "com.zenithjoy.trim.protocol=2", "--network=none", "--cgroup-parent=/toonflow-trim-jobs", "--read-only", "--user=65534:65534", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=32", "--memory=1g", "--cpus=1", "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=768m,mode=1777", "-i", "--env", `START=${start}`, "--env", `END=${end}`, "--env", `DURATION=${end-start}`, "--env", `NORMALIZE_FPS=${trimNeedsFrameNormalization(start, end) ? 1 : 0}`, image, "timeout", "-k", "5s", "180s", "/bin/sh", "-c", script], { stdin: "ignore", stdout: "pipe", stderr: "ignore", env: dockerEnv });
     child = creation;
     // 创建请求已发出后等待明确结果；断连不能取消 daemon 内可能仍在进行的创建。
     const [createdText, creationExit] = await Promise.all([creation.stdout.text(), creation.exited]);

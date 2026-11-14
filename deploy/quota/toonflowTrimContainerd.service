@@ -1,0 +1,19 @@
+# 独立容器运行时；不能连接或复用宿主共享 containerd。
+[Unit]
+Description=Toonflow dedicated trim containerd
+After=local-fs.target
+
+[Service]
+Type=notify
+User=root
+Group=root
+ExecStartPre=/opt/toonflow-trim/current/bun /opt/toonflow-trim/current/prepareTrimCgroup.js normal
+ExecStart=/usr/bin/containerd --config /etc/toonflow-trim/containerd.toml --root /var/lib/toonflow-trim-containerd --state /run/toonflow-trim-containerd --address /run/toonflow-trim-containerd/containerd.sock
+Restart=no
+KillMode=control-group
+Delegate=yes
+LimitNOFILE=1048576
+TasksMax=infinity
+
+[Install]
+WantedBy=multi-user.target

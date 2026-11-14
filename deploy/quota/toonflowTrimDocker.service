@@ -1,0 +1,18 @@
+# 实验性专用 daemon；不得覆盖或停止宿主共享 docker.service。
+[Unit]
+Description=Toonflow dedicated trim Docker daemon
+After=local-fs.target toonflowTrimContainerd.service
+Requires=toonflowTrimContainerd.service
+
+[Service]
+Type=notify
+User=root
+Group=root
+ExecStartPre=/opt/toonflow-trim/current/bun /opt/toonflow-trim/current/prepareTrimCgroup.js normal
+ExecStart=/usr/bin/dockerd --containerd=/run/toonflow-trim-containerd/containerd.sock --host=unix:///run/toonflow-trim-docker/docker.sock --group=toonflow-trim-docker --data-root=/var/lib/toonflow-trim-docker --exec-root=/run/toonflow-trim-docker/runtime --pidfile=/run/toonflow-trim-docker/docker.pid --exec-opt=native.cgroupdriver=cgroupfs --bridge=none --iptables=false --ip6tables=false --live-restore=false
+Restart=no
+KillMode=control-group
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

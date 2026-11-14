@@ -1,0 +1,4 @@
+# 专用运行时不加载主机默认配置或外部片段；具体版本须部署前验收。
+version = 3
+imports = []
+disabled_plugins = ["io.containerd.cri.v1.images", "io.containerd.cri.v1.runtime"]

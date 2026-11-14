@@ -1,14 +1,14 @@
 [Unit]
 Description=Toonflow isolated video trim worker
-After=docker.service local-fs.target
-Requires=docker.service toonflowTrimWorker.socket
+After=toonflowTrimDocker.service local-fs.target
+Requires=toonflowTrimDocker.service toonflowTrimWorker.socket
 After=toonflowTrimWorker.socket
 
 [Service]
 Type=simple
 User=toonflow-trim-worker
 Group=toonflow-trim-access
-SupplementaryGroups=docker
+SupplementaryGroups=toonflow-trim-docker
 EnvironmentFile=/etc/toonflow-trim/worker.env
 ExecStart=/opt/toonflow-trim/current/bun /opt/toonflow-trim/current/trimWorker.js
 NoNewPrivileges=true
@@ -18,6 +18,7 @@ PrivateTmp=true
 ReadWritePaths=/var/lib/toonflow-trim/worker
 TimeoutStopSec=250s
 # 未知作业状态或残留 socket 需人工核查，不自动反复重启。
+KillMode=control-group
 Restart=no
 
 [Install]
