@@ -3,7 +3,7 @@ import { constants, lstat, open, readlink, realpath } from "@toonflow/file";
 import { request as httpRequest } from "node:http";
 import { dirname, relative, resolve, sep } from "node:path";
 import { createHash } from "node:crypto";
-import { acquireBackgroundBudget, finishBackgroundBudget, listOwnTrimReservations, openDatabase, readOwnTrimReservation, recordTrimIntent, recoverTrimIntent, releaseInterruptedTrim, renewBackgroundBudget } from "@toonflow/multi-tenant-db";
+import { acquireBackgroundBudget, finishBackgroundBudget, listOwnTrimReservations, markTrimDispatched, openDatabase, readOwnTrimReservation, recordTrimIntent, recoverTrimIntent, releaseInterruptedTrim, renewBackgroundBudget } from "@toonflow/multi-tenant-db";
 import { z } from "zod";
 import conf from "@/utils/conf";
 import { pipeline } from "node:stream/promises";
@@ -104,6 +104,8 @@ async function trimVideoFromSource(cwd: string, sourcePath: string, start: numbe
         for await (const chunk of sourceFile.createReadStream({ autoClose: false, start: 0 })) { active.throwIfAborted(); baseline.update(chunk); }
         const originalDigest = baseline.digest("hex");
         if (identity(await sourceFile.stat()) !== identity(info) || !sealedPath && await verifiedFd(cwd, sourceFile.fd) !== source.path) invalid("原视频在裁剪前已变化", 409);
+        active.throwIfAborted();
+        if (!await databaseAccess(() => markTrimDispatched(database, lease))) invalid("裁剪租约已失效", 409);
         const sourceHash = createHash("sha256");
         let upload: Promise<void> | undefined;
         const response = await new Promise<import("node:http").IncomingMessage>((resolveResponse, reject) => {

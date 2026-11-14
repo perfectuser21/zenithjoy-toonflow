@@ -14,8 +14,9 @@ const archiveAtBytes = 2 * 1024 * 1024;
 const archiveBatch = 100;
 const workspaceSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const trimRequestSchema = z.strictObject({ source: z.string().min(1).max(4096), start: z.number().finite().nonnegative(), end: z.number().finite().positive().max(120) }).refine(value => value.end > value.start);
-const reservationSchema = z.strictObject({ operationId: z.uuid(), ownerId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/), workspaceHash: workspaceSchema.optional(), kind: z.enum(["prepare", "frame", "trim"]).optional(), archived: z.literal(true).optional(), groupIds: z.string().max(87384).optional(), groupSizes: z.string().max(21848).optional(), crossEntries: z.string().max(160000).optional(), state: z.enum(["reserved", "committed", "interrupted"]).optional(), bytes: z.number().int().min(0).max(maxCrossGroupBytes), digest: z.string().regex(/^[a-f0-9]{64}$/).optional(), sourceDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(), requestHash: z.string().regex(/^[a-f0-9]{64}$/).optional(), parametersHash: z.string().regex(/^[a-f0-9]{64}$/).optional(), trimRequest: trimRequestSchema.optional(), trimIntent: z.strictObject({ bytes: z.number().int().positive().max(128 * 1024 * 1024), digest: z.string().regex(/^[a-f0-9]{64}$/), sourceDigest: z.string().regex(/^[a-f0-9]{64}$/) }).optional() }).superRefine((item, context) => {
+const reservationSchema = z.strictObject({ operationId: z.uuid(), ownerId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/), workspaceHash: workspaceSchema.optional(), kind: z.enum(["prepare", "frame", "trim"]).optional(), archived: z.literal(true).optional(), groupIds: z.string().max(87384).optional(), groupSizes: z.string().max(21848).optional(), crossEntries: z.string().max(160000).optional(), state: z.enum(["reserved", "committed", "interrupted"]).optional(), trimPhase: z.enum(["preflight", "dispatched"]).optional(), bytes: z.number().int().min(0).max(maxCrossGroupBytes), digest: z.string().regex(/^[a-f0-9]{64}$/).optional(), sourceDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(), requestHash: z.string().regex(/^[a-f0-9]{64}$/).optional(), parametersHash: z.string().regex(/^[a-f0-9]{64}$/).optional(), trimRequest: trimRequestSchema.optional(), trimIntent: z.strictObject({ bytes: z.number().int().positive().max(128 * 1024 * 1024), digest: z.string().regex(/^[a-f0-9]{64}$/), sourceDigest: z.string().regex(/^[a-f0-9]{64}$/) }).optional() }).superRefine((item, context) => {
   if (!item.crossEntries && item.bytes > perJobBytes) context.addIssue({ code: "custom", message: "单任务资源预留异常" });
+  if (item.trimPhase && (item.kind !== "trim" || item.trimPhase === "preflight" && (item.state !== "reserved" || item.trimIntent))) context.addIssue({ code: "custom", message: "裁剪发送状态异常" });
 });
 // 普通预留仍限制为单任务 512 MiB；跨项目分组是多账号记录的总和。
 const payloadSchema = z.strictObject({ kind: z.literal("backgroundBudget"), reservations: z.array(reservationSchema).max(10000), holder: z.strictObject({ operationId: z.uuid(), ownerId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/), workspaceHash: workspaceSchema.optional(), kind: z.enum(["plan", "prepare", "frame", "trim"]), leaseOwner: z.uuid() }).optional(), audit: z.array(z.strictObject({ attemptId: z.uuid(), operationId: z.uuid(), ownerId: z.string(), workspaceHash: workspaceSchema, actor: z.string().min(1).max(64), reason: z.string().min(16).max(500), result: z.literal("released") })).max(5000).optional() });
@@ -123,6 +124,8 @@ async function acquireBudget(db: AdminDatabase, input: { operationId: string; ow
     if (!row || row.leaseOwner !== leaseOwner) throw new Error("后台资源预算不可用");
     const payload = payloadSchema.parse(row.payload);
     assertGroupIntegrity(payload);
+    // 获得新租约后，仅带明确发送前标记的旧预留可安全回收；旧版无标记及已发送均保持未知。
+    payload.reservations = payload.reservations.filter(item => !(item.kind === "trim" && item.state === "reserved" && item.trimPhase === "preflight"));
     // 裁剪状态未知时，旧容器可能仍在运行；超时不能当作退出证明。
     if (payload.reservations.some(item => item.kind === "trim" && item.state === "reserved")) return undefined;
     if (value.kind !== "plan") {
@@ -265,7 +268,7 @@ async function acquireBudget(db: AdminDatabase, input: { operationId: string; ow
         payload.reservations = retained;
       }
       if (payload.reservations.length >= 10000) return undefined;
-      payload.reservations.push({ operationId: value.operationId, ownerId: value.ownerId, workspaceHash: value.workspaceHash, kind: value.kind, state: "reserved", bytes, ...(value.requestHash ? { requestHash: value.requestHash } : {}), ...(value.parametersHash ? { parametersHash: value.parametersHash } : {}), ...(value.trimRequest ? { trimRequest: value.trimRequest } : {}) });
+      payload.reservations.push({ operationId: value.operationId, ownerId: value.ownerId, workspaceHash: value.workspaceHash, kind: value.kind, state: "reserved", bytes, ...(value.kind === "trim" ? { trimPhase: "preflight" as const } : {}), ...(value.requestHash ? { requestHash: value.requestHash } : {}), ...(value.parametersHash ? { parametersHash: value.parametersHash } : {}), ...(value.trimRequest ? { trimRequest: value.trimRequest } : {}) });
     }
     payload.holder = { operationId: value.operationId, ownerId: value.ownerId, workspaceHash: value.workspaceHash, kind: value.kind, leaseOwner };
     if (!await db.updateBackgroundJob({ ...budgetKey, leaseOwner, generation: row.leaseGeneration, expectedRevision: row.revision, payload })) throw new Error("后台资源预算已变化");
@@ -328,6 +331,20 @@ export async function listOwnTrimReservations(db: AdminDatabase, ownerId: string
 }
 export async function renewBackgroundBudget(db: AdminDatabase, lease: BackgroundBudgetLease) {
   return db.renewBackgroundJobLease({ ...budgetKey, leaseOwner: lease.leaseOwner, generation: lease.generation, ttlMs: 120000 });
+}
+/** 发送请求之前持久化未知边界；只有当前有效租约可越过此边界。 */
+export async function markTrimDispatched(db: AdminDatabase, lease: BackgroundBudgetLease) {
+  if (lease.kind !== "trim" || !await renewBackgroundBudget(db, lease)) return false;
+  const row = await db.getBackgroundJob(budgetKey);
+  if (!row || row.leaseOwner !== lease.leaseOwner || row.leaseGeneration !== lease.generation || row.revision !== lease.revision) return false;
+  const payload = payloadSchema.parse(row.payload), holder = payload.holder;
+  if (!holder || holder.leaseOwner !== lease.leaseOwner || holder.ownerId !== lease.ownerId || holder.workspaceHash !== lease.workspaceHash || holder.operationId !== lease.operationId || holder.kind !== "trim") return false;
+  const item = payload.reservations.find(entry => entry.kind === "trim" && entry.state === "reserved" && entry.ownerId === lease.ownerId && entry.workspaceHash === lease.workspaceHash && entry.operationId === lease.operationId);
+  if (!item || item.trimPhase !== "preflight") return false;
+  item.trimPhase = "dispatched";
+  if (!await db.updateBackgroundJob({ ...budgetKey, leaseOwner: lease.leaseOwner, generation: lease.generation, expectedRevision: lease.revision, payload })) return false;
+  lease.revision++;
+  return true;
 }
 /** 仅返回当前账户和工作区的记录；旧版未绑定工作区的记录不会被列出或自动释放。 */
 export async function listBackgroundReservations(db: AdminDatabase, lease: BackgroundBudgetLease) {
