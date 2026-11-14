@@ -14,8 +14,8 @@ async function config() {
   if (!socket?.startsWith("/") || process.env.TOONFLOW_TRIM_STORE_TOKEN || !rawUid || !/^[0-9]+$/.test(rawUid) || Number(rawUid) < 1) return unavailable();
   const token = await readTrimSecret(process.env.TOONFLOW_TRIM_STORE_TOKEN_FILE).catch(() => unavailable());
   const parent = dirname(resolve(socket)), info = await lstat(parent), endpoint = await lstat(socket);
-  if (!info.isDirectory() || info.isSymbolicLink() || await realpath(parent) !== parent || info.uid !== Number(rawUid) || (info.mode & 0o027)
-    || !endpoint.isSocket() || endpoint.isSymbolicLink() || endpoint.uid !== info.uid || endpoint.gid !== info.gid || (endpoint.mode & 0o007)
+  if (!info.isDirectory() || info.isSymbolicLink() || await realpath(parent) !== parent || info.uid !== 0 || (info.mode & 0o027)
+    || !endpoint.isSocket() || endpoint.isSymbolicLink() || endpoint.uid !== Number(rawUid) || endpoint.gid !== info.gid || (endpoint.mode & 0o007)
     || typeof process.getuid !== "function" || process.getuid() === info.uid || typeof process.getgroups !== "function" || typeof process.getgid !== "function" || process.getgid() !== info.gid && !process.getgroups().includes(info.gid)) return unavailable();
   for (let ancestor = dirname(parent);;) {
     const entry = await lstat(ancestor);
@@ -34,7 +34,7 @@ export async function trimStoreRequest(method: "GET" | "POST" | "SEAL", ownerId:
   try {
   const { socket, token } = await config();
   const response = await new Promise<import("node:http").IncomingMessage>((done, reject) => {
-    const req = httpRequest({ socketPath: socket, path: method === "SEAL" ? "/seal" : "/result", method: method === "SEAL" ? "POST" : method, signal, headers: { authorization: `Bearer ${token}`, "x-trim-owner": ownerId, "x-trim-workspace": workspaceHash, "x-trim-operation": operationId, ...(data ? { "content-length": String(data.length) } : method === "SEAL" ? { "content-length": "0" } : {}) } }, done);
+    const req = httpRequest({ socketPath: socket, path: method === "SEAL" ? "/seal" : "/result", method: method === "SEAL" ? "POST" : method, signal: AbortSignal.any([signal, AbortSignal.timeout(240000)]), headers: { authorization: `Bearer ${token}`, "x-trim-owner": ownerId, "x-trim-workspace": workspaceHash, "x-trim-operation": operationId, ...(data ? { "content-length": String(data.length) } : method === "SEAL" ? { "content-length": "0" } : {}) } }, done);
     req.once("error", reject);
     req.end(data);
   });

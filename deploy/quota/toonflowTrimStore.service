@@ -1,7 +1,8 @@
 [Unit]
 Description=Toonflow private video trim store
 After=toonflowQuota.service local-fs.target
-Requires=toonflowQuota.service
+Requires=toonflowQuota.service toonflowTrimStore.socket
+After=toonflowTrimStore.socket
 RequiresMountsFor=/srv/toonflow-trim-quota
 
 [Service]
@@ -16,7 +17,8 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/run/toonflow-trim-store /srv/toonflow-trim-quota
+ReadWritePaths=/srv/toonflow-trim-quota
+TimeoutStopSec=250s
 Restart=no
 
 [Install]

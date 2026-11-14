@@ -49,7 +49,7 @@ export async function getTrimWorkerConfig() {
   const directoryInfo = await lstat(socketDirectory), socketInfo = await lstat(socket);
   if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink() || await realpath(socketDirectory) !== socketDirectory
     || (directoryInfo.mode & 0o027) !== 0 || !socketInfo.isSocket() || socketInfo.isSymbolicLink()
-    || (socketInfo.mode & 0o007) !== 0 || directoryInfo.uid !== Number(uid) || socketInfo.uid !== Number(uid)
+    || (socketInfo.mode & 0o007) !== 0 || directoryInfo.uid !== 0 || socketInfo.uid !== Number(uid)
     || directoryInfo.gid !== socketInfo.gid || process.getuid && directoryInfo.uid === process.getuid()) invalid("安全裁剪连接不可用", 503);
   for (let parent = dirname(socketDirectory);;) {
     const info = await lstat(parent);
@@ -106,7 +106,7 @@ async function trimVideoFromSource(cwd: string, sourcePath: string, start: numbe
         const sourceHash = createHash("sha256");
         let upload: Promise<void> | undefined;
         const response = await new Promise<import("node:http").IncomingMessage>((resolveResponse, reject) => {
-          const req = httpRequest({ socketPath: socket, path: "/trim", method: "POST", headers: { authorization: `Bearer ${token}`, "content-length": String(info.size), "x-trim-start": String(start), "x-trim-end": String(end), "x-trim-operation": nodeId, "x-trim-owner": ownerId, "x-trim-workspace": createHash("sha256").update(cwd).digest("hex") }, signal: active }, resolveResponse);
+          const req = httpRequest({ socketPath: socket, path: "/trim", method: "POST", headers: { authorization: `Bearer ${token}`, "content-length": String(info.size), "x-trim-start": String(start), "x-trim-end": String(end), "x-trim-operation": nodeId, "x-trim-owner": ownerId, "x-trim-workspace": createHash("sha256").update(cwd).digest("hex") }, signal: AbortSignal.any([active, AbortSignal.timeout(240000)]) }, resolveResponse);
           req.once("error", reject);
           const input = sourceFile.createReadStream({ autoClose: false, start: 0 });
           input.on("data", chunk => sourceHash.update(chunk));

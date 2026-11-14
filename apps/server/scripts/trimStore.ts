@@ -1,11 +1,10 @@
 // 独立 UID 的裁剪结果存储。仅可信应用可访问 socket；客户不能获得 socket 凭据。
 import { timingSafeEqual } from "node:crypto";
 import { dirname, resolve } from "node:path";
-import { chmod, constants, lstat, mkdir, open, readdir, realpath, statfs } from "@toonflow/file";
+import { constants, lstat, mkdir, open, readdir, realpath, statfs } from "@toonflow/file";
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import { createConnection } from "node:net";
-import { chown } from "node:fs/promises";
-import { installTrimSocketShutdown } from "./trimSocketShutdown";
+import { serveTrimSocket } from "./trimSocketServer";
 
 const socket = process.env.TOONFLOW_TRIM_STORE_SOCKET, token = process.env.TOONFLOW_TRIM_STORE_TOKEN;
 const quotaRoot = process.env.TOONFLOW_PROJECT_QUOTA_ROOT, appGid = Number(process.env.TOONFLOW_TRIM_ACCESS_GID);
@@ -13,16 +12,6 @@ const quotaGid = Number(process.env.TOONFLOW_TRIM_STORE_GID);
 if (!socket?.startsWith("/") || !quotaRoot?.startsWith("/") || !token || !/^[a-f0-9]{64}$/.test(token)
   || !Number.isSafeInteger(appGid) || appGid < 1 || typeof process.getuid !== "function" || !process.getuid() || !Number.isSafeInteger(quotaGid) || quotaGid < 1 || typeof process.getgid !== "function" || process.getgid() !== quotaGid || typeof process.getgroups !== "function" || !process.getgroups().includes(appGid)) throw new Error("裁剪存储配置不完整");
 const storeUid = process.getuid();
-const socketDirectory = dirname(resolve(socket));
-const socketParent = await lstat(socketDirectory);
-if (!socketParent.isDirectory() || socketParent.isSymbolicLink() || await realpath(socketDirectory) !== socketDirectory
-  || socketParent.uid !== storeUid || socketParent.gid !== appGid || (socketParent.mode & 0o027) !== 0) throw new Error("裁剪存储 socket 目录不安全");
-for (let ancestor = dirname(socketDirectory);;) {
-  const info = await lstat(ancestor);
-  if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== 0 || (info.mode & 0o022)) throw new Error("裁剪存储 socket 祖先不安全");
-  const next = dirname(ancestor); if (next === ancestor) break; ancestor = next;
-}
-if (await lstat(socket).then(() => true, (error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return false; throw error; })) throw new Error("裁剪存储 socket 已存在");
 const maxBytes = 128 * 1024 * 1024;
 const libc = dlopen("libc.so.6", {
   ioctl: { args: [FFIType.int, FFIType.u64, FFIType.ptr], returns: FFIType.int },
@@ -76,7 +65,7 @@ async function rootFor(owner: string) {
   }
   return { root, project };
 }
-const server = Bun.serve({ unix: socket, maxRequestBodySize: maxBytes, async fetch(request) {
+await serveTrimSocket(socket, "trimStore", maxBytes, async request => {
   if (processLock.fd < 0) return deny(503);
   const currentLock = await lstat(resolve(quotaRoot!, ".trimStore.lock")).catch(() => null);
   if (!currentLock?.isFile() || currentLock.isSymbolicLink() || currentLock.uid !== 0 || currentLock.nlink !== 1 || currentLock.mode & 0o022 || currentLock.dev !== lockInfo.dev || currentLock.ino !== lockInfo.ino) return deny(503);
@@ -173,8 +162,5 @@ const server = Bun.serve({ unix: socket, maxRequestBodySize: maxBytes, async fet
     } finally { await dir.close(); }
   } catch (error) { return deny(["EDQUOT", "ENOSPC"].includes((error as NodeJS.ErrnoException)?.code ?? "") ? 507 : 503); }
   finally { if (!streaming) busy = false; }
-} });
-await chown(socket, storeUid, appGid);
-await chmod(socket, 0o660);
-await installTrimSocketShutdown(socket, server);
+});
 console.log("裁剪私有存储已启动");

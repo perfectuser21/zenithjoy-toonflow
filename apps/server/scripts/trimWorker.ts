@@ -3,11 +3,11 @@ import { timingSafeEqual } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { constants } from "node:fs";
 import { open, unlink } from "node:fs/promises";
-import { chmod, lstat, mkdir, realpath, rmdir } from "@toonflow/file";
+import { lstat, mkdir, realpath, rmdir } from "@toonflow/file";
 import { writeDurableState } from "./trimWorkerState";
 import { acquireWorkerFence } from "./trimWorkerFence";
 import { trimNeedsFrameNormalization } from "./trimDuration";
-import { installTrimSocketShutdown } from "./trimSocketShutdown";
+import { serveTrimSocket } from "./trimSocketServer";
 
 const socketPath = process.env.TOONFLOW_TRIM_SOCKET;
 const token = process.env.TOONFLOW_TRIM_TOKEN;
@@ -34,11 +34,10 @@ async function sameDaemonSocket() {
   const current = await lstat("/var/run/docker.sock").catch(() => null);
   return !!current && current.isSocket() && !current.isSymbolicLink() && current.dev === daemonSocket.dev && current.ino === daemonSocket.ino;
 }
-for (const directory of [dirname(resolve(socketPath)), resolve(statePath)]) {
+for (const directory of [resolve(statePath)]) {
   const info = await lstat(directory);
-  const socketDirectory = directory === dirname(resolve(socketPath));
   if (!info.isDirectory() || info.isSymbolicLink() || await realpath(directory) !== directory
-    || process.getuid && info.uid !== process.getuid() || (info.mode & (socketDirectory ? 0o027 : 0o077)) !== 0) throw new Error("隔离目录权限不安全");
+    || process.getuid && info.uid !== process.getuid() || (info.mode & 0o077) !== 0) throw new Error("隔离目录权限不安全");
 }
 // 状态目录的父级必须由 root 控制，否则同 UID 客户可以替换目录使两个进程各持一把锁。
 for (let directory = dirname(resolve(statePath));;) {
@@ -49,8 +48,6 @@ for (let directory = dirname(resolve(statePath));;) {
 // 持有至进程退出；允许后续恢复进程通过同一把锁证明旧工作进程不再执行。
 const workerFence = await acquireWorkerFence(statePath);
 const workerFenceIdentity = await workerFence.stat();
-const socketInfo = await lstat(socketPath).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
-if (socketInfo) throw new Error("隔离管理器 socket 已存在");
 const lock = resolve(statePath, "active");
 const journal = resolve(lock, "lastJob.json");
 async function releaseActive() {
@@ -78,7 +75,7 @@ printf '%s %s %s\n' "$actual" "$video_duration" "$output" | awk -v expected="$DU
 printf '%s %s\n' "$actual" "$output"
 cat /tmp/output.mp4`;
 function denied(status: number) { return new Response(null, { status }); }
-const server = Bun.serve({ unix: socketPath, maxRequestBodySize: maxInput, async fetch(request) {
+await serveTrimSocket(socketPath, "trimWorker", maxInput, async request => {
   const [fenceOnPath, fenceHeld] = await Promise.all([lstat(resolve(statePath!, ".worker.lock")).catch(() => null), workerFence.stat().catch(() => null)]);
   if (workerFence.fd < 0 || !fenceHeld?.isFile() || fenceHeld.dev !== workerFenceIdentity.dev || fenceHeld.ino !== workerFenceIdentity.ino || !fenceOnPath?.isFile() || fenceOnPath.isSymbolicLink() || fenceOnPath.dev !== workerFenceIdentity.dev || fenceOnPath.ino !== workerFenceIdentity.ino || fenceOnPath.nlink !== 1 || (fenceOnPath.mode & 0o077)) return denied(503);
   const url = new URL(request.url);
@@ -172,7 +169,5 @@ const server = Bun.serve({ unix: socketPath, maxRequestBodySize: maxInput, async
     }
     return denied(503);
   } finally { detachAbort(); if (safeToUnlock) await releaseActive().catch(() => {}); }
-} });
-await chmod(socketPath, 0o660);
-await installTrimSocketShutdown(socketPath, server);
+});
 console.log("隔离裁剪管理器已启动");
