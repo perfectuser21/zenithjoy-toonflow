@@ -15,11 +15,83 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: oven-sh/setup-bun@v2
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: package.json
       - run: bun install --frozen-lockfile
       - run: bun run build:server
+      - name: Prepare build artifact
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$(uname -m)" = x86_64
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re, subprocess, sys
+
+          root = pathlib.Path('build')
+          allowed = ('nodes', 'tools', 'ext', 'web', 'server', 'mcp', 'skills', 'providers')
+          forbidden = re.compile(r'^(?:\.git|data|workspaces|\.env(?:\..*)?|[^/]*\.(?:pem|key|p12|pfx|sqlite|sqlite3|db)|[^/]*(?:secret|credential)[^/]*|config\.(?:json|ya?ml|toml))$', re.I)
+          patterns = [re.compile(rb'-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----'),
+                      re.compile(rb'sk-proj-[A-Za-z0-9_-]{25,}'), re.compile(rb'AKIA[0-9A-Z]{16}')]
+          files = {}
+          paths = []
+          for name in allowed:
+              directory = root / name
+              if directory.is_symlink() or not directory.is_dir():
+                  sys.exit(f'missing or unsafe artifact directory: {directory}')
+              paths.extend(directory.rglob('*'))
+          for path in sorted(paths):
+              relative = path.relative_to(root).as_posix()
+              if any(forbidden.fullmatch(part) for part in path.relative_to(root).parts):
+                  sys.exit(f'forbidden artifact path: {relative}')
+              if path.is_symlink():
+                  sys.exit(f'symlink in build artifact: {path}')
+              if not path.is_file():
+                  continue
+              data = path.read_bytes()
+              if any(pattern.search(data) for pattern in patterns):
+                  sys.exit(f'possible secret in artifact: {relative}')
+              files[relative] = hashlib.sha256(data).hexdigest()
+          if not {'server/index.js', 'server/trimWorker.js', 'server/trimStore.js', 'server/provisionTrimStore.js'}.issubset(files):
+              sys.exit('missing server build output')
+          units = ('deploy/quota/toonflowTrimWorker.attested.service', 'deploy/quota/toonflowTrimWorker.socket',
+                   'deploy/quota/toonflowTrimWitness.service', 'deploy/quota/toonflowTrimDocker.service',
+                   'deploy/quota/toonflowTrimContainerd.service', 'deploy/quota/toonflowTrimStore.attested.service',
+                   'deploy/quota/toonflowTrimStore.socket')
+          unit_hashes = {}
+          for name in units:
+              path = pathlib.Path(name)
+              if path.is_symlink() or not path.is_file():
+                  sys.exit(f'missing or unsafe unit source: {name}')
+              unit_hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+          manifest = {'source_sha': os.environ['EXPECTED_SHA'], 'architecture': 'linux/amd64',
+                      'repository': os.environ['GITHUB_REPOSITORY'], 'run_id': os.environ['GITHUB_RUN_ID'],
+                      'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+                      'bun_version': subprocess.check_output(['bun', '--version'], text=True).strip(),
+                      'bun_lock_sha256': hashlib.sha256(pathlib.Path('bun.lock').read_bytes()).hexdigest(),
+                      'unit_sources_sha256': unit_hashes, 'files_sha256': files}
+          pathlib.Path('artifact-manifest.json').write_text(json.dumps(manifest, sort_keys=True, indent=2) + '\n')
+          unit_dir = pathlib.Path('release-units')
+          unit_dir.mkdir(exist_ok=False)
+          for name in units:
+              (unit_dir / pathlib.Path(name).name).write_bytes(pathlib.Path(name).read_bytes())
+          PY
+          tar -czf toonflow-build.tar.gz build/{nodes,tools,ext,web,server,mcp,skills,providers} release-units artifact-manifest.json
+          sha256sum toonflow-build.tar.gz > toonflow-build.tar.gz.sha256
+      - name: Upload build artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: toonflow-build-${{ github.event.pull_request.head.sha }}
+          path: |
+            toonflow-build.tar.gz
+            toonflow-build.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0

@@ -5,6 +5,12 @@ export function trimMode(env: NodeJS.ProcessEnv = process.env) {
   return { read: enabled || readOnly, create: enabled && !readOnly };
 }
 
+/** 仅受信任运维完成旧实例隔离、持久状态和回退核验后可显式开放。 */
+export function unknownTrimRecoveryAvailable(env: NodeJS.ProcessEnv = process.env) {
+  return env.TOONFLOW_TRIM_RECOVERY_ISOLATION_CONFIRMED === "1"
+    && env.TOONFLOW_SECURE_TRIM_SINGLE_INSTANCE === "1" && trimMode(env).create;
+}
+
 /** 只读模式只允许查询既有裁剪状态，不允许执行或释放。 */
 export function canAccessTrimRoute(path: string, method: string, env: NodeJS.ProcessEnv = process.env) {
   if (env.TOONFLOW_SECURE_TRIM_SINGLE_INSTANCE !== "1") return false;

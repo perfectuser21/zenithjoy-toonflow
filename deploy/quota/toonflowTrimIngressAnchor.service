@@ -1,0 +1,7 @@
+[Unit]
+Description=Toonflow trim ingress guard slice anchor
+
+[Service]
+Slice=toonflow-trim-ingress.slice
+ExecStart=/usr/bin/sleep infinity
+Restart=no

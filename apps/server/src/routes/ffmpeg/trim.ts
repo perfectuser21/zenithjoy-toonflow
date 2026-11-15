@@ -7,7 +7,7 @@ import { authenticateWeb } from "@/utils/multiTenant";
 import { isEnabled } from "@/utils/multiTenant/mode";
 import { listTrimRecoveries, releaseInterruptedTrimSpace, trimStatus, trimVideo } from "@/utils/media/trimVideo";
 import { assertAppRequest } from "@/utils/mcp/control";
-import { trimMode } from "@/utils/media/trimMode";
+import { trimMode, unknownTrimRecoveryAvailable } from "@/utils/media/trimMode";
 
 const requestSchema = z.strictObject({ directory: z.string().min(1).max(4096), operationId: z.uuidv4(), source: z.string().min(1).max(4096), start: z.number().finite().nonnegative(), end: z.number().finite().positive().max(120) });
 function input(body: unknown) {
@@ -20,7 +20,7 @@ export default Router().get("/capabilities", async (req, res) => {
   assertAppRequest(req);
   if (!isEnabled() || !trimMode().read || process.env.TOONFLOW_SECURE_TRIM_SINGLE_INSTANCE !== "1") throw Object.assign(new Error("安全裁剪尚未开放"), { status: 503 });
   if (requestIdentity(req)?.role !== "user") throw Object.assign(new Error("请使用客户账号登录"), { status: 403 });
-  res.set("Cache-Control", "no-store").json(success({ create: trimMode().create }));
+  res.set("Cache-Control", "no-store").json(success({ create: trimMode().create, recoverUnknown: unknownTrimRecoveryAvailable() }));
 }).post("/", async (req, res) => {
   assertAppRequest(req);
   if (!isEnabled() || !trimMode().read || process.env.TOONFLOW_SECURE_TRIM_SINGLE_INSTANCE !== "1") throw Object.assign(new Error("安全裁剪尚未开放"), { status: 503 });
@@ -75,8 +75,12 @@ export default Router().get("/capabilities", async (req, res) => {
   if (actor?.role !== "user") throw Object.assign(new Error("请使用客户账号登录"), { status: 403 });
   const value = input(req.body);
   const cwd = await resolveWorkspace(req, value.directory);
-  const result = await trimStatus(cwd, actor.id, value.operationId, value.source, value.start, value.end, trimMode().create);
-  const current = await authenticateWeb(req);
-  if (!current || current.role !== "user" || current.id !== actor.id || await resolveWorkspace(req, value.directory) !== cwd) throw Object.assign(new Error("账号或工作区权限已变化"), { status: 403 });
+  const authorize = async () => {
+    const current = await authenticateWeb(req);
+    if (!current || current.role !== "user" || current.id !== actor.id || await resolveWorkspace(req, value.directory) !== cwd) throw Object.assign(new Error("账号或工作区权限已变化"), { status: 403 });
+  };
+  await authorize();
+  const result = await trimStatus(cwd, actor.id, value.operationId, value.source, value.start, value.end, trimMode().create, authorize);
+  await authorize();
   res.set("Cache-Control", "no-store").json(success(result));
 });

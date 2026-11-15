@@ -1,0 +1,15 @@
+# 离线维护专用；只可在普通 worker/socket 和专用 daemon 均已屏蔽、停止并验证后启动。
+[Unit]
+Description=Toonflow dedicated trim maintenance daemon
+After=local-fs.target toonflowTrimMaintenanceContainerd.service
+Requires=toonflowTrimMaintenanceContainerd.service
+
+[Service]
+Type=notify
+User=root
+Group=root
+ExecStartPre=/opt/toonflow-trim/current/bun /opt/toonflow-trim/current/prepareTrimCgroup.js maintenance
+ExecStart=/usr/bin/dockerd --containerd=/run/toonflow-trim-maintenance/containerd/containerd.sock --host=unix:///run/toonflow-trim-maintenance/docker.sock --group=root --data-root=/var/lib/toonflow-trim-docker --exec-root=/run/toonflow-trim-maintenance/runtime --pidfile=/run/toonflow-trim-maintenance/docker.pid --exec-opt=native.cgroupdriver=cgroupfs --bridge=none --iptables=false --ip6tables=false --live-restore=false
+Restart=no
+KillMode=control-group
+LimitNOFILE=1048576

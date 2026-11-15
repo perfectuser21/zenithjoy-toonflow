@@ -1,0 +1,16 @@
+# 仅在普通裁剪运行时完全停机并屏蔽后以同一数据根启动；不接触共享 containerd。
+[Unit]
+Description=Toonflow dedicated trim maintenance containerd
+After=local-fs.target
+
+[Service]
+Type=notify
+User=root
+Group=root
+ExecStartPre=/opt/toonflow-trim/current/bun /opt/toonflow-trim/current/prepareTrimCgroup.js maintenance
+ExecStart=/usr/bin/containerd --config /etc/toonflow-trim/containerd.toml --root /var/lib/toonflow-trim-containerd --state /run/toonflow-trim-maintenance/containerd --address /run/toonflow-trim-maintenance/containerd/containerd.sock
+Restart=no
+KillMode=control-group
+Delegate=yes
+LimitNOFILE=1048576
+TasksMax=infinity

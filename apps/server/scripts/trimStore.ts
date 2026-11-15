@@ -1,10 +1,12 @@
 // 独立 UID 的裁剪结果存储。仅可信应用可访问 socket；客户不能获得 socket 凭据。
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { constants, lstat, mkdir, open, readdir, realpath, statfs } from "@toonflow/file";
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import { createConnection } from "node:net";
 import { serveTrimSocket } from "./trimSocketServer";
+import { acquireIngressRequestFence } from "./trimIngressFence";
+import { startupAdmissionRequired } from "./trimStartupAdmission";
 
 const socket = process.env.TOONFLOW_TRIM_STORE_SOCKET, token = process.env.TOONFLOW_TRIM_STORE_TOKEN;
 const quotaRoot = process.env.TOONFLOW_PROJECT_QUOTA_ROOT, appGid = Number(process.env.TOONFLOW_TRIM_ACCESS_GID);
@@ -12,6 +14,11 @@ const quotaGid = Number(process.env.TOONFLOW_TRIM_STORE_GID);
 if (!socket?.startsWith("/") || !quotaRoot?.startsWith("/") || !token || !/^[a-f0-9]{64}$/.test(token)
   || !Number.isSafeInteger(appGid) || appGid < 1 || typeof process.getuid !== "function" || !process.getuid() || !Number.isSafeInteger(quotaGid) || quotaGid < 1 || typeof process.getgid !== "function" || process.getgid() !== quotaGid || typeof process.getgroups !== "function" || !process.getgroups().includes(appGid)) throw new Error("裁剪存储配置不完整");
 const storeUid = process.getuid();
+const attestedIngress = startupAdmissionRequired(process.argv.slice(2), process.env.TOONFLOW_TRIM_STARTUP_ADMISSION);
+if (attestedIngress) {
+  const startupFence = await acquireIngressRequestFence();
+  await startupFence.close();
+}
 const maxBytes = 128 * 1024 * 1024;
 const libc = dlopen("libc.so.6", {
   ioctl: { args: [FFIType.int, FFIType.u64, FFIType.ptr], returns: FFIType.int },
@@ -36,14 +43,14 @@ async function projectIdentity(path: string) {
     return projectId;
   } finally { await directory.close(); }
 }
-async function quotaProject(owner: string) {
+async function quotaProject(owner: string, seal: boolean) {
   const endpoint = resolve(quotaRoot!, "quotaTrimRead.sock"), info = await lstat(endpoint);
   if (!info.isSocket() || info.uid !== 0 || info.gid !== quotaGid || (info.mode & 0o777) !== 0o660) throw new Error("配额服务不可用");
   return new Promise<number>((accept, reject) => {
     const conn = createConnection(endpoint); let data = "";
     const fail = () => { conn.destroy(); reject(new Error("配额服务不可用")); };
     conn.setTimeout(5000, fail); conn.once("error", fail);
-    conn.once("connect", () => conn.write(`${JSON.stringify({ userId: owner, operation: "trimCheck" })}\n`));
+    conn.once("connect", () => conn.write(`${JSON.stringify({ userId: owner, operation: seal ? "trimSealCheck" : "trimCheck" })}\n`));
     conn.on("data", chunk => {
       data += chunk.toString("utf8"); if (data.length > 1024) return fail(); if (!data.endsWith("\n")) return;
       try { const value = JSON.parse(data); if (value.ready !== true || !Number.isSafeInteger(value.projectId) || value.projectId < 1) return fail(); conn.destroy(); accept(value.projectId); } catch { fail(); }
@@ -51,12 +58,12 @@ async function quotaProject(owner: string) {
     conn.once("end", fail);
   });
 }
-async function rootFor(owner: string) {
+async function rootFor(owner: string, seal: boolean) {
   const parent = resolve(quotaRoot!, "privateTrim", owner), root = resolve(parent, "results");
   const [p, r, actualParent, actualRoot] = await Promise.all([lstat(parent), lstat(root), realpath(parent), realpath(root)]);
   if (actualParent !== parent || actualRoot !== root || !p.isDirectory() || p.isSymbolicLink() || p.uid !== 0 || (p.mode & 0o022)
     || !r.isDirectory() || r.isSymbolicLink() || r.uid !== storeUid || r.gid !== appGid || (r.mode & 0o777) !== 0o750 || p.dev !== r.dev) throw new Error("裁剪存储目录不安全");
-  const project = await quotaProject(owner);
+  const project = await quotaProject(owner, seal);
   if (await projectIdentity(root) !== project) throw new Error("裁剪存储项目配额不一致");
   for (let path = dirname(parent);;) {
     const info = await lstat(path);
@@ -75,13 +82,14 @@ await serveTrimSocket(socket, "trimStore", maxBytes, async request => {
   if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(owner)
     || !/^[a-f0-9]{64}$/.test(workspace) || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(operation)) return deny(400);
   const seal = url.pathname === "/seal" && request.method === "POST";
-  if (!seal && (url.pathname !== "/result" || !["GET", "POST"].includes(request.method))) return deny(404);
+  const verify = url.pathname === "/verify" && request.method === "POST";
+  if (!seal && !verify && (url.pathname !== "/result" || !["GET", "POST"].includes(request.method))) return deny(404);
   if (busy) return deny(429);
   busy = true;
   let streaming = false;
   try {
-    const { root, project } = await rootFor(owner), folder = resolve(root, workspace);
-    if (request.method === "POST") {
+    const { root, project } = await rootFor(owner, seal || verify), folder = resolve(root, workspace);
+    if (request.method === "POST" && !verify) {
       const length = Number(request.headers.get("content-length"));
       if (!Number.isSafeInteger(length) || (seal ? length !== 0 : !request.body || length < 1 || length > maxBytes)) return deny(400);
       const disk = await statfs(root, { bigint: true });
@@ -100,7 +108,7 @@ await serveTrimSocket(socket, "trimStore", maxBytes, async request => {
       const parent = await open(root, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
       try { await parent.sync(); } finally { await parent.close(); }
     }
-    const folderInfo = await lstat(folder).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT" && request.method === "GET") return null; throw error; });
+    const folderInfo = await lstat(folder).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT" && (request.method === "GET" || verify)) return null; throw error; });
     if (!folderInfo) return deny(404);
     if (!folderInfo.isDirectory() || folderInfo.isSymbolicLink() || folderInfo.uid !== storeUid || folderInfo.gid !== appGid || (folderInfo.mode & 0o777) !== 0o750 || await realpath(folder) !== folder || await projectIdentity(folder) !== project) return deny(503);
     const dir = await open(folder, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
@@ -108,6 +116,22 @@ await serveTrimSocket(socket, "trimStore", maxBytes, async request => {
       const filePath = `/proc/self/fd/${dir.fd}/${operation}.mp4`;
       const tombstone = `/proc/self/fd/${dir.fd}/${operation}.cancel`;
       const existingTombstone = await lstat(tombstone).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
+      if (verify) {
+        const expectedDigest = request.headers.get("x-trim-digest") ?? "", expectedLength = Number(request.headers.get("x-trim-bytes"));
+        if (request.headers.get("content-length") !== "0" || !/^[a-f0-9]{64}$/.test(expectedDigest) || !Number.isSafeInteger(expectedLength) || expectedLength < 1 || expectedLength > maxBytes) return deny(400);
+        if (existingTombstone) return deny(409);
+        const input = await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
+        if (!input) return deny(404);
+        try {
+          const info = await input.stat();
+          if (!info.isFile() || info.nlink !== 1 || info.uid !== storeUid || (info.mode & 0o077) || info.size !== expectedLength) return deny(409);
+          await input.sync(); await dir.sync();
+          const parent = await open(root, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+          try { await parent.sync(); } finally { await parent.close(); }
+          const digest = createHash("sha256").update(await input.readFile()).digest("hex");
+          return deny(digest === expectedDigest ? 204 : 409);
+        } finally { await input.close(); }
+      }
       if (seal) {
         const existing = await lstat(filePath).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
         if (existing) return deny(409);
@@ -162,5 +186,5 @@ await serveTrimSocket(socket, "trimStore", maxBytes, async request => {
     } finally { await dir.close(); }
   } catch (error) { return deny(["EDQUOT", "ENOSPC"].includes((error as NodeJS.ErrnoException)?.code ?? "") ? 507 : 503); }
   finally { if (!streaming) busy = false; }
-});
+}, attestedIngress ? acquireIngressRequestFence : undefined);
 console.log("裁剪私有存储已启动");

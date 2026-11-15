@@ -1,9 +1,9 @@
-import { trimMode } from "@/utils/media/trimMode";
+import { trimMode, unknownTrimRecoveryAvailable } from "@/utils/media/trimMode";
 import { constants, lstat, open, readlink, realpath } from "@toonflow/file";
 import { request as httpRequest } from "node:http";
 import { dirname, relative, resolve, sep } from "node:path";
 import { createHash } from "node:crypto";
-import { acquireBackgroundBudget, finishBackgroundBudget, listOwnTrimReservations, openDatabase, readOwnTrimReservation, recordTrimIntent, recoverTrimIntent, releaseInterruptedTrim, renewBackgroundBudget } from "@toonflow/multi-tenant-db";
+import { acquireBackgroundBudget, finishBackgroundBudget, listOwnTrimReservations, markTrimDispatched, openDatabase, readOwnTrimReservation, recordTrimIntent, recoverTrimIntent, preserveCancelledTrimResult, releaseInterruptedTrim, renewBackgroundBudget, sealUnknownTrim } from "@toonflow/multi-tenant-db";
 import { z } from "zod";
 import conf from "@/utils/conf";
 import { pipeline } from "node:stream/promises";
@@ -95,7 +95,8 @@ async function trimVideoFromSource(cwd: string, sourcePath: string, start: numbe
     if (!lease) invalid("裁剪服务繁忙或空间不足", 429);
     const controller = new AbortController(), active = AbortSignal.any([signal, controller.signal]);
     const timer = setInterval(() => { void renewBackgroundBudget(database, lease).then(ok => { if (!ok) controller.abort(); }).catch(() => controller.abort()); }, 30000);
-    let touched = false, finalized = false, helperSettled = false;
+    // 在请求交给 worker 之前，确认没有任何远程作业；交付后须等待明确终态。
+    let touched = false, finalized = false, helperSettled = true;
     try {
       // 先短暂检查容量，不在耗时转码期间持有跨用户工作区锁。
       await withWorkspaceQuota(expected, maxOutput, false, async () => {});
@@ -103,9 +104,13 @@ async function trimVideoFromSource(cwd: string, sourcePath: string, start: numbe
         for await (const chunk of sourceFile.createReadStream({ autoClose: false, start: 0 })) { active.throwIfAborted(); baseline.update(chunk); }
         const originalDigest = baseline.digest("hex");
         if (identity(await sourceFile.stat()) !== identity(info) || !sealedPath && await verifiedFd(cwd, sourceFile.fd) !== source.path) invalid("原视频在裁剪前已变化", 409);
+        active.throwIfAborted();
+        if (!await databaseAccess(() => markTrimDispatched(database, lease))) invalid("裁剪租约已失效", 409);
+        active.throwIfAborted();
         const sourceHash = createHash("sha256");
         let upload: Promise<void> | undefined;
         const response = await new Promise<import("node:http").IncomingMessage>((resolveResponse, reject) => {
+          helperSettled = false;
           const req = httpRequest({ socketPath: socket, path: "/trim", method: "POST", headers: { authorization: `Bearer ${token}`, "content-length": String(info.size), "x-trim-start": String(start), "x-trim-end": String(end), "x-trim-operation": nodeId, "x-trim-owner": ownerId, "x-trim-workspace": createHash("sha256").update(cwd).digest("hex") }, signal: AbortSignal.any([active, AbortSignal.timeout(240000)]) }, resolveResponse);
           req.once("error", reject);
           const input = sourceFile.createReadStream({ autoClose: false, start: 0 });
@@ -168,11 +173,59 @@ export async function releaseInterruptedTrimSpace(cwd: string, ownerId: string, 
   const db = await databaseAccess(() => databasePromise!);
   if (!db) invalid("裁剪资源存储不可用", 503);
   const workspaceHash = createHash("sha256").update(cwd).digest("hex");
-  const released = await databaseAccess(() => releaseInterruptedTrim(db, ownerId, workspaceHash, operationId, async () => {
+  let released = await databaseAccess(() => releaseInterruptedTrim(db, ownerId, workspaceHash, operationId, async () => {
     try { await trimStoreRequest("SEAL", ownerId, workspaceHash, operationId, AbortSignal.timeout(30000)); await authorize(); return true; }
     catch { return false; }
   }));
-  if (!released) invalid("暂无法确认中断任务的空间状态", 409);
+  if (!released && unknownTrimRecoveryAvailable()) released = await databaseAccess(() => sealUnknownTrim(db, ownerId, workspaceHash, operationId, () => sealUnknownResources(ownerId, workspaceHash, operationId, authorize)));
+  if (!released) {
+    const record = await databaseAccess(() => readOwnTrimReservation(db, ownerId, workspaceHash, operationId));
+    if (record?.cancellationPending) invalid("已确认结束任务，正在等待安全处理，请稍后重试", 409);
+    invalid("暂无法确认中断任务的空间状态", 409);
+  }
+}
+
+async function sealUnknownResources(ownerId: string, workspaceHash: string, operationId: string, authorize: () => Promise<void>) {
+  try {
+    await authorize();
+    const { socket, token } = await getTrimWorkerConfig();
+    const status = await new Promise<number | undefined>((done, reject) => {
+      const req = httpRequest({ socketPath: socket, path: "/seal", method: "POST", signal: AbortSignal.timeout(30000), headers: { authorization: `Bearer ${token}`, "content-length": "0", "x-trim-owner": ownerId, "x-trim-workspace": workspaceHash, "x-trim-operation": operationId } }, response => { response.resume(); response.once("end", () => done(response.statusCode)); response.once("error", reject); });
+      req.once("error", reject); req.end();
+    });
+    if (status !== 204) return false;
+    await authorize();
+    await trimStoreRequest("SEAL", ownerId, workspaceHash, operationId, AbortSignal.timeout(30000));
+    await authorize();
+    return true;
+  } catch { return false; }
+}
+
+/** 管理端只能为停用账号确认新取消；已确认的取消可在账号重新启用后继续。 */
+export async function recoverDisabledUnknownTrim(ownerId: string, workspaceHash: string, operationId: string, reason: string, actor: "host" | "admin:1", authorize: () => Promise<void>) {
+  if (!unknownTrimRecoveryAvailable()) invalid("未知任务恢复尚未开放", 503);
+  await ensureTrimSingleton();
+  databasePromise ??= openDatabase(dirname(conf.path), false);
+  const db = await databaseAccess(() => databasePromise!);
+  if (!db) invalid("裁剪资源存储不可用", 503);
+  const owner = await databaseAccess(() => db.getUserById(ownerId));
+  const current = await databaseAccess(() => readOwnTrimReservation(db, ownerId, workspaceHash, operationId));
+  if (!owner || !owner.disabled && !current?.cancellationPending) invalid("只能处理已停用账号或已确认取消的裁剪", 409);
+  const released = await databaseAccess(() => sealUnknownTrim(db, ownerId, workspaceHash, operationId,
+    () => sealUnknownResources(ownerId, workspaceHash, operationId, authorize), { actor, reason }));
+  if (!released) {
+    const record = await databaseAccess(() => readOwnTrimReservation(db, ownerId, workspaceHash, operationId));
+    if (record?.cancellationPending) {
+      const preserved = await databaseAccess(() => preserveCancelledTrimResult(db, ownerId, workspaceHash, operationId, actor, async intent => {
+        try { await authorize(); await trimStoreRequest("VERIFY", ownerId, workspaceHash, operationId, AbortSignal.timeout(30000), undefined, intent); await authorize(); return true; }
+        catch { return false; }
+      }));
+      if (preserved) return { status: "resultPreserved" as const };
+      return { status: "cancelling" as const };
+    }
+    invalid("暂无法确认中断任务的空间状态", 409);
+  }
+  return { status: "released" as const };
 }
 
 let managedReadBusy = false;
@@ -198,7 +251,7 @@ export async function withManagedTrim<T>(cwd: string, ownerId: string, reference
   } finally { managedReadBusy = false; }
 }
 
-export async function trimStatus(cwd: string, ownerId: string, operationId: string, sourcePath: string, start: number, end: number, allowRecovery = true) {
+export async function trimStatus(cwd: string, ownerId: string, operationId: string, sourcePath: string, start: number, end: number, allowRecovery = true, authorize: () => Promise<void> = async () => {}) {
   await ensureTrimSingleton();
   const nodeId = z.uuidv4().parse(operationId);
   databasePromise ??= openDatabase(dirname(conf.path), false);
@@ -210,12 +263,17 @@ export async function trimStatus(cwd: string, ownerId: string, operationId: stri
   if (record.state === "interrupted") return { status: allowRecovery ? "interrupted" as const : "pending" as const };
   if (!allowRecovery && record.state !== "committed") return { status: "pending" as const };
   const path = `assets/${nodeId}/video.mp4`;
+  let cancellationResultPreserved = record.cancellationResultPreserved;
   if (record.state !== "committed") {
     if (managedReadBusy) return { status: "pending" as const };
     managedReadBusy = true;
     try {
       const workspaceHash = createHash("sha256").update(cwd).digest("hex");
-      const recovered = await databaseAccess(() => recoverTrimIntent(db, ownerId, workspaceHash, nodeId, async intent => {
+      const preserved = record.cancellationPending && await databaseAccess(() => preserveCancelledTrimResult(db, ownerId, workspaceHash, nodeId, ownerId, async intent => {
+        try { await authorize(); await trimStoreRequest("VERIFY", ownerId, workspaceHash, nodeId, AbortSignal.timeout(30000), undefined, intent); await authorize(); return true; }
+        catch { return false; }
+      }));
+      const recovered = preserved || await databaseAccess(() => recoverTrimIntent(db, ownerId, workspaceHash, nodeId, async intent => {
         try {
           const bytes = await trimStoreRequest("GET", ownerId, workspaceHash, nodeId, AbortSignal.timeout(30000));
           return bytes && bytes.length === intent.bytes && createHash("sha256").update(bytes).digest("hex") === intent.digest ? "complete" : "unknown";
@@ -227,10 +285,11 @@ export async function trimStatus(cwd: string, ownerId: string, operationId: stri
       }));
       if (!recovered) return { status: "pending" as const };
       const updated = await databaseAccess(() => readOwnTrimReservation(db, ownerId, workspaceHash, nodeId));
+      cancellationResultPreserved = updated?.cancellationResultPreserved;
       if (updated?.state === "interrupted") return { status: "interrupted" as const };
     } finally { managedReadBusy = false; }
   }
   const result = await withManagedTrim(cwd, ownerId, path, AbortSignal.timeout(30000), async () => true);
   if (!result.managed) invalid("裁剪结果无法确认", 409);
-  return { status: "ready" as const, nodeId, outputPath: path };
+  return { status: "ready" as const, nodeId, outputPath: path, cancellationResultPreserved: !!cancellationResultPreserved };
 }

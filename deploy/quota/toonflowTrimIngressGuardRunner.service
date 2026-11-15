@@ -1,0 +1,10 @@
+[Unit]
+Description=Toonflow trim ingress guard coordinator
+
+[Service]
+Type=oneshot
+TimeoutStartSec=45s
+TimeoutStopSec=2s
+KillMode=control-group
+ExecStart=/usr/bin/python3 /opt/toonflow-trim/current/trimIngressGuardRunner.py --confirm-ingress-maintenance
+Restart=no

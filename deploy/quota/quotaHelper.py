@@ -117,8 +117,8 @@ def quota_row(project_id, inode=False):
     return [int(value) for value in rows[0][1:4]]
 
 
-def read_active_account(user_id):
-    """以服务 UID 只读账号数据库，关闭账号不能创建或使用私有裁剪空间。"""
+def read_active_account(user_id, allow_disabled=False):
+    """以服务 UID 只读账号；停用账号仅可用于封禁检查。"""
     reader = """import json,os,sqlite3,stat,sys
 p,u=sys.argv[1:]
 f=os.open(p,os.O_RDONLY|os.O_NOFOLLOW)
@@ -138,18 +138,18 @@ finally: os.close(f)
     result = subprocess.run([sys.executable, '-c', reader, auth_db_path, user_id], check=True,
                             capture_output=True, text=True, timeout=5, preexec_fn=drop_privileges)
     account = json.loads(result.stdout)
-    if account is None or account[0]:
+    if account is None or (account[0] and not allow_disabled):
         raise ValueError('账号不存在或已禁用')
 
 
-def read_ready_project(user_id):
+def read_ready_project(user_id, allow_disabled=False):
     """只读检查已登记账号和配额，不执行 enroll、mkdir 或 chown。"""
     if not isinstance(user_id, str) or not re.fullmatch(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}', user_id):
         raise ValueError('账号标识无效')
     record = db.execute('SELECT projectId,ready FROM projects WHERE userId=?', (user_id,)).fetchone()
     if not record or record[1] != 1 or not 0 < record[0] <= 2147483647:
         raise ValueError('账号配额尚未准备')
-    read_active_account(user_id)
+    read_active_account(user_id, allow_disabled)
     path = f'/proc/self/fd/{workspaces_fd}/{user_id}'
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
@@ -331,6 +331,9 @@ while True:
                         response = {"ready": True, "projectId": project_id}
                     elif key.data == "trim" and operation == "trimCheck":
                         response = {"ready": True, "projectId": read_ready_project(request["userId"])}
+                    elif key.data == "trim" and operation == "trimSealCheck":
+                        # 仅 store 封禁不完整任务时允许停用账号；不可用于读取或写入素材。
+                        response = {"ready": True, "projectId": read_ready_project(request["userId"], allow_disabled=True)}
                     else:
                         raise ValueError("请求无效")
                 else:

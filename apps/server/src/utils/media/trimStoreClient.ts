@@ -25,20 +25,20 @@ async function config() {
   return { socket, token };
 }
 
-export async function trimStoreRequest(method: "GET" | "POST" | "SEAL", ownerId: string, workspaceHash: string, operationId: string, signal: AbortSignal, data?: Buffer) {
+export async function trimStoreRequest(method: "GET" | "POST" | "SEAL" | "VERIFY", ownerId: string, workspaceHash: string, operationId: string, signal: AbortSignal, data?: Buffer, verify?: { bytes: number; digest: string }) {
   if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(ownerId)
     || !/^[a-f0-9]{64}$/.test(workspaceHash) || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(operationId)
-    || method === "POST" && (!data?.length || data.length > maxBytes)) return unavailable();
+    || method === "POST" && (!data?.length || data.length > maxBytes) || method === "VERIFY" && (!verify || !Number.isSafeInteger(verify.bytes) || verify.bytes < 1 || verify.bytes > maxBytes || !/^[a-f0-9]{64}$/.test(verify.digest))) return unavailable();
   if (busy) throw Object.assign(new Error("裁剪私有存储繁忙"), { status: 429 });
   busy = true;
   try {
   const { socket, token } = await config();
   const response = await new Promise<import("node:http").IncomingMessage>((done, reject) => {
-    const req = httpRequest({ socketPath: socket, path: method === "SEAL" ? "/seal" : "/result", method: method === "SEAL" ? "POST" : method, signal: AbortSignal.any([signal, AbortSignal.timeout(240000)]), headers: { authorization: `Bearer ${token}`, "x-trim-owner": ownerId, "x-trim-workspace": workspaceHash, "x-trim-operation": operationId, ...(data ? { "content-length": String(data.length) } : method === "SEAL" ? { "content-length": "0" } : {}) } }, done);
+    const req = httpRequest({ socketPath: socket, path: method === "SEAL" ? "/seal" : method === "VERIFY" ? "/verify" : "/result", method: method === "SEAL" || method === "VERIFY" ? "POST" : method, signal: AbortSignal.any([signal, AbortSignal.timeout(240000)]), headers: { authorization: `Bearer ${token}`, "x-trim-owner": ownerId, "x-trim-workspace": workspaceHash, "x-trim-operation": operationId, ...(data ? { "content-length": String(data.length) } : method === "SEAL" || method === "VERIFY" ? { "content-length": "0", ...(verify ? { "x-trim-bytes": String(verify.bytes), "x-trim-digest": verify.digest } : {}) } : {}) } }, done);
     req.once("error", reject);
     req.end(data);
   });
-  if (response.statusCode !== (method === "POST" ? 201 : method === "SEAL" ? 204 : 200)) {
+  if (response.statusCode !== (method === "POST" ? 201 : method === "SEAL" || method === "VERIFY" ? 204 : 200)) {
     response.resume();
     if (response.statusCode === 507) throw Object.assign(new Error("账户存储空间不足，无法保存裁剪结果"), { status: 507 });
     if (method === "GET" && response.statusCode === 404) throw Object.assign(new Error("裁剪结果不存在"), { status: 404, code: "ETRIMNOTFOUND" });

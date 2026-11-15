@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import type { AdminDatabase } from "./schema";
@@ -14,8 +14,12 @@ const archiveAtBytes = 2 * 1024 * 1024;
 const archiveBatch = 100;
 const workspaceSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const trimRequestSchema = z.strictObject({ source: z.string().min(1).max(4096), start: z.number().finite().nonnegative(), end: z.number().finite().positive().max(120) }).refine(value => value.end > value.start);
-const reservationSchema = z.strictObject({ operationId: z.uuid(), ownerId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/), workspaceHash: workspaceSchema.optional(), kind: z.enum(["prepare", "frame", "trim"]).optional(), archived: z.literal(true).optional(), groupIds: z.string().max(87384).optional(), groupSizes: z.string().max(21848).optional(), crossEntries: z.string().max(160000).optional(), state: z.enum(["reserved", "committed", "interrupted"]).optional(), bytes: z.number().int().min(0).max(maxCrossGroupBytes), digest: z.string().regex(/^[a-f0-9]{64}$/).optional(), sourceDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(), requestHash: z.string().regex(/^[a-f0-9]{64}$/).optional(), parametersHash: z.string().regex(/^[a-f0-9]{64}$/).optional(), trimRequest: trimRequestSchema.optional(), trimIntent: z.strictObject({ bytes: z.number().int().positive().max(128 * 1024 * 1024), digest: z.string().regex(/^[a-f0-9]{64}$/), sourceDigest: z.string().regex(/^[a-f0-9]{64}$/) }).optional() }).superRefine((item, context) => {
+const cancelIntentSchema = z.strictObject({ attemptId: z.uuid(), actor: z.string().min(1).max(64), reason: z.string().trim().min(16).max(500), kind: z.enum(["user", "admin"]) });
+const reservationSchema = z.strictObject({ operationId: z.uuid(), ownerId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/), workspaceHash: workspaceSchema.optional(), kind: z.enum(["prepare", "frame", "trim"]).optional(), archived: z.literal(true).optional(), groupIds: z.string().max(87384).optional(), groupSizes: z.string().max(21848).optional(), crossEntries: z.string().max(160000).optional(), state: z.enum(["reserved", "committed", "interrupted"]).optional(), trimPhase: z.enum(["preflight", "dispatched"]).optional(), cancelIntent: cancelIntentSchema.optional(), cancelCompletion: z.strictObject({ eventId: z.uuid(), actor: z.string().min(1).max(64), at: z.number().int().nonnegative(), outcome: z.enum(["sealed", "resultPreserved"]) }).optional(), bytes: z.number().int().min(0).max(maxCrossGroupBytes), digest: z.string().regex(/^[a-f0-9]{64}$/).optional(), sourceDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(), requestHash: z.string().regex(/^[a-f0-9]{64}$/).optional(), parametersHash: z.string().regex(/^[a-f0-9]{64}$/).optional(), trimRequest: trimRequestSchema.optional(), trimIntent: z.strictObject({ bytes: z.number().int().positive().max(128 * 1024 * 1024), digest: z.string().regex(/^[a-f0-9]{64}$/), sourceDigest: z.string().regex(/^[a-f0-9]{64}$/) }).optional() }).superRefine((item, context) => {
   if (!item.crossEntries && item.bytes > perJobBytes) context.addIssue({ code: "custom", message: "单任务资源预留异常" });
+  if (item.trimPhase && (item.kind !== "trim" || item.trimPhase === "preflight" && (item.state !== "reserved" || item.trimIntent))) context.addIssue({ code: "custom", message: "裁剪发送状态异常" });
+  if (item.cancelCompletion && (!item.cancelIntent || (item.cancelCompletion.outcome === "sealed" ? item.state !== "interrupted" || item.bytes !== 0 : item.state !== "committed" || !item.trimIntent || item.bytes !== item.trimIntent.bytes || item.digest !== item.trimIntent.digest || item.sourceDigest !== item.trimIntent.sourceDigest))) context.addIssue({ code: "custom", message: "裁剪取消回执状态异常" });
+  if (item.cancelIntent && (item.kind !== "trim" || !["reserved", "interrupted"].includes(item.state ?? "") && !(item.state === "committed" && item.cancelCompletion?.outcome === "resultPreserved") || item.trimPhase === "preflight")) context.addIssue({ code: "custom", message: "裁剪取消状态异常" });
 });
 // 普通预留仍限制为单任务 512 MiB；跨项目分组是多账号记录的总和。
 const payloadSchema = z.strictObject({ kind: z.literal("backgroundBudget"), reservations: z.array(reservationSchema).max(10000), holder: z.strictObject({ operationId: z.uuid(), ownerId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/), workspaceHash: workspaceSchema.optional(), kind: z.enum(["plan", "prepare", "frame", "trim"]), leaseOwner: z.uuid() }).optional(), audit: z.array(z.strictObject({ attemptId: z.uuid(), operationId: z.uuid(), ownerId: z.string(), workspaceHash: workspaceSchema, actor: z.string().min(1).max(64), reason: z.string().min(16).max(500), result: z.literal("released") })).max(5000).optional() });
@@ -94,6 +98,13 @@ async function archivedTrim(db: AdminDatabase, ownerId: string, workspaceHash: s
     || !full.digest || !full.sourceDigest || !full.requestHash || !full.parametersHash) throw new Error("裁剪归档与预算不一致");
   return full;
 }
+async function archivedInterruptedTrim(db: AdminDatabase, ownerId: string, workspaceHash: string, operationId: string): Promise<Reservation | undefined> {
+  const archive = await db.getBackgroundJob({ ...budgetKey, jobId: operationId });
+  if (archive?.payload?.kind !== "trimInterruptedArchive") return undefined;
+  const restored = reservationSchema.parse(archive.payload.record);
+  if (restored.kind !== "trim" || restored.state !== "interrupted" || restored.bytes !== 0 || restored.operationId !== operationId || restored.ownerId !== ownerId || restored.workspaceHash !== workspaceHash) throw new Error("中断裁剪归档不一致");
+  return restored;
+}
 async function expandCommittedTrim(db: AdminDatabase, item: Reservation): Promise<Reservation> {
   if (!item.archived) return item;
   if (item.kind !== "trim" || item.state !== "committed" || item.groupIds || item.crossEntries || !item.workspaceHash) throw new Error("裁剪归档状态异常");
@@ -123,6 +134,8 @@ async function acquireBudget(db: AdminDatabase, input: { operationId: string; ow
     if (!row || row.leaseOwner !== leaseOwner) throw new Error("后台资源预算不可用");
     const payload = payloadSchema.parse(row.payload);
     assertGroupIntegrity(payload);
+    // 获得新租约后，仅带明确发送前标记的旧预留可安全回收；旧版无标记及已发送均保持未知。
+    payload.reservations = payload.reservations.filter(item => !(item.kind === "trim" && item.state === "reserved" && item.trimPhase === "preflight"));
     // 裁剪状态未知时，旧容器可能仍在运行；超时不能当作退出证明。
     if (payload.reservations.some(item => item.kind === "trim" && item.state === "reserved")) return undefined;
     if (value.kind !== "plan") {
@@ -241,7 +254,7 @@ async function acquireBudget(db: AdminDatabase, input: { operationId: string; ow
             const full = await expandCommittedTrim(db, item);
             if (await (cross ? addToCrossGroup(full) : addToGroup(item, full))) { moved++; continue; }
           }
-          if (moved < archiveBatch && item.kind === "trim" && item.state === "interrupted" && item.bytes === 0 && item.trimIntent) {
+          if (moved < archiveBatch && item.kind === "trim" && item.state === "interrupted" && item.bytes === 0 && (item.trimIntent || item.cancelIntent)) {
             const archiveKey = { jobId: item.operationId, ownerId: budgetKey.ownerId, workspaceHash: budgetKey.workspaceHash };
             const archivePayload = { kind: "trimInterruptedArchive", record: item };
             await db.createBackgroundJob({ ...archiveKey, payload: archivePayload });
@@ -265,10 +278,10 @@ async function acquireBudget(db: AdminDatabase, input: { operationId: string; ow
         payload.reservations = retained;
       }
       if (payload.reservations.length >= 10000) return undefined;
-      payload.reservations.push({ operationId: value.operationId, ownerId: value.ownerId, workspaceHash: value.workspaceHash, kind: value.kind, state: "reserved", bytes, ...(value.requestHash ? { requestHash: value.requestHash } : {}), ...(value.parametersHash ? { parametersHash: value.parametersHash } : {}), ...(value.trimRequest ? { trimRequest: value.trimRequest } : {}) });
+      payload.reservations.push({ operationId: value.operationId, ownerId: value.ownerId, workspaceHash: value.workspaceHash, kind: value.kind, state: "reserved", bytes, ...(value.kind === "trim" ? { trimPhase: "preflight" as const } : {}), ...(value.requestHash ? { requestHash: value.requestHash } : {}), ...(value.parametersHash ? { parametersHash: value.parametersHash } : {}), ...(value.trimRequest ? { trimRequest: value.trimRequest } : {}) });
     }
     payload.holder = { operationId: value.operationId, ownerId: value.ownerId, workspaceHash: value.workspaceHash, kind: value.kind, leaseOwner };
-    if (!await db.updateBackgroundJob({ ...budgetKey, leaseOwner, generation: row.leaseGeneration, expectedRevision: row.revision, payload })) throw new Error("后台资源预算已变化");
+    if (!await db.updateBackgroundJob({ ...budgetKey, leaseOwner, generation: row.leaseGeneration, expectedRevision: row.revision, payload: payloadSchema.parse(payload) })) throw new Error("后台资源预算已变化");
     keep = true;
     return { ...value, leaseOwner, generation: row.leaseGeneration, revision: row.revision + 1 };
   } finally {
@@ -329,6 +342,20 @@ export async function listOwnTrimReservations(db: AdminDatabase, ownerId: string
 export async function renewBackgroundBudget(db: AdminDatabase, lease: BackgroundBudgetLease) {
   return db.renewBackgroundJobLease({ ...budgetKey, leaseOwner: lease.leaseOwner, generation: lease.generation, ttlMs: 120000 });
 }
+/** 发送请求之前持久化未知边界；只有当前有效租约可越过此边界。 */
+export async function markTrimDispatched(db: AdminDatabase, lease: BackgroundBudgetLease) {
+  if (lease.kind !== "trim" || !await renewBackgroundBudget(db, lease)) return false;
+  const row = await db.getBackgroundJob(budgetKey);
+  if (!row || row.leaseOwner !== lease.leaseOwner || row.leaseGeneration !== lease.generation || row.revision !== lease.revision) return false;
+  const payload = payloadSchema.parse(row.payload), holder = payload.holder;
+  if (!holder || holder.leaseOwner !== lease.leaseOwner || holder.ownerId !== lease.ownerId || holder.workspaceHash !== lease.workspaceHash || holder.operationId !== lease.operationId || holder.kind !== "trim") return false;
+  const item = payload.reservations.find(entry => entry.kind === "trim" && entry.state === "reserved" && entry.ownerId === lease.ownerId && entry.workspaceHash === lease.workspaceHash && entry.operationId === lease.operationId);
+  if (!item || item.trimPhase !== "preflight") return false;
+  item.trimPhase = "dispatched";
+  if (!await db.updateBackgroundJob({ ...budgetKey, leaseOwner: lease.leaseOwner, generation: lease.generation, expectedRevision: lease.revision, payload: payloadSchema.parse(payload) })) return false;
+  lease.revision++;
+  return true;
+}
 /** 仅返回当前账户和工作区的记录；旧版未绑定工作区的记录不会被列出或自动释放。 */
 export async function listBackgroundReservations(db: AdminDatabase, lease: BackgroundBudgetLease) {
   if (lease.kind !== "plan" || !await renewBackgroundBudget(db, lease)) return undefined;
@@ -357,13 +384,14 @@ export async function readOwnTrimReservation(db: AdminDatabase, ownerId: string,
   const matches = payload.reservations.filter(item => item.kind === "trim" && item.groupIds && item.ownerId === ownerId && item.workspaceHash === workspaceHash && decodeTrimGroup(item).includes(operationId));
   const cross = payload.reservations.filter(item => item.crossEntries).flatMap(item => decodeCrossGroup(item).filter(candidate => candidate.ownerId === ownerId && candidate.workspaceHash === workspaceHash && candidate.operationId === operationId));
   if (matches.length + cross.length + Number(!!entry) > 1) throw new Error("裁剪分组任务重复");
-  const item = entry ? await expandCommittedTrim(db, entry) : matches.length || cross.length ? await archivedTrim(db, ownerId, workspaceHash, operationId) : undefined;
+  let item = entry ? await expandCommittedTrim(db, entry) : matches.length || cross.length ? await archivedTrim(db, ownerId, workspaceHash, operationId) : undefined;
+  if (!item) item = await archivedInterruptedTrim(db, ownerId, workspaceHash, operationId);
   if (item && matches.length) {
     const group = matches[0]!, index = decodeTrimGroup(group).indexOf(operationId);
     if (index < 0 || Buffer.from(group.groupSizes!, "base64").readUInt32BE(index * 4) !== item.bytes) throw new Error("裁剪分组占用不一致");
   }
   if (item && cross.length && item.bytes !== cross[0]!.bytes) throw new Error("跨项目裁剪单项占用不一致");
-  return item ? { state: item.state, bytes: item.bytes, digest: item.digest, sourceDigest: item.sourceDigest, requestHash: item.requestHash, parametersHash: item.parametersHash } : undefined;
+  return item ? { state: item.state, bytes: item.bytes, digest: item.digest, sourceDigest: item.sourceDigest, requestHash: item.requestHash, parametersHash: item.parametersHash, cancellationPending: item.state === "reserved" && !!item.cancelIntent, cancellationResultPreserved: item.cancelCompletion?.outcome === "resultPreserved" } : undefined;
 }
 /** 恢复过期预留：调用者需先取得同一账号的 plan 锁并确认本人文件已清理或实际占用。 */
 export async function reconcileBackgroundReservation(db: AdminDatabase, lease: BackgroundBudgetLease, operationId: string, actualBytes: number) {
@@ -378,7 +406,7 @@ export async function reconcileBackgroundReservation(db: AdminDatabase, lease: B
   if (!item || item.kind !== "prepare" || item.state !== "committed" || actualBytes > item.bytes) return false;
   if (actualBytes === 0) payload.reservations = payload.reservations.filter(entry => entry !== item);
   else item.bytes = actualBytes;
-  if (!await db.updateBackgroundJob({ ...budgetKey, leaseOwner: lease.leaseOwner, generation: lease.generation, expectedRevision: lease.revision, payload })) return false;
+  if (!await db.updateBackgroundJob({ ...budgetKey, leaseOwner: lease.leaseOwner, generation: lease.generation, expectedRevision: lease.revision, payload: payloadSchema.parse(payload) })) return false;
   lease.revision++;
   return true;
 }
@@ -397,7 +425,7 @@ async function adminReleaseReserved(db: AdminDatabase, lease: BackgroundBudgetLe
   payload.audit ??= [];
   payload.audit.push({ ...audit, operationId, ownerId: lease.ownerId, workspaceHash: lease.workspaceHash, result: "released" });
   payload.reservations = payload.reservations.filter(entry => entry !== item);
-  if (!await db.updateBackgroundJob({ ...budgetKey, leaseOwner: lease.leaseOwner, generation: lease.generation, expectedRevision: lease.revision, payload })) return false;
+  if (!await db.updateBackgroundJob({ ...budgetKey, leaseOwner: lease.leaseOwner, generation: lease.generation, expectedRevision: lease.revision, payload: payloadSchema.parse(payload) })) return false;
   lease.revision++;
   return true;
 }
@@ -414,9 +442,9 @@ export async function recordTrimIntent(db: AdminDatabase, lease: BackgroundBudge
   const payload = payloadSchema.parse(row.payload), holder = payload.holder;
   if (!holder || holder.leaseOwner !== lease.leaseOwner || holder.ownerId !== lease.ownerId || holder.workspaceHash !== lease.workspaceHash || holder.operationId !== lease.operationId || holder.kind !== "trim") return false;
   const item = payload.reservations.find(entry => entry.kind === "trim" && entry.state === "reserved" && entry.ownerId === lease.ownerId && entry.workspaceHash === lease.workspaceHash && entry.operationId === lease.operationId);
-  if (!item || item.trimIntent) return false;
+  if (!item || item.trimIntent || item.cancelIntent) return false;
   item.trimIntent = value;
-  if (!await db.updateBackgroundJob({ ...budgetKey, leaseOwner: lease.leaseOwner, generation: lease.generation, expectedRevision: lease.revision, payload })) return false;
+  if (!await db.updateBackgroundJob({ ...budgetKey, leaseOwner: lease.leaseOwner, generation: lease.generation, expectedRevision: lease.revision, payload: payloadSchema.parse(payload) })) return false;
   lease.revision++;
   return true;
 }
@@ -434,16 +462,166 @@ export async function recoverTrimIntent(db: AdminDatabase, ownerId: string, work
     generation = row.leaseGeneration;
     const payload = payloadSchema.parse(row.payload);
     const item = payload.reservations.find(entry => entry.kind === "trim" && entry.state === "reserved" && entry.ownerId === ownerId && entry.workspaceHash === workspaceHash && entry.operationId === operationId);
-    if (!item?.trimIntent || !item.requestHash || !item.parametersHash) return false;
+    if (!item?.trimIntent || item.cancelIntent || !item.requestHash || !item.parametersHash) return false;
     const verified = await verify(item.trimIntent);
     if (verified !== "complete" && verified !== "interrupted") return false;
     if (!await db.renewBackgroundJobLease({ ...budgetKey, leaseOwner, generation, ttlMs: 120000 })) return false;
     if (verified === "complete") { item.state = "committed"; item.bytes = item.trimIntent.bytes; item.digest = item.trimIntent.digest; item.sourceDigest = item.trimIntent.sourceDigest; }
     else item.state = "interrupted"; // 保留完整预留与记录，不推断磁盘占用已释放。
     delete payload.holder;
-    return await db.updateBackgroundJob({ ...budgetKey, leaseOwner, generation, expectedRevision: row.revision, payload });
+    return await db.updateBackgroundJob({ ...budgetKey, leaseOwner, generation, expectedRevision: row.revision, payload: payloadSchema.parse(payload) });
   } finally {
     if (generation !== undefined) await db.releaseBackgroundJobLease({ ...budgetKey, leaseOwner, generation }).catch(() => {});
+  }
+}
+
+/** 管理端仅展示停用账号的未决操作，或此前已确认取消但尚未完成的操作。 */
+export async function listDisabledUnknownTrims(db: AdminDatabase, ownerId: string) {
+  z.uuid().parse(ownerId);
+  const owner = await db.getUserById(ownerId);
+  if (!owner) throw Object.assign(new Error("账号不存在"), { status: 404 });
+  const row = await db.getBackgroundJob(budgetKey);
+  if (!row) throw new Error("后台资源预算未初始化");
+  const payload = payloadSchema.parse(row.payload);
+  assertGroupIntegrity(payload);
+  const items = payload.reservations.filter(item => item.kind === "trim" && item.state === "reserved" && item.ownerId === ownerId && item.workspaceHash && (owner.disabled || item.cancelIntent?.kind === "admin"))
+    .map(item => ({ operationId: item.operationId, workspaceHash: item.workspaceHash!, status: item.cancelIntent ? "cancelling" as const : "unknown" as const }));
+  return items;
+}
+
+/** 先持久化确认意图，再封禁 worker/store；未知状态始终保留预留。 */
+export async function sealUnknownTrim(db: AdminDatabase, ownerId: string, workspaceHash: string, operationId: string, seal: () => Promise<boolean>, operator?: { actor: "host" | "admin:1"; reason: string }) {
+  z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/).parse(ownerId); workspaceSchema.parse(workspaceHash); z.uuid().parse(operationId);
+  if (operator) z.strictObject({ actor: z.enum(["host", "admin:1"]), reason: z.string().trim().min(16).max(500) }).parse(operator);
+  const leaseOwner = randomUUID();
+  if (!await db.acquireBackgroundJobLease({ ...budgetKey, leaseOwner, ttlMs: 120000 })) return false;
+  let generation: number | undefined;
+  try {
+    const row = await db.getBackgroundJob(budgetKey);
+    if (!row || row.leaseOwner !== leaseOwner) return false;
+    generation = row.leaseGeneration;
+    const payload = payloadSchema.parse(row.payload);
+    const item = payload.reservations.find(entry => entry.kind === "trim" && entry.ownerId === ownerId && entry.workspaceHash === workspaceHash && entry.operationId === operationId);
+    if (!item) return !!await archivedInterruptedTrim(db, ownerId, workspaceHash, operationId);
+    if (item?.state === "interrupted" && item.bytes === 0) return true;
+    if (!item || item.state !== "reserved" || !item.requestHash || !item.parametersHash) return false;
+    let revision = row.revision;
+    if (!item.cancelIntent) {
+      const intent = cancelIntentSchema.parse({ attemptId: randomUUID(), actor: operator?.actor ?? ownerId,
+        reason: operator?.reason ?? "账号确认封禁未知裁剪任务并安全释放空间预留", kind: operator ? "admin" : "user" });
+      const auditKey = { ...budgetKey, jobId: intent.attemptId };
+      // 先独立留存尝试并读回；CAS 失败时该记录只表示尝试，不表示已确认或已释放。
+      const auditPayload = { kind: "trimCancellationAttempt", operationId, ownerId, workspaceHash, intent };
+      await db.createBackgroundJob({ ...auditKey, payload: auditPayload });
+      const audit = await db.getBackgroundJob(auditKey);
+      if (!audit || !isDeepStrictEqual(audit.payload, auditPayload)) return false;
+      item.cancelIntent = intent;
+      delete item.trimPhase;
+      if (!await db.updateBackgroundJob({ ...budgetKey, leaseOwner, generation, expectedRevision: revision, payload: payloadSchema.parse(payload), ...(operator ? { requireDisabledUserId: ownerId } : {}) })) return false;
+      revision++;
+    } else {
+      const audit = await db.getBackgroundJob({ ...budgetKey, jobId: item.cancelIntent.attemptId });
+      const expected = { kind: "trimCancellationAttempt", operationId, ownerId, workspaceHash, intent: item.cancelIntent };
+      if (!audit || !isDeepStrictEqual(audit.payload, expected)) return false;
+    }
+    // 一旦意图提交，管理员已明确确认不可逆取消；即使账号随后启用也可由授权人员继续重试。
+    if (!await seal() || !await db.renewBackgroundJobLease({ ...budgetKey, leaseOwner, generation, ttlMs: 120000 })) return false;
+    const completion = { eventId: randomUUID(), actor: operator?.actor ?? ownerId, at: Date.now(), outcome: "sealed" as const };
+    const completionKey = { ...budgetKey, jobId: completion.eventId };
+    // 此回执只证明封禁成功；账本 CAS 成功才证明预算已释放。
+    const completionPayload = { kind: "trimCancellationSealed", operationId, ownerId, workspaceHash, attemptId: item.cancelIntent.attemptId, completion };
+    await db.createBackgroundJob({ ...completionKey, payload: completionPayload });
+    const completed = await db.getBackgroundJob(completionKey);
+    if (!completed || !isDeepStrictEqual(completed.payload, completionPayload)) return false;
+    item.state = "interrupted"; item.bytes = 0; item.cancelCompletion = completion; delete item.trimPhase;
+    delete payload.holder;
+    return await db.updateBackgroundJob({ ...budgetKey, leaseOwner, generation, expectedRevision: revision, payload: payloadSchema.parse(payload) });
+  } finally { if (generation !== undefined) await db.releaseBackgroundJobLease({ ...budgetKey, leaseOwner, generation }).catch(() => {}); }
+}
+
+/** 仅真实存储校验完整结果后，将已确认的取消标记为未生效并保留结果。 */
+export async function preserveCancelledTrimResult(db: AdminDatabase, ownerId: string, workspaceHash: string, operationId: string, actor: string, verify: (intent: { bytes: number; digest: string; sourceDigest: string }) => Promise<boolean>) {
+  z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/).parse(ownerId); workspaceSchema.parse(workspaceHash); z.uuid().parse(operationId); z.string().min(1).max(64).parse(actor); if (actor !== "host" && actor !== "admin:1" && actor !== ownerId) throw new Error("恢复操作者无效");
+  const leaseOwner = randomUUID();
+  if (!await db.acquireBackgroundJobLease({ ...budgetKey, leaseOwner, ttlMs: 120000 })) return false;
+  let generation: number | undefined;
+  try {
+    const row = await db.getBackgroundJob(budgetKey);
+    if (!row || row.leaseOwner !== leaseOwner) return false;
+    generation = row.leaseGeneration;
+    const payload = payloadSchema.parse(row.payload);
+    const item = payload.reservations.find(entry => entry.kind === "trim" && entry.ownerId === ownerId && entry.workspaceHash === workspaceHash && entry.operationId === operationId);
+    if (!item || item.state !== "reserved" || !item.cancelIntent || !item.trimIntent || !item.requestHash || !item.parametersHash) return false;
+    const original = await db.getBackgroundJob({ ...budgetKey, jobId: item.cancelIntent.attemptId });
+    if (!original || !isDeepStrictEqual(original.payload, { kind: "trimCancellationAttempt", operationId, ownerId, workspaceHash, intent: item.cancelIntent })) return false;
+    if (!await verify(item.trimIntent) || !await db.renewBackgroundJobLease({ ...budgetKey, leaseOwner, generation, ttlMs: 120000 })) return false;
+    const completion = { eventId: randomUUID(), actor, at: Date.now(), outcome: "resultPreserved" as const };
+    const key = { ...budgetKey, jobId: completion.eventId };
+    const receipt = { kind: "trimCancellationResultVerified", operationId, ownerId, workspaceHash, attemptId: item.cancelIntent.attemptId, completion };
+    await db.createBackgroundJob({ ...key, payload: receipt });
+    const written = await db.getBackgroundJob(key);
+    if (!written || !isDeepStrictEqual(written.payload, receipt)) return false;
+    item.state = "committed"; item.bytes = item.trimIntent.bytes; item.digest = item.trimIntent.digest; item.sourceDigest = item.trimIntent.sourceDigest; item.cancelCompletion = completion;
+    delete payload.holder;
+    return await db.updateBackgroundJob({ ...budgetKey, leaseOwner, generation, expectedRevision: row.revision, payload: payloadSchema.parse(payload), ...(actor === ownerId ? { requireEnabledUserId: ownerId } : {}) });
+  } finally { if (generation !== undefined) await db.releaseBackgroundJobLease({ ...budgetKey, leaseOwner, generation }).catch(() => {}); }
+}
+
+/** 对外部终止动作发起前立即续租；租约未知或已过期时不执行动作。 */
+export async function withLiveTrimCancellationLease<T>(stillLeased: () => Promise<boolean>, action: () => Promise<T>): Promise<T> {
+  if (!await stillLeased()) throw new Error("取消租约已失效");
+  return action();
+}
+
+/** 仅供离线受控运维入口：持预算租约核验已确认的取消意图与独立审计。 */
+export async function withConfirmedTrimCancellation(db: AdminDatabase, ownerId: string, workspaceHash: string, operationId: string, operation: (stillLeased: () => Promise<boolean>, recordVerified: () => Promise<boolean>, hasVerified: () => Promise<boolean>) => Promise<boolean>) {
+  if (typeof process.getuid !== "function" || process.getuid() !== 0) return false;
+  z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/).parse(ownerId); workspaceSchema.parse(workspaceHash); z.uuid().parse(operationId);
+  const leaseOwner = randomUUID();
+  if (!await db.acquireBackgroundJobLease({ ...budgetKey, leaseOwner, ttlMs: 120000 })) return false;
+  let generation: number | undefined, failed = false, primary: unknown;
+  try {
+    const row = await db.getBackgroundJob(budgetKey);
+    if (!row || row.leaseOwner !== leaseOwner) throw new Error("已获取的取消租约身份不可核验");
+    generation = row.leaseGeneration;
+    const payload = payloadSchema.parse(row.payload);
+    // 离线恢复前必须确认没有其他未决资源，不能将无日志的 active 归属于猜测的任务。
+    const pending = payload.reservations.filter(entry => entry.state === "reserved" || entry.state === undefined);
+    if (pending.length !== 1 || payload.holder && (payload.holder.kind !== "trim" || payload.holder.operationId !== operationId || payload.holder.ownerId !== ownerId || payload.holder.workspaceHash !== workspaceHash)) return false;
+    const item = pending[0];
+    if (item?.kind !== "trim" || item.ownerId !== ownerId || item.workspaceHash !== workspaceHash || item.operationId !== operationId || !item.cancelIntent) return false;
+    const audit = await db.getBackgroundJob({ ...budgetKey, jobId: item.cancelIntent.attemptId });
+    if (!audit || !isDeepStrictEqual(audit.payload, { kind: "trimCancellationAttempt", operationId, ownerId, workspaceHash, intent: item.cancelIntent })) return false;
+    const stillLeased = () => db.renewBackgroundJobLease({ ...budgetKey, leaseOwner, generation: generation!, ttlMs: 120000 });
+    if (!await stillLeased()) return false;
+    const eventId = randomUUID(), eventKey = { ...budgetKey, jobId: eventId };
+    const attempt = { kind: "trimOfflineRecoveryAttempt", operationId, ownerId, workspaceHash, cancelAttemptId: item.cancelIntent.attemptId, actor: "uid:0", at: Date.now() };
+    await db.createBackgroundJob({ ...eventKey, payload: attempt });
+    if (!isDeepStrictEqual((await db.getBackgroundJob(eventKey))?.payload, attempt)) return false;
+    // 固定 ID 绑定取消意图：崩溃后只读回已有证明，不从目录名推断已核验。
+    const digest = createHash("sha256").update(`trim-offline-verified-v1:${item.cancelIntent.attemptId}`).digest();
+    digest[6] = (digest[6]! & 0x0f) | 0x40; digest[8] = (digest[8]! & 0x3f) | 0x80;
+    const hex = digest.subarray(0, 16).toString("hex");
+    const verifiedId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    const verifiedKey = { ...budgetKey, jobId: verifiedId };
+    const verifiedEvent = { kind: "trimOfflineRecoveryVerifiedV1", operationId, ownerId, workspaceHash, cancelAttemptId: item.cancelIntent.attemptId, actor: "uid:0" };
+    const hasVerified = async () => isDeepStrictEqual((await db.getBackgroundJob(verifiedKey))?.payload, verifiedEvent);
+    const recordVerified = async () => {
+      if (!await stillLeased()) return false;
+      await db.createBackgroundJob({ ...verifiedKey, payload: verifiedEvent });
+      return hasVerified();
+    };
+    return await operation(stillLeased, recordVerified, hasVerified);
+  } catch (error) {
+    failed = true; primary = error; throw error;
+  } finally {
+    try {
+      if (generation === undefined) throw new Error("取消租约代次未知，无法确认释放");
+      if (!await db.releaseBackgroundJobLease({ ...budgetKey, leaseOwner, generation })) throw new Error("取消租约释放未确认，可能需等待超时");
+    } catch (error) {
+      if (failed) throw new AggregateError([primary, error], "恢复操作和取消租约释放均失败");
+      throw error;
+    }
   }
 }
 
@@ -459,10 +637,11 @@ export async function releaseInterruptedTrim(db: AdminDatabase, ownerId: string,
     generation = row.leaseGeneration;
     const payload = payloadSchema.parse(row.payload);
     const item = payload.reservations.find(entry => entry.kind === "trim" && entry.state === "interrupted" && entry.ownerId === ownerId && entry.workspaceHash === workspaceHash && entry.operationId === operationId);
+    if (!item) return !!await archivedInterruptedTrim(db, ownerId, workspaceHash, operationId);
     if (!item || !item.trimIntent || !await confirmSealed()) return false;
     if (!await db.renewBackgroundJobLease({ ...budgetKey, leaseOwner, generation, ttlMs: 120000 })) return false;
     item.bytes = 0;
-    return await db.updateBackgroundJob({ ...budgetKey, leaseOwner, generation, expectedRevision: row.revision, payload });
+    return await db.updateBackgroundJob({ ...budgetKey, leaseOwner, generation, expectedRevision: row.revision, payload: payloadSchema.parse(payload) });
   } finally { if (generation !== undefined) await db.releaseBackgroundJobLease({ ...budgetKey, leaseOwner, generation }).catch(() => {}); }
 }
 /** actualBytes 不传时保留全部预留；传 0 仅适用于确认已清理的情况。 */
@@ -475,7 +654,7 @@ export async function finishBackgroundBudget(db: AdminDatabase, lease: Backgroun
   if (lease.kind !== "plan" && actualBytes !== undefined) {
     const payload: Payload = stored;
     const item = payload.reservations.find(item => item.operationId === lease.operationId && item.ownerId === lease.ownerId && item.workspaceHash === lease.workspaceHash);
-    if (!item || item.kind !== lease.kind || item.state !== "reserved" || actualBytes > item.bytes) throw new Error("后台资源预留不存在或超出预留额度");
+    if (!item || item.cancelIntent || item.kind !== lease.kind || item.state !== "reserved" || actualBytes > item.bytes) throw new Error("后台资源预留不存在或超出预留额度");
     if (actualBytes === 0) payload.reservations = payload.reservations.filter(entry => entry !== item);
     else {
       if (lease.kind === "trim") {
@@ -485,7 +664,7 @@ export async function finishBackgroundBudget(db: AdminDatabase, lease: Backgroun
       }
       item.bytes = actualBytes; item.state = "committed";
     }
-    if (!await db.updateBackgroundJob({ ...budgetKey, leaseOwner: lease.leaseOwner, generation: lease.generation, expectedRevision: lease.revision, payload })) return false;
+    if (!await db.updateBackgroundJob({ ...budgetKey, leaseOwner: lease.leaseOwner, generation: lease.generation, expectedRevision: lease.revision, payload: payloadSchema.parse(payload) })) return false;
     lease.revision++;
   }
   return db.releaseBackgroundJobLease({ ...budgetKey, leaseOwner: lease.leaseOwner, generation: lease.generation });

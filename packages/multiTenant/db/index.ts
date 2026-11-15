@@ -5,7 +5,7 @@ import type { AdminDatabase } from "./schema";
 
 export { backgroundJobKeySchema, backgroundJobCreateSchema, backgroundJobLeaseSchema, backgroundJobRenewSchema, backgroundJobUpdateSchema, backgroundJobReleaseSchema } from "./backgroundJobs";
 export type { BackgroundJobKey, BackgroundJobCreate, BackgroundJobRecord, BackgroundJobLease, BackgroundJobRenew, BackgroundJobUpdate, BackgroundJobRelease } from "./backgroundJobs";
-export { initializeBackgroundBudget, acquireBackgroundBudget, renewBackgroundBudget, finishBackgroundBudget, reconcileBackgroundReservation, listBackgroundReservations, hasBackgroundReservation, readOwnTrimReservation, listOwnTrimReservations, recordTrimIntent, recoverTrimIntent, releaseInterruptedTrim } from "./backgroundBudget";
+export { initializeBackgroundBudget, acquireBackgroundBudget, renewBackgroundBudget, markTrimDispatched, finishBackgroundBudget, reconcileBackgroundReservation, listBackgroundReservations, hasBackgroundReservation, readOwnTrimReservation, listOwnTrimReservations, listDisabledUnknownTrims, recordTrimIntent, recoverTrimIntent, preserveCancelledTrimResult, sealUnknownTrim, releaseInterruptedTrim } from "./backgroundBudget";
 export type { BackgroundBudgetLease } from "./backgroundBudget";
 
 export type { AdminDatabase, AdminRecord, AdminUpdate, UserRecord, UserUpdate, WebSessionRecord, ManagedUser, ListUserOptions, SourceMappingRecord, ModelRoutingRecord, WalletRecord, BillingRecord } from "./schema";

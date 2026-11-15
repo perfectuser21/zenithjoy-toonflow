@@ -8,14 +8,17 @@ import { writeDurableState } from "./trimWorkerState";
 import { acquireWorkerFence } from "./trimWorkerFence";
 import { trimNeedsFrameNormalization } from "./trimDuration";
 import { serveTrimSocket } from "./trimSocketServer";
+import { readRootStartupAdmission, startupAdmissionRequired } from "./trimStartupAdmission";
+import { acquireIngressRequestFence } from "./trimIngressFence";
 
 const socketPath = process.env.TOONFLOW_TRIM_SOCKET;
 const token = process.env.TOONFLOW_TRIM_TOKEN;
 const image = process.env.TOONFLOW_TRIM_IMAGE;
 const statePath = process.env.TOONFLOW_TRIM_STATE;
 const docker = process.env.TOONFLOW_TRIM_DOCKER;
+const daemonPath = process.env.TOONFLOW_TRIM_DAEMON_SOCKET;
 if (!socketPath || !socketPath.startsWith("/") || !statePath || !statePath.startsWith("/") || !token || !/^[a-f0-9]{64}$/.test(token)
-  || !image || !/^sha256:[a-f0-9]{64}$/.test(image) || !docker || !docker.startsWith("/")) throw new Error("隔离裁剪管理器配置不完整");
+  || !image || !/^sha256:[a-f0-9]{64}$/.test(image) || !docker || !docker.startsWith("/") || !daemonPath?.startsWith("/") || resolve(daemonPath) !== daemonPath || daemonPath === "/var/run/docker.sock" || daemonPath === "/run/docker.sock") throw new Error("隔离裁剪管理器配置不完整");
 if (dirname(resolve(socketPath)) === resolve(statePath)) throw new Error("socket 和状态目录必须分离");
 const dockerInfo = await lstat(docker);
 if (!dockerInfo.isFile() || dockerInfo.isSymbolicLink() || await realpath(docker) !== docker || dockerInfo.uid !== 0 || (dockerInfo.mode & 0o022) !== 0) throw new Error("容器执行程序无效");
@@ -26,13 +29,18 @@ for (let directory = dirname(docker);;) {
   if (parent === directory) break;
   directory = parent;
 }
-const dockerEnv = { PATH: "/usr/bin:/bin", HOME: statePath, DOCKER_HOST: "unix:///var/run/docker.sock", DOCKER_CONFIG: resolve(statePath, "dockerConfig") };
-// 确认所有命令使用同一个 socket 实例；daemon 重启或 socket 被替换时不作终态推断。
-const daemonSocket = await lstat("/var/run/docker.sock");
-if (!daemonSocket.isSocket() || daemonSocket.isSymbolicLink()) throw new Error("容器服务 socket 无效");
+const dockerEnv = { PATH: "/usr/bin:/bin", HOME: statePath, DOCKER_HOST: `unix://${daemonPath}`, DOCKER_CONFIG: resolve(statePath, "dockerConfig") };
+// 专用 socket 的目录、权限和 inode 必须由 root 控制，不回落共享 daemon。
+for (let parent = dirname(daemonPath);;) {
+  const info = await lstat(parent);
+  if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== 0 || (info.mode & 0o022) || await realpath(parent) !== parent) throw new Error("专用容器服务目录不安全");
+  const next = dirname(parent); if (next === parent) break; parent = next;
+}
+const daemonSocket = await lstat(daemonPath);
+if (!daemonSocket.isSocket() || daemonSocket.isSymbolicLink() || daemonSocket.uid !== 0 || (daemonSocket.mode & 0o777) !== 0o660 || typeof process.getgroups !== "function" || !process.getgroups().includes(daemonSocket.gid)) throw new Error("专用容器服务 socket 无效");
 async function sameDaemonSocket() {
-  const current = await lstat("/var/run/docker.sock").catch(() => null);
-  return !!current && current.isSocket() && !current.isSymbolicLink() && current.dev === daemonSocket.dev && current.ino === daemonSocket.ino;
+  const current = await lstat(daemonPath!).catch(() => null);
+  return !!current && current.isSocket() && !current.isSymbolicLink() && current.uid === 0 && current.gid === daemonSocket.gid && (current.mode & 0o777) === 0o660 && current.dev === daemonSocket.dev && current.ino === daemonSocket.ino;
 }
 for (const directory of [resolve(statePath)]) {
   const info = await lstat(directory);
@@ -48,8 +56,46 @@ for (let directory = dirname(resolve(statePath));;) {
 // 持有至进程退出；允许后续恢复进程通过同一把锁证明旧工作进程不再执行。
 const workerFence = await acquireWorkerFence(statePath);
 const workerFenceIdentity = await workerFence.stat();
+// 额外受信部署必须等 root 完成对本次进程的事前见证，才开始接收 socket 中排队的请求。
+const admissionMode = process.env.TOONFLOW_TRIM_STARTUP_ADMISSION;
+const attestedIngress = startupAdmissionRequired(process.argv.slice(2), admissionMode);
+let runtimeNonce: string | undefined;
+if (attestedIngress) {
+  // 与请求共用入口锁，启动见证期间任一维护标记或未知状态均拒绝。
+  const startupFence = await acquireIngressRequestFence();
+  try { runtimeNonce = await readRootStartupAdmission(); }
+  finally { await startupFence.close(); }
+}
 const lock = resolve(statePath, "active");
 const journal = resolve(lock, "lastJob.json");
+const seals = resolve(statePath, "sealed");
+try { await mkdir(seals, { mode: 0o700 }); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+const sealsInfo = await lstat(seals);
+if (!sealsInfo.isDirectory() || sealsInfo.isSymbolicLink() || sealsInfo.uid !== process.getuid?.() || (sealsInfo.mode & 0o077) || await realpath(seals) !== seals) throw new Error("裁剪封禁目录不安全");
+const stateDirectory = await open(statePath, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+try { await stateDirectory.sync(); } finally { await stateDirectory.close(); }
+async function sealedOperation(operationId: string, confirmDurable = false) {
+  const path = resolve(seals, operationId), info = await lstat(path).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
+  if (!info) return undefined;
+  if (!info.isFile() || info.isSymbolicLink() || info.uid !== process.getuid?.() || info.nlink !== 1 || (info.mode & 0o077) || info.size > 1024) throw new Error("裁剪封禁记录异常");
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const current = await file.stat();
+    if (!current.isFile() || current.dev !== info.dev || current.ino !== info.ino || current.uid !== info.uid || current.nlink !== 1 || (current.mode & 0o077) || current.size !== info.size) throw new Error("裁剪封禁记录已变化");
+    const value = JSON.parse(await file.readFile("utf8"));
+    if (!value || value.operationId !== operationId || typeof value.ownerId !== "string" || typeof value.workspaceHash !== "string") throw new Error("裁剪封禁记录异常");
+    if (confirmDurable) {
+      await file.sync();
+      const directory = await open(seals, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      try {
+        const currentDirectory = await directory.stat();
+        if (currentDirectory.dev !== sealsInfo.dev || currentDirectory.ino !== sealsInfo.ino || currentDirectory.uid !== sealsInfo.uid || (currentDirectory.mode & 0o077)) throw new Error("裁剪封禁目录已变化");
+        await directory.sync();
+      } finally { await directory.close(); }
+    }
+    return value as { operationId: string; ownerId: string; workspaceHash: string };
+  } finally { await file.close(); }
+}
 async function releaseActive() {
   await unlink(journal).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
   await rmdir(lock);
@@ -87,10 +133,21 @@ await serveTrimSocket(socketPath, "trimWorker", maxInput, async request => {
     // 未知创建状态须独立运维核验，普通应用无权解除。
     return denied(503);
   }
-  if (request.method !== "POST" || url.pathname !== "/trim") return denied(404);
+  if (request.method !== "POST" || !["/trim", "/seal"].includes(url.pathname)) return denied(404);
   const operationId = request.headers.get("x-trim-operation") ?? "";
   const ownerId = request.headers.get("x-trim-owner") ?? "", workspaceHash = request.headers.get("x-trim-workspace") ?? "";
   if (!/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(operationId) || !/^[a-zA-Z0-9_-]{1,64}$/.test(ownerId) || !/^[a-f0-9]{64}$/.test(workspaceHash)) return denied(400);
+  if (url.pathname === "/seal") {
+    if (request.headers.get("content-length") !== "0") return denied(400);
+    try { await mkdir(lock, { mode: 0o700 }); } catch { return denied(429); }
+    try {
+      const existing = await sealedOperation(operationId, true);
+      if (existing && (existing.ownerId !== ownerId || existing.workspaceHash !== workspaceHash)) return denied(409);
+      if (!existing) await writeDurableState(resolve(seals, operationId), { operationId, ownerId, workspaceHash });
+      return denied(204);
+    } catch { return denied(503); }
+    finally { await releaseActive().catch(() => {}); }
+  }
   const rawStart = request.headers.get("x-trim-start"), rawEnd = request.headers.get("x-trim-end");
   const start = Number(rawStart), end = Number(rawEnd);
   const length = Number(request.headers.get("content-length"));
@@ -103,6 +160,7 @@ await serveTrimSocket(socketPath, "trimWorker", maxInput, async request => {
   let safeToUnlock = true;
   let detachAbort = () => {};
   try {
+    if (await sealedOperation(operationId)) return denied(410);
     // active 与当前请求绑定，禁止恢复时把上一次作业的日志当成本次证据。
     const parent = await open(statePath!, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
     try { await parent.sync(); } finally { await parent.close(); }
@@ -117,22 +175,22 @@ await serveTrimSocket(socketPath, "trimWorker", maxInput, async request => {
     });
     // 创建阶段仍须等结果；提前订阅避免断连先发生时产生未处理拒绝。
     void aborted.catch(() => {});
-    await writeDurableState(journal, { name, operationId, ownerId, workspaceHash, image, managerPid: process.pid, phase: "creating", protocolVersion: 2, startedAt: Date.now() });
+    await writeDurableState(journal, { name, operationId, ownerId, workspaceHash, image, managerPid: process.pid, ...(runtimeNonce ? { runtimeNonce } : {}), phase: "creating", protocolVersion: 2, startedAt: Date.now() });
     safeToUnlock = false;
-    const creation = Bun.spawn([docker, "create", "--init", "--rm", "--pull=never", "--name", name, "--label", `com.zenithjoy.trim.operation=${operationId}`, "--label", "com.zenithjoy.trim.protocol=2", "--network=none", "--read-only", "--user=65534:65534", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=32", "--memory=1g", "--cpus=1", "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=768m,mode=1777", "-i", "--env", `START=${start}`, "--env", `END=${end}`, "--env", `DURATION=${end-start}`, "--env", `NORMALIZE_FPS=${trimNeedsFrameNormalization(start, end) ? 1 : 0}`, image, "timeout", "-k", "5s", "180s", "/bin/sh", "-c", script], { stdin: "ignore", stdout: "pipe", stderr: "ignore", env: dockerEnv });
+    const creation = Bun.spawn([docker, "create", "--init", "--rm", "--pull=never", "--name", name, "--label", `com.zenithjoy.trim.operation=${operationId}`, "--label", "com.zenithjoy.trim.protocol=2", "--network=none", "--cgroup-parent=/toonflow-trim-jobs", "--read-only", "--user=65534:65534", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=32", "--memory=1g", "--cpus=1", "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=768m,mode=1777", "-i", "--env", `START=${start}`, "--env", `END=${end}`, "--env", `DURATION=${end-start}`, "--env", `NORMALIZE_FPS=${trimNeedsFrameNormalization(start, end) ? 1 : 0}`, image, "timeout", "-k", "5s", "180s", "/bin/sh", "-c", script], { stdin: "ignore", stdout: "pipe", stderr: "ignore", env: dockerEnv });
     child = creation;
     // 创建请求已发出后等待明确结果；断连不能取消 daemon 内可能仍在进行的创建。
     const [createdText, creationExit] = await Promise.all([creation.stdout.text(), creation.exited]);
     const created = createdText.trim();
     if (creationExit !== 0 || !/^[a-f0-9]{64}$/.test(created)) throw new Error("容器创建结果未知");
     containerId = created;
-    await writeDurableState(journal, { name, operationId, ownerId, workspaceHash, image, containerId, managerPid: process.pid, phase: "created", protocolVersion: 2, startedAt: Date.now() });
+    await writeDurableState(journal, { name, operationId, ownerId, workspaceHash, image, containerId, managerPid: process.pid, ...(runtimeNonce ? { runtimeNonce } : {}), phase: "created", protocolVersion: 2, startedAt: Date.now() });
     deadline.throwIfAborted();
     // 启动前先持久化启动意图；恢复代码不得把启动结果未知当作未启动。
-    await writeDurableState(journal, { name, operationId, ownerId, workspaceHash, image, containerId, managerPid: process.pid, phase: "starting", protocolVersion: 2, startedAt: Date.now() });
+    await writeDurableState(journal, { name, operationId, ownerId, workspaceHash, image, containerId, managerPid: process.pid, ...(runtimeNonce ? { runtimeNonce } : {}), phase: "starting", protocolVersion: 2, startedAt: Date.now() });
     const running = Bun.spawn([docker, "start", "--attach", "--interactive", containerId], { stdin: "pipe", stdout: "pipe", stderr: "ignore", env: dockerEnv });
     child = running;
-    await writeDurableState(journal, { name, operationId, ownerId, workspaceHash, image, containerId, managerPid: process.pid, childPid: running.pid, phase: "started", protocolVersion: 2, startedAt: Date.now() });
+    await writeDurableState(journal, { name, operationId, ownerId, workspaceHash, image, containerId, managerPid: process.pid, ...(runtimeNonce ? { runtimeNonce } : {}), childPid: running.pid, phase: "started", protocolVersion: 2, startedAt: Date.now() });
     const input = (async () => { const reader = request.body!.getReader(); let total = 0; try { while (true) { const { value, done } = await reader.read(); if (done) break; total += value.byteLength; if (total > length) throw new Error("输入长度无效"); running.stdin.write(value); await running.stdin.flush(); } if (total !== length) throw new Error("输入长度无效"); running.stdin.end(); } finally { reader.releaseLock(); } })();
     const output = (async () => { const reader = running.stdout.getReader(); const chunks: Uint8Array[] = []; let total = 0; try { while (true) { const { value, done } = await reader.read(); if (done) break; total += value.byteLength; if (total > maxOutput + 256) throw new Error("输出过大"); chunks.push(value); } return Buffer.concat(chunks); } finally { reader.releaseLock(); } })();
     deadline.throwIfAborted();
@@ -169,5 +227,5 @@ await serveTrimSocket(socketPath, "trimWorker", maxInput, async request => {
     }
     return denied(503);
   } finally { detachAbort(); if (safeToUnlock) await releaseActive().catch(() => {}); }
-});
+}, attestedIngress ? acquireIngressRequestFence : undefined);
 console.log("隔离裁剪管理器已启动");

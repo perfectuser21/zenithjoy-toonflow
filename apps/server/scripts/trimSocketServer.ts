@@ -1,12 +1,13 @@
 import { createServer as createHttpServer } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import { Readable } from "node:stream";
+import { finished } from "node:stream/promises";
 import { lstat, realpath } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { dlopen, FFIType, ptr } from "bun:ffi";
 
 // systemd 持有监听 socket；服务只接收 fd，不创建、删除或替换 socket 文件。
-export async function serveTrimSocket(path: string, name: string, maxBytes: number, fetch: (request: Request) => Promise<Response>) {
+export async function serveTrimSocket(path: string, name: string, maxBytes: number, fetch: (request: Request) => Promise<Response>, acquireRequestFence?: () => Promise<{ close(): Promise<void> }>) {
   if (process.platform !== "linux" || process.env.LISTEN_PID !== String(process.pid) || process.env.LISTEN_FDS !== "1" || process.env.LISTEN_FDNAMES !== name) throw new Error("裁剪 socket 未由 systemd 提供");
   delete process.env.LISTEN_PID; delete process.env.LISTEN_FDS; delete process.env.LISTEN_FDNAMES;
   const socket = resolve(path), parent = dirname(socket), [directory, info] = await Promise.all([lstat(parent), lstat(socket)]);
@@ -34,7 +35,10 @@ export async function serveTrimSocket(path: string, name: string, maxBytes: numb
     input.once("aborted", abort); output.once("close", () => { if (!output.writableFinished) abort(); });
     const timer = setTimeout(() => { abort(); output.destroy(); }, 240000);
     output.once("close", () => clearTimeout(timer));
+    let requestFence: { close(): Promise<void> } | undefined;
     try {
+      if (acquireRequestFence) requestFence = await acquireRequestFence();
+      if (controller.signal.aborted || output.destroyed) return;
       const contentLength = input.headers["content-length"];
       if (stopping || input.headers["transfer-encoding"] || Array.isArray(contentLength)
         || contentLength !== undefined && (!/^(0|[1-9][0-9]*)$/.test(contentLength) || !Number.isSafeInteger(Number(contentLength)) || Number(contentLength) > maxBytes)) {
@@ -46,6 +50,7 @@ export async function serveTrimSocket(path: string, name: string, maxBytes: numb
         method, headers: input.headers as Record<string, string>, signal: controller.signal,
         ...(hasBody ? { body: Readable.toWeb(input) as ReadableStream<Uint8Array>, duplex: "half" } : {}),
       } as RequestInit);
+      if (controller.signal.aborted || output.destroyed) return;
       const response = await fetch(request);
       output.writeHead(response.status, { ...Object.fromEntries(response.headers), connection: "close" });
       if (response.body) {
@@ -66,7 +71,9 @@ export async function serveTrimSocket(path: string, name: string, maxBytes: numb
         } finally { controller.signal.removeEventListener("abort", cancel); if (controller.signal.aborted) await reader.cancel().catch(() => {}); reader.releaseLock(); }
       }
       output.end();
+      await finished(output);
     } catch { if (!output.headersSent) { output.writeHead(503, { connection: "close" }); output.end(); } else output.destroy(); }
+    finally { if (requestFence) await requestFence.close().catch(() => { console.error("入口请求锁释放失败"); }); }
   });
   const server = createNetServer(connection => http.emit("connection", connection));
   await new Promise<void>((ok, fail) => { server.once("error", fail); server.listen({ fd: 3 }, () => { server.off("error", fail); ok(); }); });
