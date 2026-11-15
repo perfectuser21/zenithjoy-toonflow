@@ -84,7 +84,7 @@ export type AdditionalRuntime = {
   containerdRoot: string; containerdState: string; knownContainerIds: string[];
   proof: { nonce: string; capturedAt: string; workerExecutable: string; workerScript: string; workerExecutableSha256: string; workerScriptSha256: string;
     workerUnitSha256: string; workerSocketUnitSha256: string; daemonUnitSha256: string; containerdUnitSha256: string; bootId: string; workerPid: string; workerStart: string; daemonPid: string; daemonStart: string; containerdPid: string; containerdStart: string;
-    workerStateDev: string; workerStateIno: string; workerLockDev: string; workerLockIno: string; daemonRootDev: string; daemonRootIno: string; containerdRootDev: string; containerdRootIno: string; workerSocketDev: string; workerSocketIno: string; daemonStateDev: string; daemonStateIno: string; containerdStateDev: string; containerdStateIno: string; dockerSocketDev: string; dockerSocketIno: string; containerdSocketDev: string; containerdSocketIno: string };
+    workerStateDev: string; workerStateIno: string; workerLockDev: string; workerLockIno: string; daemonRootDev: string; daemonRootIno: string; containerdRootDev: string; containerdRootIno: string; workerSocketDev: string; workerSocketIno: string; listenerInode: string; daemonStateDev: string; daemonStateIno: string; containerdStateDev: string; containerdStateIno: string; dockerSocketDev: string; dockerSocketIno: string; containerdSocketDev: string; containerdSocketIno: string };
 
 };
 
@@ -108,7 +108,7 @@ export function trustedAdditionalRuntime(value: unknown, units: string[]): Addit
   if (!Array.isArray(v.knownContainerIds) || v.knownContainerIds.length > 32 || v.knownContainerIds.some(x => typeof x !== 'string' || !/^[a-f0-9]{64}$/.test(x)) || new Set(v.knownContainerIds).size !== v.knownContainerIds.length) throw new Error('附加运行时容器清单异常');
   if (!v.proof || typeof v.proof !== 'object' || Array.isArray(v.proof)) throw new Error('运行时预检证明异常');
   const proof = v.proof as Record<string, unknown>;
-  const numericKeys = ['capturedAt', 'workerPid', 'workerStart', 'daemonPid', 'daemonStart', 'containerdPid', 'containerdStart', 'workerStateDev', 'workerStateIno', 'workerLockDev', 'workerLockIno', 'daemonRootDev', 'daemonRootIno', 'containerdRootDev', 'containerdRootIno', 'workerSocketDev', 'workerSocketIno', 'daemonStateDev', 'daemonStateIno', 'containerdStateDev', 'containerdStateIno', 'dockerSocketDev', 'dockerSocketIno', 'containerdSocketDev', 'containerdSocketIno'];
+  const numericKeys = ['capturedAt', 'workerPid', 'workerStart', 'daemonPid', 'daemonStart', 'containerdPid', 'containerdStart', 'workerStateDev', 'workerStateIno', 'workerLockDev', 'workerLockIno', 'daemonRootDev', 'daemonRootIno', 'containerdRootDev', 'containerdRootIno', 'workerSocketDev', 'workerSocketIno', 'listenerInode', 'daemonStateDev', 'daemonStateIno', 'containerdStateDev', 'containerdStateIno', 'dockerSocketDev', 'dockerSocketIno', 'containerdSocketDev', 'containerdSocketIno'];
   const digestKeys = ['workerExecutableSha256', 'workerScriptSha256', 'workerUnitSha256', 'workerSocketUnitSha256', 'daemonUnitSha256', 'containerdUnitSha256'];
   const executableKeys = ['workerExecutable', 'workerScript'];
   const proofKeys = ['bootId', 'nonce', ...numericKeys, ...digestKeys, ...executableKeys];

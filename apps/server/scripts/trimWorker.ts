@@ -9,6 +9,7 @@ import { acquireWorkerFence } from "./trimWorkerFence";
 import { trimNeedsFrameNormalization } from "./trimDuration";
 import { serveTrimSocket } from "./trimSocketServer";
 import { readRootStartupAdmission, startupAdmissionRequired } from "./trimStartupAdmission";
+import { acquireIngressRequestFence } from "./trimIngressFence";
 
 const socketPath = process.env.TOONFLOW_TRIM_SOCKET;
 const token = process.env.TOONFLOW_TRIM_TOKEN;
@@ -57,7 +58,14 @@ const workerFence = await acquireWorkerFence(statePath);
 const workerFenceIdentity = await workerFence.stat();
 // 额外受信部署必须等 root 完成对本次进程的事前见证，才开始接收 socket 中排队的请求。
 const admissionMode = process.env.TOONFLOW_TRIM_STARTUP_ADMISSION;
-const runtimeNonce = startupAdmissionRequired(process.argv.slice(2), admissionMode) ? await readRootStartupAdmission() : undefined;
+const attestedIngress = startupAdmissionRequired(process.argv.slice(2), admissionMode);
+let runtimeNonce: string | undefined;
+if (attestedIngress) {
+  // 与请求共用入口锁，启动见证期间任一维护标记或未知状态均拒绝。
+  const startupFence = await acquireIngressRequestFence();
+  try { runtimeNonce = await readRootStartupAdmission(); }
+  finally { await startupFence.close(); }
+}
 const lock = resolve(statePath, "active");
 const journal = resolve(lock, "lastJob.json");
 const seals = resolve(statePath, "sealed");
@@ -219,5 +227,5 @@ await serveTrimSocket(socketPath, "trimWorker", maxInput, async request => {
     }
     return denied(503);
   } finally { detachAbort(); if (safeToUnlock) await releaseActive().catch(() => {}); }
-});
+}, attestedIngress ? acquireIngressRequestFence : undefined);
 console.log("隔离裁剪管理器已启动");

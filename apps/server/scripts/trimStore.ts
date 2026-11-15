@@ -5,6 +5,8 @@ import { constants, lstat, mkdir, open, readdir, realpath, statfs } from "@toonf
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import { createConnection } from "node:net";
 import { serveTrimSocket } from "./trimSocketServer";
+import { acquireIngressRequestFence } from "./trimIngressFence";
+import { startupAdmissionRequired } from "./trimStartupAdmission";
 
 const socket = process.env.TOONFLOW_TRIM_STORE_SOCKET, token = process.env.TOONFLOW_TRIM_STORE_TOKEN;
 const quotaRoot = process.env.TOONFLOW_PROJECT_QUOTA_ROOT, appGid = Number(process.env.TOONFLOW_TRIM_ACCESS_GID);
@@ -12,6 +14,11 @@ const quotaGid = Number(process.env.TOONFLOW_TRIM_STORE_GID);
 if (!socket?.startsWith("/") || !quotaRoot?.startsWith("/") || !token || !/^[a-f0-9]{64}$/.test(token)
   || !Number.isSafeInteger(appGid) || appGid < 1 || typeof process.getuid !== "function" || !process.getuid() || !Number.isSafeInteger(quotaGid) || quotaGid < 1 || typeof process.getgid !== "function" || process.getgid() !== quotaGid || typeof process.getgroups !== "function" || !process.getgroups().includes(appGid)) throw new Error("裁剪存储配置不完整");
 const storeUid = process.getuid();
+const attestedIngress = startupAdmissionRequired(process.argv.slice(2), process.env.TOONFLOW_TRIM_STARTUP_ADMISSION);
+if (attestedIngress) {
+  const startupFence = await acquireIngressRequestFence();
+  await startupFence.close();
+}
 const maxBytes = 128 * 1024 * 1024;
 const libc = dlopen("libc.so.6", {
   ioctl: { args: [FFIType.int, FFIType.u64, FFIType.ptr], returns: FFIType.int },
@@ -179,5 +186,5 @@ await serveTrimSocket(socket, "trimStore", maxBytes, async request => {
     } finally { await dir.close(); }
   } catch (error) { return deny(["EDQUOT", "ENOSPC"].includes((error as NodeJS.ErrnoException)?.code ?? "") ? 507 : 503); }
   finally { if (!streaming) busy = false; }
-});
+}, attestedIngress ? acquireIngressRequestFence : undefined);
 console.log("裁剪私有存储已启动");

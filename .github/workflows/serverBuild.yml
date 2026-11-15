@@ -59,11 +59,12 @@ jobs:
               if any(pattern.search(data) for pattern in patterns):
                   sys.exit(f'possible secret in artifact: {relative}')
               files[relative] = hashlib.sha256(data).hexdigest()
-          if not files or 'server/index.js' not in files:
+          if not {'server/index.js', 'server/trimWorker.js', 'server/trimStore.js', 'server/provisionTrimStore.js'}.issubset(files):
               sys.exit('missing server build output')
           units = ('deploy/quota/toonflowTrimWorker.attested.service', 'deploy/quota/toonflowTrimWorker.socket',
                    'deploy/quota/toonflowTrimWitness.service', 'deploy/quota/toonflowTrimDocker.service',
-                   'deploy/quota/toonflowTrimContainerd.service')
+                   'deploy/quota/toonflowTrimContainerd.service', 'deploy/quota/toonflowTrimStore.attested.service',
+                   'deploy/quota/toonflowTrimStore.socket')
           unit_hashes = {}
           for name in units:
               path = pathlib.Path(name)

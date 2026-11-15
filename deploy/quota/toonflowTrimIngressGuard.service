@@ -1,0 +1,12 @@
+[Unit]
+Description=Toonflow trim ingress job and shim guard
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Slice=toonflow-trim-ingress.slice
+TimeoutStartSec=20s
+TimeoutStopSec=2s
+KillMode=control-group
+ExecStart=/usr/bin/python3 /opt/toonflow-trim/current/trimIngressJobs.py --confirm-ingress-maintenance
+Restart=no

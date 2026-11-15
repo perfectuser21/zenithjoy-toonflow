@@ -5,6 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { dirname, resolve } from 'node:path';
 import { dlopen, FFIType, read } from 'bun:ffi';
 import { trustedAdditionalRuntime, trustedWorkerUid, runtimeProofPath, requireExpectedRuntimeHashes } from './recoveryDeploymentPolicy';
+import { assertFreshListener } from './trimStartupAdmission';
 
 const templatePath = '/etc/toonflow-trim/runtimePreflight.json';
 if (process.platform !== 'linux' || process.getuid?.() !== 0 || process.argv.length !== 2) throw new Error('需要 Linux root 和固定预检模板');
@@ -44,7 +45,7 @@ if (!request || typeof request !== 'object' || Array.isArray(request) || Object.
 const workerUid = trustedWorkerUid(request.workerUid);
 const placeholder = { nonce: '00000000-0000-4000-8000-000000000002', capturedAt: '1', workerExecutable: request.workerExecutable, workerScript: request.workerScript,
   workerExecutableSha256: '0'.repeat(64), workerScriptSha256: '0'.repeat(64), workerUnitSha256: '0'.repeat(64), workerSocketUnitSha256: '0'.repeat(64), daemonUnitSha256: '0'.repeat(64), containerdUnitSha256: '0'.repeat(64),
-  bootId: '00000000-0000-4000-8000-000000000001', workerPid: '1', workerStart: '1', daemonPid: '2', daemonStart: '1', containerdPid: '3', containerdStart: '1', workerStateDev: '1', workerStateIno: '1', workerLockDev: '1', workerLockIno: '1', daemonRootDev: '1', daemonRootIno: '1', containerdRootDev: '1', containerdRootIno: '1', workerSocketDev: '1', workerSocketIno: '1', daemonStateDev: '1', daemonStateIno: '1', containerdStateDev: '1', containerdStateIno: '1', dockerSocketDev: '1', dockerSocketIno: '1', containerdSocketDev: '1', containerdSocketIno: '1' };
+  bootId: '00000000-0000-4000-8000-000000000001', workerPid: '1', workerStart: '1', daemonPid: '2', daemonStart: '1', containerdPid: '3', containerdStart: '1', workerStateDev: '1', workerStateIno: '1', workerLockDev: '1', workerLockIno: '1', daemonRootDev: '1', daemonRootIno: '1', containerdRootDev: '1', containerdRootIno: '1', workerSocketDev: '1', workerSocketIno: '1', listenerInode: '1', daemonStateDev: '1', daemonStateIno: '1', containerdStateDev: '1', containerdStateIno: '1', dockerSocketDev: '1', dockerSocketIno: '1', containerdSocketDev: '1', containerdSocketIno: '1' };
 const runtime = trustedAdditionalRuntime({ ...request.additionalRuntime, proof: placeholder }, request.additionalUnits);
 if (!runtime) throw new Error('缺少运行时模板');
 const bootId = (await readFile('/proc/sys/kernel/random/boot_id', 'utf8')).trim();
@@ -144,7 +145,7 @@ if ((await readFile('/proc/sys/kernel/random/boot_id', 'utf8')).trim() !== bootI
 const proof = { nonce: randomUUID(), capturedAt: String(Date.now()), bootId, workerExecutable: workerExe, workerScript, workerExecutableSha256, workerScriptSha256,
   workerUnitSha256: worker.hash, workerSocketUnitSha256: workerSocketUnit.hash, daemonUnitSha256: daemon.hash, containerdUnitSha256: containerd.hash,
   workerPid: String(worker.pid), workerStart: worker.start, daemonPid: String(daemon.pid), daemonStart: daemon.start, containerdPid: String(containerd.pid), containerdStart: containerd.start,
-  workerStateDev: String(workerState.dev), workerStateIno: String(workerState.ino), workerLockDev, workerLockIno, daemonRootDev: String(daemonRoot.dev), daemonRootIno: String(daemonRoot.ino), containerdRootDev: String(containerdRoot.dev), containerdRootIno: String(containerdRoot.ino), workerSocketDev: String(workerSocket.dev), workerSocketIno: String(workerSocket.ino), daemonStateDev: String(daemonState.dev), daemonStateIno: String(daemonState.ino), containerdStateDev: String(containerdState.dev), containerdStateIno: String(containerdState.ino), dockerSocketDev: String(dockerSocket.dev), dockerSocketIno: String(dockerSocket.ino), containerdSocketDev: String(containerdSocket.dev), containerdSocketIno: String(containerdSocket.ino) };
+  workerStateDev: String(workerState.dev), workerStateIno: String(workerState.ino), workerLockDev, workerLockIno, daemonRootDev: String(daemonRoot.dev), daemonRootIno: String(daemonRoot.ino), containerdRootDev: String(containerdRoot.dev), containerdRootIno: String(containerdRoot.ino), workerSocketDev: String(workerSocket.dev), workerSocketIno: String(workerSocket.ino), listenerInode: matchFd[1]!, daemonStateDev: String(daemonState.dev), daemonStateIno: String(daemonState.ino), containerdStateDev: String(containerdState.dev), containerdStateIno: String(containerdState.ino), dockerSocketDev: String(dockerSocket.dev), dockerSocketIno: String(dockerSocket.ino), containerdSocketDev: String(containerdSocket.dev), containerdSocketIno: String(containerdSocket.ino) };
 const additionalRuntime = trustedAdditionalRuntime({ ...request.additionalRuntime, proof }, request.additionalUnits);
 const output = JSON.stringify({ workerUid: request.workerUid, additionalRuntime });
 if (!additionalRuntime) throw new Error('预检身份不可用');
@@ -154,6 +155,33 @@ for (let p = dirname(proofPath);; p = dirname(p)) {
   if (!st.isDirectory() || st.isSymbolicLink() || st.uid !== 0 || (st.mode & 0o022) || await realpath(p) !== p) throw new Error('预检证明目录不安全');
   if (p === '/') break;
 }
+// Root-provisioned lock serializes generation scan and both durable publications.
+const generationLockPath = '/etc/toonflow-trim/runtime-proofs.lock';
+const lockBefore = await lstat(generationLockPath);
+if (!lockBefore.isFile() || lockBefore.isSymbolicLink() || lockBefore.uid !== 0 || lockBefore.nlink !== 1 || (lockBefore.mode & 0o777) !== 0o600) throw new Error('预检代际锁不安全');
+const generationLock = await open(generationLockPath, constants.O_RDWR | constants.O_NOFOLLOW);
+const generationLibc = dlopen('libc.so.6', { flock: { args: [FFIType.int, FFIType.int], returns: FFIType.int } });
+try {
+  const held = await generationLock.stat(), current = await lstat(generationLockPath);
+  if (held.dev !== lockBefore.dev || held.ino !== lockBefore.ino || held.dev !== current.dev || held.ino !== current.ino || held.uid !== 0 || held.nlink !== 1 || (held.mode & 0o777) !== 0o600) throw new Error('预检代际锁身份变化');
+  if (generationLibc.symbols.flock(generationLock.fd, 6) !== 0) throw new Error('预检代际锁已占用');
+// A previously attested listener cannot be reused.  This alone cannot prove
+// old clients or accepted FDs have drained; the collector remains hard-closed.
+const priorNames = await readdir(dirname(proofPath));
+if (priorNames.length > 10000) throw new Error('历史预检证明过多');
+const priorListeners: Array<{ bootId: string; listenerInode: string }> = [];
+for (const name of priorNames) {
+  if (!/^[a-f0-9-]+-[1-9][0-9]*-[1-9][0-9]*\.json$/.test(name)) throw new Error('历史预检目录包含未知文件');
+  const oldPath = resolve(dirname(proofPath), name), st = await controlled(oldPath, true);
+  if (st.size > 65536) throw new Error('历史预检证明过大');
+  const old = JSON.parse((await bytes(oldPath, true)).toString('utf8'));
+  if (!old || Object.keys(old).sort().join(',') !== 'additionalRuntime,workerUid') throw new Error('历史预检证明格式异常');
+  trustedWorkerUid(old.workerUid);
+  const prior = trustedAdditionalRuntime(old.additionalRuntime, request.additionalUnits);
+  if (!prior || runtimeProofPath(prior) !== oldPath) throw new Error('历史预检证明身份不符');
+  priorListeners.push({ bootId: prior.proof.bootId, listenerInode: prior.proof.listenerInode });
+}
+assertFreshListener(priorListeners, bootId, matchFd[1]!);
 const tmp = `${proofPath}.${randomUUID()}.tmp`, fd = await open(tmp, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
 try { await fd.writeFile(output); await fd.sync(); } finally { await fd.close(); }
 await link(tmp, proofPath); // 不覆盖；若崩溃留下双硬链，离线核验会拒绝。
@@ -173,7 +201,7 @@ const admissionTmp = `${admissionPath}.${randomUUID()}.tmp`;
 const admissionFd = await open(admissionTmp, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o644);
 try {
   await admissionFd.chmod(0o644);
-  await admissionFd.writeFile(JSON.stringify({ bootId, workerPid: worker.pid, workerStart: worker.start, nonce: proof.nonce }));
+  await admissionFd.writeFile(JSON.stringify({ bootId, workerPid: worker.pid, workerStart: worker.start, listenerInode: matchFd[1], nonce: proof.nonce }));
   await admissionFd.sync();
 } finally { await admissionFd.close(); }
 // link 保证不覆盖；任何中断留下的双链接由 worker 拒绝，需人工核查。
@@ -181,4 +209,7 @@ await link(admissionTmp, admissionPath);
 const admissionDirFd = await open(admissionDirectory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
 try { await admissionDirFd.sync(); await unlink(admissionTmp); await admissionDirFd.sync(); } finally { await admissionDirFd.close(); }
 
+} finally {
+  try { await generationLock.close(); } finally { generationLibc.close(); }
+}
 console.log('运行时任务前预检及启动回执已持久化');

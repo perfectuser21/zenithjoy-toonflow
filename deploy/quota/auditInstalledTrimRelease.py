@@ -21,6 +21,8 @@ UNIT_PATHS = {
     'deploy/quota/toonflowTrimWitness.service': '/etc/systemd/system/toonflowTrimWitness.service',
     'deploy/quota/toonflowTrimDocker.service': '/etc/systemd/system/toonflowTrimDocker.service',
     'deploy/quota/toonflowTrimContainerd.service': '/etc/systemd/system/toonflowTrimContainerd.service',
+    'deploy/quota/toonflowTrimStore.attested.service': '/etc/systemd/system/toonflowTrimStore.service',
+    'deploy/quota/toonflowTrimStore.socket': '/etc/systemd/system/toonflowTrimStore.socket',
 }
 
 def read_root(path, limit, private=False):
@@ -131,6 +133,8 @@ def audit_locked(tools, pin, module, artifact_id):
         raise ValueError('active release link mismatch')
     installed = {name: read_root(path, 16 * 1024**2)[0] for name, path in UNIT_PATHS.items()}
     installed['server/trimWorker.js'] = read_root(release + '/trimWorker.js', 16 * 1024**2)[0]
+    installed['server/trimStore.js'] = read_root(release + '/trimStore.js', 16 * 1024**2)[0]
+    installed['server/provisionTrimStore.js'] = read_root(release + '/provisionTrimStore.js', 16 * 1024**2)[0]
     installed['server/captureTrimRuntimeProof.js'] = read_root(release + '/captureTrimRuntimeProof.js', 16 * 1024**2)[0]
     installed['server/recoverTrimActive.js'] = read_root(release + '/recoverTrimActive.js', 16 * 1024**2)[0]
     installed['server/prepareTrimCgroup.js'] = read_root(release + '/prepareTrimCgroup.js', 16 * 1024**2)[0]

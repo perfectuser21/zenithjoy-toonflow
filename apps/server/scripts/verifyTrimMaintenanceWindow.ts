@@ -23,7 +23,7 @@ const schema = z.strictObject({
     containerdRoot: z.string(), containerdState: z.string(), knownContainerIds: z.array(z.string()),
     proof: z.strictObject({ nonce: z.string(), capturedAt: uint, workerExecutable: z.string(), workerScript: z.string(), workerExecutableSha256: z.string(), workerScriptSha256: z.string(),
       workerUnitSha256: z.string(), workerSocketUnitSha256: z.string(), daemonUnitSha256: z.string(), containerdUnitSha256: z.string(), bootId: z.string(), workerPid: uint, workerStart: uint, daemonPid: uint, daemonStart: uint, containerdPid: uint, containerdStart: uint,
-      workerStateDev: uint, workerStateIno: uint, workerLockDev: uint, workerLockIno: uint, daemonRootDev: uint, daemonRootIno: uint, containerdRootDev: uint, containerdRootIno: uint, workerSocketDev: uint, workerSocketIno: uint, daemonStateDev: uint, daemonStateIno: uint, containerdStateDev: uint, containerdStateIno: uint, dockerSocketDev: uint, dockerSocketIno: uint, containerdSocketDev: uint, containerdSocketIno: uint }),
+      workerStateDev: uint, workerStateIno: uint, workerLockDev: uint, workerLockIno: uint, daemonRootDev: uint, daemonRootIno: uint, containerdRootDev: uint, containerdRootIno: uint, workerSocketDev: uint, workerSocketIno: uint, listenerInode: uint, daemonStateDev: uint, daemonStateIno: uint, containerdStateDev: uint, containerdStateIno: uint, dockerSocketDev: uint, dockerSocketIno: uint, containerdSocketDev: uint, containerdSocketIno: uint }),
   }).optional(),
 });
 const fixedUnits = ['toonflowTrimWorker.socket', 'toonflowTrimWorker.service', 'toonflowTrimDocker.service', 'toonflowTrimContainerd.service'];

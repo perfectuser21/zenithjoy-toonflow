@@ -55,6 +55,8 @@ REQUIRED_UNITS = (
     'deploy/quota/toonflowTrimWitness.service',
     'deploy/quota/toonflowTrimDocker.service',
     'deploy/quota/toonflowTrimContainerd.service',
+    'deploy/quota/toonflowTrimStore.attested.service',
+    'deploy/quota/toonflowTrimStore.socket',
 )
 
 def verify_artifact_contents(pin, source):
@@ -129,7 +131,7 @@ def verify_artifact_contents(pin, source):
                             found[name[len('build/'):]] = digest.hexdigest()
             if not isinstance(manifest, dict) or manifest.get('source_sha') != pin.get('commit') or manifest.get('repository') != pin.get('repository') or manifest.get('run_id') != str(pin.get('run_id')) or manifest.get('run_attempt') != str(pin.get('run_attempt')) or manifest.get('architecture') != 'linux/amd64':
                 raise ValueError('manifest provenance mismatch')
-            if not found or found != manifest.get('files_sha256') or 'server/trimWorker.js' not in found:
+            if not found or found != manifest.get('files_sha256') or not {'server/trimWorker.js', 'server/trimStore.js', 'server/provisionTrimStore.js'}.issubset(found):
                 raise ValueError('build manifest mismatch')
             units = manifest.get('unit_sources_sha256')
             if not isinstance(units, dict) or set(units) != set(REQUIRED_UNITS) or any(not isinstance(v, str) or not re.fullmatch(r'[a-f0-9]{64}', v) for v in units.values()):
@@ -149,7 +151,7 @@ def verify_release(pin, run, artifacts, source):
 def verify_installed_bytes(manifest, installed):
     """Match exact installed unit and critical script bytes to verified CI manifest."""
     import hashlib
-    names = (*REQUIRED_UNITS, 'server/trimWorker.js', 'server/captureTrimRuntimeProof.js', 'server/recoverTrimActive.js', 'server/prepareTrimCgroup.js')
+    names = (*REQUIRED_UNITS, 'server/trimWorker.js', 'server/trimStore.js', 'server/provisionTrimStore.js', 'server/captureTrimRuntimeProof.js', 'server/recoverTrimActive.js', 'server/prepareTrimCgroup.js')
     if not isinstance(installed, dict) or set(installed) != set(names):
         raise ValueError('installed file set mismatch')
     unit_hashes = manifest.get('unit_sources_sha256', {}) if isinstance(manifest, dict) else {}
@@ -178,7 +180,7 @@ def collect_install_members(pin, source):
     import zipfile
     manifest = verify_artifact_contents(pin, source)
     wanted = {name: 'release-units/' + name.rsplit('/', 1)[1] for name in REQUIRED_UNITS}
-    for name in ('trimWorker.js', 'captureTrimRuntimeProof.js', 'recoverTrimActive.js', 'prepareTrimCgroup.js'):
+    for name in ('trimWorker.js', 'trimStore.js', 'provisionTrimStore.js', 'captureTrimRuntimeProof.js', 'recoverTrimActive.js', 'prepareTrimCgroup.js'):
         wanted['server/' + name] = 'build/server/' + name
     reverse = {path: key for key, path in wanted.items()}
     found = {}

@@ -31,7 +31,9 @@ UNIT_NAMES = {'deploy/quota/toonflowTrimWorker.attested.service':'toonflowTrimWo
               'deploy/quota/toonflowTrimWorker.socket':'toonflowTrimWorker.socket',
               'deploy/quota/toonflowTrimWitness.service':'toonflowTrimWitness.service',
               'deploy/quota/toonflowTrimDocker.service':'toonflowTrimDocker.service',
-              'deploy/quota/toonflowTrimContainerd.service':'toonflowTrimContainerd.service'}
+              'deploy/quota/toonflowTrimContainerd.service':'toonflowTrimContainerd.service',
+              'deploy/quota/toonflowTrimStore.attested.service':'toonflowTrimStore.service',
+              'deploy/quota/toonflowTrimStore.socket':'toonflowTrimStore.socket'}
 
 def root_dir(path, private=False):
     if not os.path.isabs(path) or os.path.realpath(path) != path: raise ValueError('directory path invalid')
@@ -183,7 +185,7 @@ def main():
             if any(free_bytes(path)<SOFT_FREE+expected_write for path in paths):raise ValueError('insufficient install disk space')
             write_exclusive(pending,json.dumps({'version':1,'pin':pin}).encode(),0o600,paths);sync_dir(OUT)
             os.mkdir(release,0o755);sync_dir(RELEASE_ROOT)
-            for name in ('trimWorker.js','captureTrimRuntimeProof.js','recoverTrimActive.js','prepareTrimCgroup.js'):
+            for name in ('trimWorker.js','trimStore.js','provisionTrimStore.js','captureTrimRuntimeProof.js','recoverTrimActive.js','prepareTrimCgroup.js'):
                 write_exclusive(release+'/'+name,members['server/'+name],0o644,paths)
             dest=os.open(release+'/bun',os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW|os.O_CLOEXEC,0o755)
             try:
