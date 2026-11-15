@@ -71,7 +71,7 @@ function uid(status: string) { const m = /^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/
 const groups = /^Groups:\s*(.*)$/m.exec(workerStatus)?.[1]?.trim().split(/\s+/) ?? [];
 if (uid(workerStatus) !== workerUid || uid(daemonStatus) !== 0 || uid(containerdStatus) !== 0 || !groups.includes(runtime.dockerGid)) throw new Error('运行时用户或授权组不一致');
 const workerExe = await realpath(request.workerExecutable), workerScript = await realpath(request.workerScript);
-if (workerExe !== request.workerExecutable || workerScript !== request.workerScript || await realpath(`/proc/${worker.pid}/exe`) !== workerExe || worker.args.length !== 2 || await realpath(worker.args[0]!) !== workerExe || await realpath(worker.args[1]!) !== workerScript) throw new Error('worker 程序身份不一致');
+if (workerExe !== request.workerExecutable || workerScript !== request.workerScript || await realpath(`/proc/${worker.pid}/exe`) !== workerExe || worker.args.length !== 3 || worker.args[2] !== '--require-startup-admission' || await realpath(worker.args[0]!) !== workerExe || await realpath(worker.args[1]!) !== workerScript) throw new Error('worker 程序身份不一致');
 const workerExecutableSha256 = sha(await bytes(workerExe)), workerScriptSha256 = sha(await bytes(workerScript));
 requireExpectedRuntimeHashes(request.expectedHashes, { workerExecutableSha256, workerScriptSha256, workerUnitSha256: worker.hash, workerSocketUnitSha256: workerSocketUnit.hash, daemonUnitSha256: daemon.hash, containerdUnitSha256: containerd.hash });
 const env = (await readFile(`/proc/${worker.pid}/environ`)).toString('utf8').split('\0');

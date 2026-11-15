@@ -23,3 +23,13 @@ test('旧进程、重启和错误 nonce 的证明不可复用', () => {
   assert.throws(() => validateStartupAdmission({ ...proof, nonce: 'bad' }, expected));
   assert.throws(() => validateStartupAdmission({ ...proof, extra: true }, expected));
 });
+
+test('受信部署缺少或篡改启动模式时拒绝，旧部署保持兼容', async () => {
+  const { startupAdmissionRequired } = await import('../trimStartupAdmission.ts');
+  assert.equal(startupAdmissionRequired([], undefined), false);
+  assert.equal(startupAdmissionRequired(['--require-startup-admission'], 'root-v1'), true);
+  assert.throws(() => startupAdmissionRequired(['--require-startup-admission'], undefined));
+  assert.throws(() => startupAdmissionRequired(['--require-startup-admission'], 'wrong'));
+  assert.throws(() => startupAdmissionRequired([], 'root-v1'));
+  assert.throws(() => startupAdmissionRequired(['--bad'], undefined));
+});

@@ -55,3 +55,10 @@ export async function readRootStartupAdmission(): Promise<string> {
     } finally { await file.close(); }
   }
 }
+
+/** The attested unit must opt in with both its fixed argv and environment. */
+export function startupAdmissionRequired(args: string[], mode: string | undefined): boolean {
+  if (args.length === 0 && mode === undefined) return false;
+  if (args.length === 1 && args[0] === '--require-startup-admission' && mode === 'root-v1') return true;
+  throw new Error('启动证明模式或服务参数无效');
+}

@@ -1,0 +1,26 @@
+# 经验证的部署流程将本文件安装为 toonflowTrimWorker.service，禁止额外 drop-in。
+[Unit]
+Description=Toonflow isolated trim worker with startup witness
+After=toonflowTrimDocker.service local-fs.target toonflowTrimWorker.socket
+Requires=toonflowTrimDocker.service toonflowTrimWorker.socket
+Wants=toonflowTrimWitness.service
+
+[Service]
+Type=exec
+User=toonflow-trim-worker
+Group=toonflow-trim-access
+SupplementaryGroups=toonflow-trim-docker
+EnvironmentFile=/etc/toonflow-trim/worker.env
+Environment=TOONFLOW_TRIM_STARTUP_ADMISSION=root-v1
+ExecStart=/opt/toonflow-trim/current/bun /opt/toonflow-trim/current/trimWorker.js --require-startup-admission
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/toonflow-trim/worker
+TimeoutStopSec=250s
+Restart=no
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

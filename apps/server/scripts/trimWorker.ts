@@ -8,7 +8,7 @@ import { writeDurableState } from "./trimWorkerState";
 import { acquireWorkerFence } from "./trimWorkerFence";
 import { trimNeedsFrameNormalization } from "./trimDuration";
 import { serveTrimSocket } from "./trimSocketServer";
-import { readRootStartupAdmission } from "./trimStartupAdmission";
+import { readRootStartupAdmission, startupAdmissionRequired } from "./trimStartupAdmission";
 
 const socketPath = process.env.TOONFLOW_TRIM_SOCKET;
 const token = process.env.TOONFLOW_TRIM_TOKEN;
@@ -57,8 +57,7 @@ const workerFence = await acquireWorkerFence(statePath);
 const workerFenceIdentity = await workerFence.stat();
 // 额外受信部署必须等 root 完成对本次进程的事前见证，才开始接收 socket 中排队的请求。
 const admissionMode = process.env.TOONFLOW_TRIM_STARTUP_ADMISSION;
-if (admissionMode !== undefined && admissionMode !== "root-v1") throw new Error("启动证明模式无效");
-const runtimeNonce = admissionMode === "root-v1" ? await readRootStartupAdmission() : undefined;
+const runtimeNonce = startupAdmissionRequired(process.argv.slice(2), admissionMode) ? await readRootStartupAdmission() : undefined;
 const lock = resolve(statePath, "active");
 const journal = resolve(lock, "lastJob.json");
 const seals = resolve(statePath, "sealed");

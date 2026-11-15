@@ -1,0 +1,12 @@
+[Unit]
+Description=Toonflow trim worker startup witness
+After=toonflowTrimWorker.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/opt/toonflow-trim/current/bun /opt/toonflow-trim/current/captureTrimRuntimeProof.js
+TimeoutStartSec=25s
+Restart=no
+KillMode=control-group
