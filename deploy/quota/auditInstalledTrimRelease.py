@@ -16,13 +16,13 @@ OUT = '/var/lib/toonflow-trim-release'
 SELF = BASE + '/auditInstalledTrimRelease.py'
 VERIFY = BASE + '/verifyTrimArtifact.py'
 UNIT_PATHS = {
-    'deploy/quota/toonflowTrimWorker.attested.service': '/etc/systemd/system/toonflowTrimWorker.service',
-    'deploy/quota/toonflowTrimWorker.socket': '/etc/systemd/system/toonflowTrimWorker.socket',
-    'deploy/quota/toonflowTrimWitness.service': '/etc/systemd/system/toonflowTrimWitness.service',
-    'deploy/quota/toonflowTrimDocker.service': '/etc/systemd/system/toonflowTrimDocker.service',
-    'deploy/quota/toonflowTrimContainerd.service': '/etc/systemd/system/toonflowTrimContainerd.service',
-    'deploy/quota/toonflowTrimStore.attested.service': '/etc/systemd/system/toonflowTrimStore.service',
-    'deploy/quota/toonflowTrimStore.socket': '/etc/systemd/system/toonflowTrimStore.socket',
+    'deploy/quota/toonflowTrimWorker.attested.service': '/usr/local/lib/systemd/system/toonflowTrimWorker.service',
+    'deploy/quota/toonflowTrimWorker.socket': '/usr/local/lib/systemd/system/toonflowTrimWorker.socket',
+    'deploy/quota/toonflowTrimWitness.service': '/usr/local/lib/systemd/system/toonflowTrimWitness.service',
+    'deploy/quota/toonflowTrimDocker.service': '/usr/local/lib/systemd/system/toonflowTrimDocker.service',
+    'deploy/quota/toonflowTrimContainerd.service': '/usr/local/lib/systemd/system/toonflowTrimContainerd.service',
+    'deploy/quota/toonflowTrimStore.attested.service': '/usr/local/lib/systemd/system/toonflowTrimStore.service',
+    'deploy/quota/toonflowTrimStore.socket': '/usr/local/lib/systemd/system/toonflowTrimStore.socket',
 }
 
 def read_root(path, limit, private=False):

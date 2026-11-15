@@ -26,7 +26,8 @@ RELEASE_ROOT = '/opt/toonflow-trim/releases'
 CURRENT = '/opt/toonflow-trim/current'
 SOFT_FREE = 3 * 1024**3
 MARGIN = 128 * 1024**2
-UNIT_DIR = '/etc/systemd/system'
+# Keep vendor definitions below /run/systemd/system so runtime masks take effect.
+UNIT_DIR = '/usr/local/lib/systemd/system'
 UNIT_NAMES = {'deploy/quota/toonflowTrimWorker.attested.service':'toonflowTrimWorker.service',
               'deploy/quota/toonflowTrimWorker.socket':'toonflowTrimWorker.socket',
               'deploy/quota/toonflowTrimWitness.service':'toonflowTrimWitness.service',
@@ -44,6 +45,20 @@ def root_dir(path, private=False):
         if current == path and private and st.st_mode & 0o077: raise ValueError('directory not private')
         if current == '/': break
         current = os.path.dirname(current)
+
+def ensure_vendor_unit_dir():
+    # The fixed parent is part of the installation contract; create only the
+    # two missing vendor directories and never replace an existing entry.
+    root_dir('/usr/local/lib')
+    for path in ('/usr/local/lib/systemd', UNIT_DIR):
+        try:
+            os.mkdir(path, 0o755)
+            sync_dir(os.path.dirname(path))
+        except FileExistsError:
+            pass
+        root_dir(path)
+        visible=os.stat(path); pid1=os.stat('/proc/1/root'+path)
+        if (visible.st_dev,visible.st_ino)!=(pid1.st_dev,pid1.st_ino):raise ValueError('PID1 unit directory differs')
 
 def root_open(path, private=False):
     root_dir(os.path.dirname(path))
@@ -102,6 +117,8 @@ def unit_paths_clear(names):
     if len(raw)>32768:raise ValueError('unit search paths too large')
     paths=raw.decode('utf8').splitlines()
     if not paths or any(not os.path.isabs(p) for p in paths):raise ValueError('unit search paths invalid')
+    if paths.count(UNIT_DIR)!=1 or paths.count('/run/systemd/system')!=1 or paths.index('/run/systemd/system')>=paths.index(UNIT_DIR):
+        raise ValueError('runtime mask priority unknown')
     seen=set();scanned=0
     for root in paths:
         if not os.path.exists(root):continue
@@ -151,7 +168,7 @@ def main():
     audit=types.ModuleType('pinned_trim_auditor');exec(compile(loaded[AUDIT],AUDIT,'exec'),audit.__dict__)
     pin=json.loads(read_small(PIN,16384,True));artifact=pin.get('artifact_id') if isinstance(pin,dict) else None;commit=pin.get('commit') if isinstance(pin,dict) else None
     if type(artifact) is not int or artifact<1 or not isinstance(commit,str) or len(commit)!=40 or any(c not in '0123456789abcdef' for c in commit): raise ValueError('release pin invalid')
-    root_dir(OUT,True);root_dir(RELEASE_ROOT);root_dir(UNIT_DIR)
+    root_dir(OUT,True);root_dir(RELEASE_ROOT);ensure_vendor_unit_dir()
     lockfd=os.open(OUT+'/release.lock',os.O_RDWR|os.O_NOFOLLOW|os.O_CLOEXEC)
     try:
         lock=os.fstat(lockfd);entry=os.lstat(OUT+'/release.lock')

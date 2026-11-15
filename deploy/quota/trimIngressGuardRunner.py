@@ -609,6 +609,7 @@ def setupFreshApp(plan,unitHash,secret):
 
 def bootstrapFresh(boot,gid,manifest):
  # Caller holds ingress EX; all side effects are preceded by a durable attempt.
+ raise ValueError('新库自举的 PID1 崩溃收敛尚未启用')
  releaseLock=holdReleaseLock();daemon='/run/toonflow-trim-docker/docker.sock';docker=('/usr/bin/docker','--host=unix://'+daemon)
  try:
   plan=checkFreshBootstrap(boot,gid,manifest,releaseLock);pinBytes=rootfile('/etc/toonflow-trim/release-pin.json');pin=strictJson(pinBytes);planBytes=rootfile('/etc/toonflow-trim/freshBootstrap.json');pendingBytes=rootfile(ROOT+'/pending')
