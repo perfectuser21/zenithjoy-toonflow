@@ -5,6 +5,7 @@ import { lstat, open, readFile, readdir, readlink, realpath, stat } from 'node:f
 import { basename, dirname, resolve } from 'node:path';
 import { dlopen, FFIType, read } from 'bun:ffi';
 import { z } from 'zod';
+import { requireCapturedRuntimeProof, trustedAdditionalRuntime, trustedWorkerUid, runtimeProofPath as proofPathForRuntime, trustedAppManagement, type AdditionalRuntime } from './recoveryDeploymentPolicy';
 
 const manifestPath = '/etc/toonflow-trim/maintenanceWindow.json';
 const uint = z.string().regex(/^(0|[1-9][0-9]*)$/);
@@ -13,9 +14,17 @@ const schema = z.strictObject({
   version: z.literal(1), dataPath: z.string().startsWith('/'), dataDev: uint, dataIno: uint,
   backingPath: z.string().startsWith('/'), backingDev: uint, backingIno: uint,
   workerUid: uint, workerFenceGid: uint, workerFenceDev: uint, workerFenceIno: uint,
-  appFenceDev: uint, appFenceIno: uint, appFenceGid: uint, appUnit: unit, quotaUnit: unit, dataMountUnit: unit,
+  appFenceDev: uint, appFenceIno: uint, appFenceGid: uint, appUnit: unit.optional(), appManagement: z.enum(['unit', 'manual']).optional(), manualAppId: z.string().regex(/^[a-f0-9]{64}$/).optional(), manualAppImage: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(), quotaUnit: unit, dataMountUnit: unit,
   // 此列表是受信部署登记的完整已知入口，而不是自动发现的全部入口。
   additionalUnits: z.array(unit).max(100),
+  additionalRuntime: z.strictObject({
+    workerUnit: unit, workerSocketUnit: unit, daemonUnit: unit, containerdUnit: unit, dockerGid: uint,
+    workerSocket: z.string(), workerState: z.string(), workerVisibleState: z.string(), dockerSocket: z.string(), containerdSocket: z.string(), daemonRoot: z.string(), daemonState: z.string(),
+    containerdRoot: z.string(), containerdState: z.string(), knownContainerIds: z.array(z.string()),
+    proof: z.strictObject({ nonce: z.string(), capturedAt: uint, workerExecutable: z.string(), workerScript: z.string(), workerExecutableSha256: z.string(), workerScriptSha256: z.string(),
+      workerUnitSha256: z.string(), workerSocketUnitSha256: z.string(), daemonUnitSha256: z.string(), containerdUnitSha256: z.string(), bootId: z.string(), workerPid: uint, workerStart: uint, daemonPid: uint, daemonStart: uint, containerdPid: uint, containerdStart: uint,
+      workerStateDev: uint, workerStateIno: uint, workerLockDev: uint, workerLockIno: uint, daemonRootDev: uint, daemonRootIno: uint, containerdRootDev: uint, containerdRootIno: uint, workerSocketDev: uint, workerSocketIno: uint, daemonStateDev: uint, daemonStateIno: uint, containerdStateDev: uint, containerdStateIno: uint, dockerSocketDev: uint, dockerSocketIno: uint, containerdSocketDev: uint, containerdSocketIno: uint }),
+  }).optional(),
 });
 const fixedUnits = ['toonflowTrimWorker.socket', 'toonflowTrimWorker.service', 'toonflowTrimDocker.service', 'toonflowTrimContainerd.service'];
 async function trustedFile(path: string) {
@@ -34,13 +43,13 @@ async function trustedFile(path: string) {
   } finally { await fd.close(); }
 }
 async function checkUnit(name: string) {
-  const child = Bun.spawn(['/usr/bin/systemctl', 'show', name, '--property=LoadState,ActiveState,UnitFileState,MainPID'], { stdin: 'ignore', stdout: 'pipe', stderr: 'ignore', env: { PATH: '/usr/bin:/bin', HOME: '/root' } });
+  const child = Bun.spawn(['/usr/bin/systemctl', 'show', name, '--property=LoadState,ActiveState,UnitFileState,MainPID,Job'], { stdin: 'ignore', stdout: 'pipe', stderr: 'ignore', env: { PATH: '/usr/bin:/bin', HOME: '/root' } });
   const timeout = setTimeout(() => child.kill(), 10000);
   try {
     const [out, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
     if (code || out.length > 16384) throw Error('维护入口状态不可核验');
     const fields = Object.fromEntries(out.trim().split('\n').map(line => { const at = line.indexOf('='); return [line.slice(0, at), line.slice(at + 1)]; }));
-    if (fields.LoadState !== 'masked' || fields.ActiveState !== 'inactive' || !['masked', 'masked-runtime'].includes(fields.UnitFileState) || (name.endsWith('.service') && fields.MainPID !== '0')) throw Error(`维护入口未停用: ${name}`);
+    if (fields.LoadState !== 'masked' || fields.ActiveState !== 'inactive' || fields.Job || !['masked', 'masked-runtime'].includes(fields.UnitFileState) || (name.endsWith('.service') && fields.MainPID !== '0')) throw Error(`维护入口未停用: ${name}`);
   } finally { clearTimeout(timeout); }
 }
 function decodeField(s: string) { return s.replace(/\\([0-7]{3})/g, (_, v: string) => String.fromCharCode(parseInt(v, 8))); }
@@ -103,9 +112,21 @@ async function scan(device: string, dataPath: string, backingDev: bigint, backin
   }
 }
 
-export async function withTrustedTrimMaintenanceWindow<T>(dataPath: string, action: (verifyWindow: () => Promise<void>) => Promise<T>): Promise<T> {
+export async function withTrustedTrimMaintenanceWindow<T>(dataPath: string, action: (verifyWindow: () => Promise<void>, identity: { workerUid: number; additionalRuntime?: AdditionalRuntime; appManagement: { mode: 'unit'; unit: string } | { mode: 'manual'; id: string; image: string } }) => Promise<T>): Promise<T> {
   if (process.platform !== 'linux' || process.getuid?.() !== 0) throw Error('维护核验需要 Linux root');
   const raw = await trustedFile(manifestPath), config = schema.parse(JSON.parse(raw));
+  const workerUid = trustedWorkerUid(config.workerUid);
+  const additionalRuntime = trustedAdditionalRuntime(config.additionalRuntime, [...fixedUnits, ...config.additionalUnits]);
+  const registeredApp = trustedAppManagement(config.appManagement, config.appUnit);
+  if (registeredApp.mode === 'manual' && (!additionalRuntime || !config.manualAppId || !config.manualAppImage)) throw Error('手动应用缺少完整运行时及容器身份');
+  if (registeredApp.mode === 'unit' && (config.manualAppId || config.manualAppImage)) throw Error('应用管理模式混用');
+  const appManagement = registeredApp.mode === 'manual' ? { mode: 'manual' as const, id: config.manualAppId!, image: config.manualAppImage! } : registeredApp;
+  const runtimeProofPath = additionalRuntime ? proofPathForRuntime(additionalRuntime) : '';
+  const runtimeProofRaw = additionalRuntime ? await trustedFile(runtimeProofPath) : undefined;
+  if (additionalRuntime) {
+    requireCapturedRuntimeProof(JSON.parse(runtimeProofRaw!), config.workerUid, additionalRuntime);
+    if (config.workerFenceDev !== additionalRuntime.proof.workerLockDev || config.workerFenceIno !== additionalRuntime.proof.workerLockIno) throw Error('worker 锁与事前预检不一致');
+  }
   if (resolve(dataPath) !== dataPath || config.dataPath !== dataPath || await realpath(dataPath) !== dataPath || config.workerUid === '0' || config.appFenceGid === '0') throw Error('维护卷身份不符');
   const data = await lstat(dataPath, { bigint: true });
   if (!data.isDirectory() || data.isSymbolicLink() || data.dev.toString() !== config.dataDev || data.ino.toString() !== config.dataIno) throw Error('维护卷身份变化');
@@ -177,8 +198,8 @@ export async function withTrustedTrimMaintenanceWindow<T>(dataPath: string, acti
   try { const [out, code] = await Promise.all([new Response(escape.stdout).text(), escape.exited]); if (code || out.length > 4096) throw Error('数据挂载单元不可核验'); mountName = out.trim(); }
   finally { clearTimeout(escapeTimeout); }
   if (!config.dataMountUnit.endsWith('.mount') || config.dataMountUnit !== mountName) throw Error('数据挂载单元与目标路径不符');
-  const names = [...fixedUnits, config.appUnit, config.quotaUnit, config.dataMountUnit, ...config.additionalUnits];
-  if (new Set(names).size !== names.length || !config.appUnit.endsWith('.service') || !config.quotaUnit.endsWith('.service')) throw Error('维护入口清单无效');
+  const names = [...fixedUnits, ...(registeredApp.mode === 'unit' ? [registeredApp.unit] : []), config.quotaUnit, config.dataMountUnit, ...config.additionalUnits];
+  if (new Set(names).size !== names.length || !config.quotaUnit.endsWith('.service')) throw Error('维护入口清单无效');
   const workerPath = '/var/lib/toonflow-trim/worker/.worker.lock', appDir = resolve(dataPath, 'projectQuota'), appPath = resolve(appDir, '.trimApp.lock');
   const workerDir = dirname(workerPath), workerDirInfo = await lstat(workerDir, { bigint: true }), appDirInfo = await lstat(appDir, { bigint: true });
   if (!workerDirInfo.isDirectory() || workerDirInfo.isSymbolicLink() || workerDirInfo.uid.toString() !== config.workerUid || (workerDirInfo.mode & 0o077n) !== 0n || await realpath(workerDir) !== workerDir || !appDirInfo.isDirectory() || appDirInfo.isSymbolicLink() || appDirInfo.uid !== 0n || (appDirInfo.mode & 0o022n) !== 0n || appDirInfo.dev !== data.dev || await realpath(appDir) !== appDir) throw Error('维护锁目录身份不符');
@@ -192,7 +213,7 @@ export async function withTrustedTrimMaintenanceWindow<T>(dataPath: string, acti
     if (current.dev !== before.dev || current.ino !== before.ino || current.uid !== before.uid || current.gid !== before.gid || current.nlink !== 1n || (current.mode & 0o7777n) !== mode || libc.symbols.fcntl(fd.fd, 2, 1) !== 0 || libc.symbols.flock(fd.fd, 6) !== 0) throw Error('维护锁不可用');
   }
   async function check() {
-    if (await trustedFile(manifestPath) !== raw) throw Error('维护清单变化');
+    if (await trustedFile(manifestPath) !== raw || runtimeProofRaw !== undefined && await trustedFile(runtimeProofPath) !== runtimeProofRaw) throw Error('维护清单或预检证明变化');
     const now = await lstat(dataPath, { bigint: true });
     if (now.dev !== data.dev || now.ino !== data.ino) throw Error('维护卷已变化');
     await Promise.all(names.map(checkUnit));
@@ -231,7 +252,7 @@ export async function withTrustedTrimMaintenanceWindow<T>(dataPath: string, acti
     await lock(appPath, '0', config.appFenceGid, 0o640n, config.appFenceDev, config.appFenceIno);
     await check();
     // 调用者仍必须在持锁期间执行 daemon、账本与持续屏障校验。
-    const result = await action(check);
+    const result = await action(check, { workerUid, additionalRuntime, appManagement });
     await check();
     return result;
   } catch (error) {

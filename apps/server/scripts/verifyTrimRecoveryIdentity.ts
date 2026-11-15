@@ -4,14 +4,17 @@ import { lstat, open, readFile, realpath } from "node:fs/promises";
 import { constants } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import { z } from "zod";
+import { inspectRecoveryDaemons, recoveryDockerEndpoint, trustedAppManagement, requireManualEndpoint } from "./recoveryDeploymentPolicy";
 
 const bindingPath = "/etc/toonflow-trim/recoveryBinding.json";
 const num = z.string().regex(/^(0|[1-9][0-9]*)$/);
 const bindingSchema = z.strictObject({
   version: z.literal(1), dataPath: z.string().startsWith("/"), dataDev: num, dataIno: num, appUid: num,
   sqlitePath: z.string().startsWith("/"), sqliteDev: num, sqliteIno: num,
+  appDocker: z.enum(["host", "maintenance"]).optional(),
+  maintenanceRetainedContainers: z.array(z.strictObject({ id: z.string().regex(/^[a-f0-9]{64}$/), image: z.string().regex(/^sha256:[a-f0-9]{64}$/) })).max(31).optional(),
   sourceSha256: z.string().regex(/^[a-f0-9]{64}$/), appContainerId: z.string().regex(/^[a-f0-9]{64}$/),
-  appImageId: z.string().regex(/^sha256:[a-f0-9]{64}$/), appUnit: z.string().regex(/^[A-Za-z0-9_.@-]+\.service$/),
+  appImageId: z.string().regex(/^sha256:[a-f0-9]{64}$/), appUnit: z.string().regex(/^[A-Za-z0-9_.@-]+\.service$/).optional(), appManagement: z.enum(['unit', 'manual']).optional(),
 });
 async function trustedRootFile(path: string) {
   for (let parent = dirname(path);;) {
@@ -34,7 +37,7 @@ async function run(bin: string, args: string[]) {
   try { const [out, code] = await Promise.all([new Response(child.stdout).text(), child.exited]); if (code !== 0 || out.length > 1000000) throw new Error("部署身份查询失败"); return out.trim(); }
   finally { clearTimeout(timeout); }
 }
-const docker = (args: string[]) => run("/usr/bin/docker", ["--host=unix:///run/docker.sock", ...args]);
+const docker = (socket: string, args: string[]) => run("/usr/bin/docker", [`--host=unix://${socket}`, ...args]);
 function overlaps(a: string, b: string) { return a === "/" || b === "/" || a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`); }
 type Mount = { id: string; device: string; root: string; point: string };
 function mountField(value: string) { return value.replace(/\\([0-7]{3})/g, (_, code: string) => String.fromCharCode(parseInt(code, 8))); }
@@ -66,8 +69,8 @@ async function backing(path: string, records: Map<string, Mount>) {
     return { canonical, device: mount.device, root: resolve(mount.root, relative) };
   } finally { await fd.close(); }
 }
-async function mounts(id: string) {
-  const out = await docker(["inspect", "--format", "{{json .Id}}\n{{json .Image}}\n{{json .State.Running}}\n{{json .HostConfig.RestartPolicy.Name}}\n{{json .Mounts}}\n{{json .Config.User}}", id]);
+async function mounts(socket: string, id: string) {
+  const out = await docker(socket, ["inspect", "--format", "{{json .Id}}\n{{json .Image}}\n{{json .State.Running}}\n{{json .HostConfig.RestartPolicy.Name}}\n{{json .Mounts}}\n{{json .Config.User}}", id]);
   const lines = out.split("\n"); if (lines.length !== 6) throw new Error("容器信息不完整");
   const [actualId, image, running, restart, mounted, user] = lines.map(line => JSON.parse(line));
   if (!/^[a-f0-9]{64}$/.test(actualId) || !/^sha256:[a-f0-9]{64}$/.test(image) || typeof running !== "boolean" || typeof restart !== "string" || !Array.isArray(mounted) || typeof user !== "string") throw new Error("容器身份异常");
@@ -76,6 +79,8 @@ async function mounts(id: string) {
 export async function verifyTrimRecoveryIdentity(data: string) {
   if (process.platform !== "linux" || process.getuid?.() !== 0) throw new Error("需要 root 核验部署身份");
   const binding = bindingSchema.parse(JSON.parse(await trustedRootFile(bindingPath)));
+  const appSocket = recoveryDockerEndpoint(binding.appDocker);
+  if (binding.appDocker !== "maintenance" && binding.maintenanceRetainedContainers?.length) throw new Error("宿主应用不能登记维护容器");
   if (resolve(data) !== data || binding.dataPath !== data || await realpath(data) !== data) throw new Error("数据目录与部署不一致");
   const dir = await lstat(data, { bigint: true });
   if (binding.appUid === "0" || !dir.isDirectory() || dir.isSymbolicLink() || dir.uid.toString() !== binding.appUid || dir.dev.toString() !== binding.dataDev || dir.ino.toString() !== binding.dataIno) throw new Error("数据卷身份变化");
@@ -92,23 +97,31 @@ export async function verifyTrimRecoveryIdentity(data: string) {
   if (binding.sqlitePath !== dbPath || await realpath(dbPath) !== dbPath) throw new Error("SQLite 路径与部署不一致");
   const db = await lstat(dbPath, { bigint: true });
   if (!db.isFile() || db.isSymbolicLink() || db.uid.toString() !== binding.appUid || (db.mode & 0o022n) !== 0n || db.nlink !== 1n || db.dev.toString() !== binding.sqliteDev || db.ino.toString() !== binding.sqliteIno) throw new Error("SQLite 文件身份变化");
-  const service = await run("/usr/bin/systemctl", ["show", binding.appUnit, "--property=ActiveState,UnitFileState,MainPID"]);
-  const values = Object.fromEntries(service.split("\n").map(line => { const i = line.indexOf("="); return [line.slice(0, i), line.slice(i + 1)]; }));
-  if (values.ActiveState !== "inactive" || values.MainPID !== "0" || !["masked", "masked-runtime"].includes(values.UnitFileState)) throw new Error("应用未停止并屏蔽");
+  const registeredApp = trustedAppManagement(binding.appManagement, binding.appUnit);
+  requireManualEndpoint(registeredApp.mode, binding.appDocker);
+  if (registeredApp.mode === "unit") {
+    const service = await run("/usr/bin/systemctl", ["show", registeredApp.unit, "--property=ActiveState,UnitFileState,MainPID"]);
+    const values = Object.fromEntries(service.split("\n").map(line => { const i = line.indexOf("="); return [line.slice(0, i), line.slice(i + 1)]; }));
+    if (values.ActiveState !== "inactive" || values.MainPID !== "0" || !["masked", "masked-runtime"].includes(values.UnitFileState)) throw new Error("应用未停止并屏蔽");
+  }
   const mountSnapshot = await readFile("/proc/self/mountinfo", "utf8"), mountRecords = parseMountInfo(mountSnapshot);
   const targetBacking = await backing(data, mountRecords);
   // 目标目录内可包含额外挂载点；它们也受保护，不能只比较最外层设备。
   const nested = [...mountRecords.values()].filter(mount => mount.point !== data && mount.point.startsWith(`${data}/`));
   if (nested.some(mount => !mount.root.startsWith("/"))) throw new Error("目标内的挂载根不可核验");
   const protectedMounts = [{ device: targetBacking.device, root: targetBacking.root }, ...nested.map(mount => ({ device: mount.device, root: mount.root }))];
-  const target = await mounts(binding.appContainerId);
+  const target = await mounts(appSocket, binding.appContainerId);
   if (target.actualId !== binding.appContainerId || target.image !== binding.appImageId || target.running || target.restart !== "no" || target.user.split(":")[0] !== binding.appUid
     || !target.mounted.some((mount: any) => mount.Type === "bind" && mount.Source === data && mount.Destination === "/app/data")) throw new Error("应用容器或数据挂载与部署不一致");
   // 即使为停止状态，自动重启的其他挂载者也不能通过；每次扫描全部容器。
-  const ids = (await docker(["ps", "-aq", "--no-trunc"])).split("\n").filter(Boolean);
-  if (ids.some(id => !/^[a-f0-9]{64}$/.test(id)) || ids.length > 10000) throw new Error("容器列表异常");
-  for (const id of ids) {
-    const row = id === target.actualId ? target : await mounts(id);
+  const records = await inspectRecoveryDaemons(binding.appDocker,
+    async socket => (await docker(socket, ["ps", "-aq", "--no-trunc"])).split("\n").filter(Boolean),
+    async (socket, id) => {
+      const row = socket === appSocket && id === target.actualId ? target : await mounts(socket, id);
+      if (row.actualId !== id) throw new Error("容器身份不可核验");
+      return row;
+    });
+  for (const { row } of records) {
     if (!row.running && row.restart === "no") continue;
     for (const mount of row.mounted) {
       if (mount.Type !== "bind" && mount.Type !== "volume") continue;
@@ -129,5 +142,7 @@ export async function verifyTrimRecoveryIdentity(data: string) {
     if (!uid) throw new Error("应用进程身份不可核验");
     if (uid.slice(1).some(value => value === binding.appUid)) throw new Error("应用 UID 仍有进程，不能离线恢复");
   }
-  return { dataPath: data, sqlitePath: dbPath, appContainerId: target.actualId };
+  return { dataPath: data, sqlitePath: dbPath, appContainerId: target.actualId, appManagement: registeredApp.mode === "manual" ? { mode: "manual" as const, id: target.actualId, image: target.image } : registeredApp,
+    maintenanceAllowed: binding.appDocker === "maintenance"
+      ? [{ id: binding.appContainerId, image: binding.appImageId }, ...(binding.maintenanceRetainedContainers ?? [])] : [] };
 }

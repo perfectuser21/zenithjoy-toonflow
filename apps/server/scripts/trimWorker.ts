@@ -8,6 +8,7 @@ import { writeDurableState } from "./trimWorkerState";
 import { acquireWorkerFence } from "./trimWorkerFence";
 import { trimNeedsFrameNormalization } from "./trimDuration";
 import { serveTrimSocket } from "./trimSocketServer";
+import { readRootStartupAdmission } from "./trimStartupAdmission";
 
 const socketPath = process.env.TOONFLOW_TRIM_SOCKET;
 const token = process.env.TOONFLOW_TRIM_TOKEN;
@@ -54,6 +55,10 @@ for (let directory = dirname(resolve(statePath));;) {
 // 持有至进程退出；允许后续恢复进程通过同一把锁证明旧工作进程不再执行。
 const workerFence = await acquireWorkerFence(statePath);
 const workerFenceIdentity = await workerFence.stat();
+// 额外受信部署必须等 root 完成对本次进程的事前见证，才开始接收 socket 中排队的请求。
+const admissionMode = process.env.TOONFLOW_TRIM_STARTUP_ADMISSION;
+if (admissionMode !== undefined && admissionMode !== "root-v1") throw new Error("启动证明模式无效");
+const runtimeNonce = admissionMode === "root-v1" ? await readRootStartupAdmission() : undefined;
 const lock = resolve(statePath, "active");
 const journal = resolve(lock, "lastJob.json");
 const seals = resolve(statePath, "sealed");
@@ -163,7 +168,7 @@ await serveTrimSocket(socketPath, "trimWorker", maxInput, async request => {
     });
     // 创建阶段仍须等结果；提前订阅避免断连先发生时产生未处理拒绝。
     void aborted.catch(() => {});
-    await writeDurableState(journal, { name, operationId, ownerId, workspaceHash, image, managerPid: process.pid, phase: "creating", protocolVersion: 2, startedAt: Date.now() });
+    await writeDurableState(journal, { name, operationId, ownerId, workspaceHash, image, managerPid: process.pid, ...(runtimeNonce ? { runtimeNonce } : {}), phase: "creating", protocolVersion: 2, startedAt: Date.now() });
     safeToUnlock = false;
     const creation = Bun.spawn([docker, "create", "--init", "--rm", "--pull=never", "--name", name, "--label", `com.zenithjoy.trim.operation=${operationId}`, "--label", "com.zenithjoy.trim.protocol=2", "--network=none", "--cgroup-parent=/toonflow-trim-jobs", "--read-only", "--user=65534:65534", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=32", "--memory=1g", "--cpus=1", "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=768m,mode=1777", "-i", "--env", `START=${start}`, "--env", `END=${end}`, "--env", `DURATION=${end-start}`, "--env", `NORMALIZE_FPS=${trimNeedsFrameNormalization(start, end) ? 1 : 0}`, image, "timeout", "-k", "5s", "180s", "/bin/sh", "-c", script], { stdin: "ignore", stdout: "pipe", stderr: "ignore", env: dockerEnv });
     child = creation;
@@ -172,13 +177,13 @@ await serveTrimSocket(socketPath, "trimWorker", maxInput, async request => {
     const created = createdText.trim();
     if (creationExit !== 0 || !/^[a-f0-9]{64}$/.test(created)) throw new Error("容器创建结果未知");
     containerId = created;
-    await writeDurableState(journal, { name, operationId, ownerId, workspaceHash, image, containerId, managerPid: process.pid, phase: "created", protocolVersion: 2, startedAt: Date.now() });
+    await writeDurableState(journal, { name, operationId, ownerId, workspaceHash, image, containerId, managerPid: process.pid, ...(runtimeNonce ? { runtimeNonce } : {}), phase: "created", protocolVersion: 2, startedAt: Date.now() });
     deadline.throwIfAborted();
     // 启动前先持久化启动意图；恢复代码不得把启动结果未知当作未启动。
-    await writeDurableState(journal, { name, operationId, ownerId, workspaceHash, image, containerId, managerPid: process.pid, phase: "starting", protocolVersion: 2, startedAt: Date.now() });
+    await writeDurableState(journal, { name, operationId, ownerId, workspaceHash, image, containerId, managerPid: process.pid, ...(runtimeNonce ? { runtimeNonce } : {}), phase: "starting", protocolVersion: 2, startedAt: Date.now() });
     const running = Bun.spawn([docker, "start", "--attach", "--interactive", containerId], { stdin: "pipe", stdout: "pipe", stderr: "ignore", env: dockerEnv });
     child = running;
-    await writeDurableState(journal, { name, operationId, ownerId, workspaceHash, image, containerId, managerPid: process.pid, childPid: running.pid, phase: "started", protocolVersion: 2, startedAt: Date.now() });
+    await writeDurableState(journal, { name, operationId, ownerId, workspaceHash, image, containerId, managerPid: process.pid, ...(runtimeNonce ? { runtimeNonce } : {}), childPid: running.pid, phase: "started", protocolVersion: 2, startedAt: Date.now() });
     const input = (async () => { const reader = request.body!.getReader(); let total = 0; try { while (true) { const { value, done } = await reader.read(); if (done) break; total += value.byteLength; if (total > length) throw new Error("输入长度无效"); running.stdin.write(value); await running.stdin.flush(); } if (total !== length) throw new Error("输入长度无效"); running.stdin.end(); } finally { reader.releaseLock(); } })();
     const output = (async () => { const reader = running.stdout.getReader(); const chunks: Uint8Array[] = []; let total = 0; try { while (true) { const { value, done } = await reader.read(); if (done) break; total += value.byteLength; if (total > maxOutput + 256) throw new Error("输出过大"); chunks.push(value); } return Buffer.concat(chunks); } finally { reader.releaseLock(); } })();
     deadline.throwIfAborted();
