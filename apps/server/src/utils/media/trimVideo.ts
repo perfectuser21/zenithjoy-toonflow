@@ -95,7 +95,8 @@ async function trimVideoFromSource(cwd: string, sourcePath: string, start: numbe
     if (!lease) invalid("裁剪服务繁忙或空间不足", 429);
     const controller = new AbortController(), active = AbortSignal.any([signal, controller.signal]);
     const timer = setInterval(() => { void renewBackgroundBudget(database, lease).then(ok => { if (!ok) controller.abort(); }).catch(() => controller.abort()); }, 30000);
-    let touched = false, finalized = false, helperSettled = false;
+    // 在交给 worker 前尚无远程作业；交付后仅在确认终态时释放预留。
+    let touched = false, finalized = false, helperSettled = true;
     try {
       // 先短暂检查容量，不在耗时转码期间持有跨用户工作区锁。
       await withWorkspaceQuota(expected, maxOutput, false, async () => {});
@@ -106,6 +107,7 @@ async function trimVideoFromSource(cwd: string, sourcePath: string, start: numbe
         const sourceHash = createHash("sha256");
         let upload: Promise<void> | undefined;
         const response = await new Promise<import("node:http").IncomingMessage>((resolveResponse, reject) => {
+          helperSettled = false;
           const req = httpRequest({ socketPath: socket, path: "/trim", method: "POST", headers: { authorization: `Bearer ${token}`, "content-length": String(info.size), "x-trim-start": String(start), "x-trim-end": String(end), "x-trim-operation": nodeId, "x-trim-owner": ownerId, "x-trim-workspace": createHash("sha256").update(cwd).digest("hex") }, signal: AbortSignal.any([active, AbortSignal.timeout(240000)]) }, resolveResponse);
           req.once("error", reject);
           const input = sourceFile.createReadStream({ autoClose: false, start: 0 });
