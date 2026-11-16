@@ -1205,12 +1205,18 @@ function refreshInstalled(event: WindowEventMap["toonflow:plugin-installed"]) {
 }
 
 const refreshNodeConfig = () => { void loadRemoteNodes(); };
+function warnUnsavedCanvas(event: BeforeUnloadEvent) {
+  if (!canvasDirty.value && !canvasSaveError.value) return;
+  event.preventDefault();
+  event.returnValue = "";
+}
 
 onMounted(() => {
   // 在捕获阶段同步修饰键，避免节点编辑器截断 keydown/keyup 后缩放状态丢失或卡住。
   window.addEventListener("keydown", updateCanvasKeys, true);
   window.addEventListener("keyup", updateCanvasKeys, true);
   window.addEventListener("blur", resetCanvasKeys);
+  window.addEventListener("beforeunload", warnUnsavedCanvas);
   window.addEventListener("toonflow:plugin-installed", refreshInstalled);
   window.addEventListener("toonflow:node-config-updated", refreshNodeConfig);
   document.addEventListener("paste", pasteNode);
@@ -1223,6 +1229,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("keydown", updateCanvasKeys, true);
   window.removeEventListener("keyup", updateCanvasKeys, true);
   window.removeEventListener("blur", resetCanvasKeys);
+  window.removeEventListener("beforeunload", warnUnsavedCanvas);
   window.removeEventListener("toonflow:plugin-installed", refreshInstalled);
   window.removeEventListener("toonflow:node-config-updated", refreshNodeConfig);
   document.removeEventListener("paste", pasteNode);

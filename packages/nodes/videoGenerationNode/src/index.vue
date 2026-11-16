@@ -90,7 +90,7 @@
             :disabled="generating || deleting || !selectedModel" />
           <div class="generationActions">
             <mediaPrice v-if="generationInput" :input="{ ...generationInput, mediaType: 'video' }" :supported="selectedModel?.supportsPrice === true" />
-            <el-button v-if="pendingRecovery" class="sendButton" :icon="IconPlayerStop" :loading="cancelling" :disabled="deleting || uploading" title="放弃任务" aria-label="放弃任务" @click="generationState.cancel().catch(error => showNodeError(error, '停止生成失败'))" />
+            <el-button v-if="pendingRecovery" class="abandonButton" :icon="IconPlayerStop" :loading="cancelling" :disabled="deleting || uploading" title="放弃任务" aria-label="放弃任务" @click="generationState.cancel().catch(error => showNodeError(error, '停止生成失败'))">放弃任务</el-button>
             <el-button
               class="sendButton"
               :icon="generating ? IconPlayerStop : IconArrowUp"
