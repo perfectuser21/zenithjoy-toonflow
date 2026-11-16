@@ -2,19 +2,23 @@ name: Server build
 on:
   pull_request:
     paths:
-      - "apps/server/**"
+      - "apps/**"
       - "packages/**"
+      - "patches/**"
+      - "package.json"
       - "bun.lock"
       - "Dockerfile"
       - "deploy/quota/**"
       - ".github/workflows/serverBuild.yml"
       - ".github/workflows/candidateImage.yml"
+      - ".github/workflows/canvasDelivery.yml"
+      - "deploy/delivery/**"
 permissions:
   contents: read
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
