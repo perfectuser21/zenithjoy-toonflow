@@ -452,7 +452,7 @@ async function switchCanvas(canvasId: string, signal?: AbortSignal) {
     if (props.activateCanvas) await props.activateCanvas(canvasId, signal);
     else await applyCanvas(canvasId, directory, signal);
     checkCanvasDirectory(directory, signal);
-    rememberCanvas(directory, canvasId);
+    if (!props.activateCanvas) rememberCanvas(directory, canvasId);
   } finally {
     if (props.directory === directory) busy.value = false;
   }
@@ -588,7 +588,7 @@ async function addCanvas(name?: string, signal?: AbortSignal): Promise<string> {
     canvases.value = [...canvases.value, canvas];
     signal?.throwIfAborted();
     await applyCanvas(canvas.id, directory, signal);
-    rememberCanvas(directory, canvas.id);
+    if (!props.activateCanvas) rememberCanvas(directory, canvas.id);
     canvasListVisible.value = false;
     return canvas.id;
   } finally {
