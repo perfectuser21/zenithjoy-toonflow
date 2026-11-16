@@ -5,6 +5,8 @@
         <el-input v-model="projectNameDraft" class="workspaceNameInput" :style="{ '--workspaceName': JSON.stringify(projectNameDraft || ' ') }" size="small" :title="directory" :disabled="!workspaceStore.project" aria-label="项目名称"
           @keydown.stop @keydown.enter="saveProjectName" @keydown.esc.prevent="projectNameDraft = workspaceName" @blur="saveProjectName" />
         <el-divider direction="vertical" />
+        <el-button text size="small" :disabled="!activeCanvasId || busy || savingCanvas" :loading="savingCanvas" @click.stop="saveCurrentCanvas">保存画布</el-button>
+        <el-divider direction="vertical" />
         <el-popover v-model:visible="canvasListVisible" trigger="click" placement="bottom-start" :width="320" :showArrow="false" :disabled="!directory">
           <template #reference>
             <el-button class="canvasTrigger" text :loading="busy" :disabled="busy || !directory" aria-label="切换画布" :aria-expanded="canvasListVisible">
@@ -74,7 +76,7 @@
 import axios from "axios";
 import { locale, translate } from "@toonflow/i18n/vue";
 import { computed, inject, nextTick, onBeforeUnmount, ref, shallowRef, watch, type ShallowRef } from "vue";
-import { Panel, useVueFlow, type FlowExportObject } from "@vue-flow/core";
+import { getNodesInside, Panel, useVueFlow, type FlowExportObject } from "@vue-flow/core";
 import { ElMessage, ElMessageBox, type DropdownInstance, type FilterNodeMethodFunction, type InputInstance, type LoadFunction, type TreeInstance } from "element-plus";
 import { IconVector, IconCheck, IconChevronDown, IconChevronUp, IconChevronRight, IconDots, IconFolder, IconFolderOpen, IconFolderPlus, IconPlus, IconSearch } from "@tabler/icons-vue";
 import { useWorkspaceStore } from "@/stores/workspace";
@@ -114,8 +116,16 @@ watch(canvases, () => {
   if (boundCanvas.value) activeCanvasId.value = canvases.value.includes(boundCanvas.value) ? boundCanvas.value.id : "";
 }, { flush: "sync" });
 const canvasListVisible = ref(false);
-const activeCanvasName = computed(() => canvases.value.find(canvas => canvas.id === activeCanvasId.value)?.name || translate("选择画布"));
+const activeCanvasName = computed(() => canvases.value.find(canvas => canvas.id === activeCanvasId.value)?.id.replace(/\.json$/i, "") || translate("选择画布"));
 const busy = ref(false);
+const savingCanvas = ref(false);
+async function saveCurrentCanvas() {
+  if (!activeCanvasId.value || busy.value || savingCanvas.value) return;
+  savingCanvas.value = true;
+  try { await props.flushSave(); ElMessage.success("画布已保存"); }
+  catch (error) { ElMessage.error(errorMessage(error, "画布保存失败")); }
+  finally { savingCanvas.value = false; }
+}
 const initialized = ref(false);
 const loadError = ref("");
 const editingId = ref<string | null>(null);
@@ -123,7 +133,7 @@ const newCanvasId = ref<string | null>(null);
 const nameInput = ref<InputInstance>();
 const canvasName = ref("");
 const renameError = ref("");
-const { toObject, setNodes, setEdges, setViewport } = useVueFlow();
+const { toObject, setNodes, setEdges, setViewport, getNodes, dimensions, viewport, fitView } = useVueFlow();
 type CanvasEntry = { path: string; name: string; type: "file" | "directory"; children?: CanvasEntry[]; empty?: boolean; draft?: boolean };
 const folders = inject<ShallowRef<CanvasEntry[]>>("canvasFolders", shallowRef<CanvasEntry[]>([]));
 const loadedDirectories = inject<ShallowRef<string[]>>("canvasLoadedDirectories", shallowRef<string[]>([]));
@@ -165,6 +175,16 @@ const treeEntries = computed(() => {
 const moveFolders = computed(() => [{ path: "", label: translate("画布根目录") }, ...folders.value.map(folder => ({ path: folder.path, label: folder.path }))]);
 
 function parentPath(path: string) { return path.slice(0, path.lastIndexOf("/") + 1).replace(/\/$/, ""); }
+function rememberCanvas(directory: string, id: string) {
+  try { localStorage.setItem(`toonflow.lastCanvas:${directory}`, id); } catch { /* 浏览器禁用存储时仍可手动选择画布。 */ }
+}
+function rememberedCanvas(directory: string) {
+  try {
+    const id = localStorage.getItem(`toonflow.lastCanvas:${directory}`) || "";
+    if (id.length > 4096 || id.startsWith("/") || id.includes("\\") || id.split("/").some(part => !part || part === "." || part === "..")) return "";
+    return id;
+  } catch { return ""; }
+}
 const filterEntry: FilterNodeMethodFunction = (query: string, entry) => !!entry.draft || String(entry.path).toLocaleLowerCase().includes(query.trim().toLocaleLowerCase());
 watch([searchQuery, treeEntries], async () => { await nextTick(); canvasTree.value?.filter(searchQuery.value); });
 watch(canvasListVisible, opened => {
@@ -300,6 +320,16 @@ watch(() => props.directory, async (directory, _previous, onCleanup) => {
       return;
     }
     await loadDirectory("");
+    const remembered = rememberedCanvas(directory);
+    if (remembered && parentPath(remembered)) {
+      try { await loadDirectory(parentPath(remembered)); }
+      catch (error) { if (!axios.isAxiosError(error) || error.response?.status !== 404) throw error; }
+    }
+    if (cancelled) return;
+    if (remembered && canvases.value.some(canvas => canvas.id === remembered)) {
+      await applyCanvas(remembered, directory, controller.signal);
+      return;
+    }
     // ACT: 根目录无画布时逐层查找，找到即停止；其余目录仍按需加载。
     for (let index = 0; !canvases.value.length && index < folders.value.length; index++) {
       await loadDirectory(folders.value[index]!.path);
@@ -399,6 +429,18 @@ async function applyCanvas(canvasId: string, directory: string, signal?: AbortSi
   checkCanvasDirectory(directory);
   boundCanvas.value = nextCanvas;
   activeCanvasId.value = nextCanvas.id;
+  // 等节点完成挂载和尺寸测量，再判断原视窗是否还能看到内容。
+  await Promise.race([
+    new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))),
+    new Promise<void>(resolve => setTimeout(resolve, 250)),
+  ]);
+  checkCanvasDirectory(directory);
+  const { width, height } = dimensions.value;
+  if (activeCanvasId.value === nextCanvas.id && width > 0 && height > 0 && getNodes.value.some(node => !node.hidden)
+    && !getNodesInside(getNodes.value, { x: 0, y: 0, width, height }, viewport.value, true).length) {
+    await fitView({ duration: 0 });
+    checkCanvasDirectory(directory);
+  }
   signal?.throwIfAborted();
 }
 
@@ -410,6 +452,7 @@ async function switchCanvas(canvasId: string, signal?: AbortSignal) {
     if (props.activateCanvas) await props.activateCanvas(canvasId, signal);
     else await applyCanvas(canvasId, directory, signal);
     checkCanvasDirectory(directory, signal);
+    if (!props.activateCanvas) rememberCanvas(directory, canvasId);
   } finally {
     if (props.directory === directory) busy.value = false;
   }
@@ -545,6 +588,7 @@ async function addCanvas(name?: string, signal?: AbortSignal): Promise<string> {
     canvases.value = [...canvases.value, canvas];
     signal?.throwIfAborted();
     await applyCanvas(canvas.id, directory, signal);
+    if (!props.activateCanvas) rememberCanvas(directory, canvas.id);
     canvasListVisible.value = false;
     return canvas.id;
   } finally {

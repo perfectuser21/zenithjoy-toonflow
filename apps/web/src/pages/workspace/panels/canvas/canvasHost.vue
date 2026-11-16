@@ -44,6 +44,12 @@ const activeInstance = computed(() => instances.get(activeKey.value));
 const canvasId = computed(() => activeInstance.value?.canvasId ?? "");
 const canvasReady = computed(() => activeInstance.value?.canvasReady ?? false);
 const canvasListReady = computed(() => activeInstance.value?.canvasListReady ?? false);
+// 只记录真正处于前台且已载入的画布，覆盖菜单、文件树和重命名等入口。
+watch([canvasId, canvasReady, activeKey], ([id, ready]) => {
+  const directory = workspaceStore.project?.directory;
+  if (!directory || !id || !ready) return;
+  try { localStorage.setItem(`toonflow.lastCanvas:${directory}`, id); } catch { /* 不影响画布使用。 */ }
+}, { flush: "post" });
 const lifetime = new AbortController();
 const workspaceStore = useWorkspaceStore();
 const pendingUpload = providePluginUpload();
