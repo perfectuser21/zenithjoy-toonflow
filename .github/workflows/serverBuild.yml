@@ -8,6 +8,7 @@ on:
       - "Dockerfile"
       - "deploy/quota/**"
       - ".github/workflows/serverBuild.yml"
+      - ".github/workflows/candidateImage.yml"
 permissions:
   contents: read
 jobs:
