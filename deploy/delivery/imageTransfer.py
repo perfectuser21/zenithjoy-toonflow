@@ -56,7 +56,7 @@ def privateDirectory(config):
     return path
 
 
-def boundedArchive(command, path, maximum, payload=None):
+def boundedArchive(command, path, maximum, payload=None, timeout=300):
     # stderr仅保留退出码，防止认证头或远端错误内容流入CI日志。
     with path.open('xb') as output:
         os.chmod(path, 0o600)
@@ -68,7 +68,7 @@ def boundedArchive(command, path, maximum, payload=None):
                 process.stdin.close()
             selector = selectors.DefaultSelector()
             selector.register(process.stdout, selectors.EVENT_READ)
-            deadline = time.monotonic() + 1800
+            deadline = time.monotonic() + timeout
             size = 0
             while True:
                 require(time.monotonic() < deadline, '镜像传输超时')
@@ -132,7 +132,8 @@ def verifyArchive(path, request, maximum):
         annotations = root.get('annotations', {})
         require(annotations.get('io.containerd.image.name') == request['image'], '归档仓库身份不匹配')
         reference = annotations.get('org.opencontainers.image.ref.name')
-        require(reference is None or reference == request['image'], '归档包含额外镜像名称')
+        require(reference in (None, request['image'], '@' + request['image'].split('@')[1]),
+                '归档包含额外镜像名称')
         visited = set()
         runtimeCount = 0
         runtimeDigests = set()
@@ -199,7 +200,8 @@ def fetchContent(registry, image, directory):
             return None
     with urllib.request.build_opener(noRedirect).open(request, timeout=30) as response:
         bearer = json.loads(response.read(65537))['token']
-    require(isinstance(bearer, str) and re.fullmatch(r'[A-Za-z0-9._~-]{1,16384}', bearer), 'registry bearer不合法')
+    require(isinstance(bearer, str) and 0 < len(bearer) <= 16384
+            and re.fullmatch(r'[A-Za-z0-9._~+/-]+=*', bearer), 'registry bearer不合法')
     hosts = Path(directory) / 'ghcr.io'
     hosts.mkdir(mode=0o700)
     config = hosts / 'hosts.toml'
@@ -225,7 +227,7 @@ def ensureImage(config, request, registry):
         except (RuntimeError, OSError, ValueError, KeyError, tarfile.TarError, subprocess.SubprocessError):
             archive.unlink(missing_ok=True)
         if request['environment'] == 'production':
-            boundedArchive(witnessCommand(config), archive, maximum, witnessPayload(request, 'exportImage'))
+            boundedArchive(witnessCommand(config), archive, maximum, witnessPayload(request, 'exportImage'), timeout=7200)
         else:
             require(isinstance(registry, dict) and set(registry) == {'user', 'token'}, '缺少短期镜像读取身份')
             require(isinstance(registry['user'], str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,99}(?:\[bot\])?', registry['user'])

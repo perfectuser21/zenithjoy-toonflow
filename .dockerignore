@@ -32,3 +32,6 @@ apps/updateServer/build
 **/*.keychain-db
 .DS_Store
 Thumbs.db
+
+# 宿主发布控制器独立部署，不进入应用运行层。
+deploy/delivery
