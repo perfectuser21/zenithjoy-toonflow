@@ -11,6 +11,7 @@ on:
       - "tsconfig.base.json"
       - "bun.lock"
       - "Dockerfile"
+      - ".dockerignore"
       - "deploy/quota/**"
       - ".github/workflows/serverBuild.yml"
       - ".github/workflows/candidateImage.yml"

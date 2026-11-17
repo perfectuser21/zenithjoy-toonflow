@@ -13,6 +13,7 @@ on:
       - 'electrobun.config.ts'
       - 'tsconfig.base.json'
       - 'Dockerfile'
+      - '.dockerignore'
       - 'deploy/**'
       - '.github/workflows/canvasDelivery.yml'
       - '.github/workflows/candidateImage.yml'
@@ -40,7 +41,7 @@ jobs:
     needs: candidate
     runs-on: ubuntu-24.04
     environment: staging
-    timeout-minutes: 45
+    timeout-minutes: 240
     outputs:
       receipt: ${{ steps.deploy.outputs.receipt }}
     steps:
@@ -75,7 +76,7 @@ jobs:
     needs: [candidate, staging]
     runs-on: ubuntu-24.04
     environment: production
-    timeout-minutes: 45
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:

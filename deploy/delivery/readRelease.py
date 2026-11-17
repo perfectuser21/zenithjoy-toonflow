@@ -35,7 +35,7 @@ def main():
     if exportImage:
         # stdout仅包含OCI二进制；镜像、namespace、socket、参数均固定。
         exported=subprocess.run(exportCommand(request['image']),stdout=sys.stdout.buffer,
-                                stderr=subprocess.DEVNULL,timeout=1800,
+                                stderr=subprocess.DEVNULL,timeout=7200,
                                 env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LANG':'C.UTF-8'})
         if exported.returncode!=0:
             raise RuntimeError('OCI export incomplete')
