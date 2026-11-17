@@ -45,7 +45,8 @@ jobs:
         with:
           context: .
           platforms: linux/amd64
-          push: true
+          # 固定证明文件格式，与现役完整归档校验器保持兼容。
+          outputs: type=registry,oci-artifact=false
           cache-from: type=gha,scope=aivideo-candidate-linux-amd64
           cache-to: type=gha,scope=aivideo-candidate-linux-amd64,mode=max,ignore-error=true
           tags: ${{ steps.image.outputs.name }}:sha-${{ github.sha }}-run-${{ github.run_id }}-${{ github.run_attempt }}
