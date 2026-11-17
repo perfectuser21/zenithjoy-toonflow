@@ -15,7 +15,7 @@
 - `canvasDelivery.yml`：master 自动触发；同一发布锁串行、进行中的发布不取消；staging 成功后 production 才能启动；生产不重新构建镜像。
 - `remoteRelease.sh`：固定 SSH 主机密钥、专用 SSH 身份、请求经 stdin；校验当前 run/attempt、源码 SHA、镜像 digest、实际运行镜像及业务验收回执；生产额外要求备份、恢复、前驱与备份编号。缺项、SSH 断线、未知结果均失败。
 
-镜像传输失败时保留本次已接收 OCI 和 root 私有阶段诊断；启动时遇到已有 `imageTransfer*` 临时目录即拒绝新传输，由运维先读回身份、空间和事务后处理，不能自动删除未知结果。启动时保留至少两个归档上限加 1 GiB 空间；最终归档与加载后读回归档各有独立上限。归档验证后通过 Docker Engine `image load` 加载，与此前人工 898 导入使用的入口一致，再完整导出读回验证；这不说明之前失败的根因已确定。本机缓存导出或校验失败只是缓存未命中，其不完整缓存文件会删除；随后从香港接收的归档失败时保留。短期 registry 凭据单独放 `/run` 的 root 私有 tmpfs，异常终止可能残留至重启，不放入保留诊断目录。香港见证 stdout 保持原 OCI 直通，源端日志不推测字节数。
+镜像传输失败时保留本次已接收 OCI 和 root 私有阶段诊断；启动时遇到已有 `imageTransfer*` 临时目录即拒绝新传输，由运维先读回身份、空间和事务后处理，不能自动删除未知结果。启动时保留至少两个归档上限加 1 GiB 空间；最终归档与加载后读回归档各有独立上限。归档验证后通过 Docker Engine `image load` 加载，与此前人工 898 导入使用的入口一致，再完整导出读回验证；这不说明之前失败的根因已确定。本机缓存导出或校验失败只是缓存未命中，其不完整缓存文件会删除；随后从 COS 接收的归档失败时保留。香港见证只提供验收回执。
 
 ## 尚未实现、禁止假定存在的主机能力
 
@@ -81,7 +81,11 @@
 
 跳板应使用独立账号及密钥，仅允许到固定杭州地址和端口的 SSH TCP 转发，禁止 shell、PTY、agent 转发及其他目标；杭州 SSH 防火墙只放行香港固定出口 IP。CI 不接受来自发布请求的跳板命令或目标，也不进行 agent 转发。网络规则、跳板与身份须由运维先行配置并验证，本文不代替实际部署验收。
 
-主机拉取私有 GHCR 镜像使用当前 job 的短期 GITHUB_TOKEN（packages:read），经 SSH stdin 传入，仅用于私有临时 Docker 配置；不写事务日志，不保留长期 GitHub PAT。GitHub 环境权限与发布者范围配置完成后才启用仓库变量 `CANVAS_DELIVERY_ENABLED=true`。
+GitHub 环境权限与发布者范围配置完成后才启用仓库变量 `CANVAS_DELIVERY_ENABLED=true`。
+
+COS 中转由 CI 将固定 digest 的完整 OCI 归档上传至既有私有桶，不创建桶或自动删除对象。repository variables `CANVAS_COS_BUCKET`、`CANVAS_COS_REGION` 与 repository secrets `CANVAS_COS_SECRET_ID`、`CANVAS_COS_SECRET_KEY` 使用仅限 `aivideoReleases/` 的读写身份，不授予删除或分块清理权限。对象键绑定源码 SHA、run 和 attempt；已有对象仅在长度与 SHA 元数据相同才复用。两个 environment 各自生成短期 GET 签名，签名仅经受限 SSH stdin 提供，不写日志、输出或回执。
+
+两地主机 root 固定配置 `cosBucket`、`cosRegion` 和 `cosPrefix`（必须为 `aivideoReleases`）。主机只接受对应 COS HTTPS 域名和本次确定的对象路径，拒绝重定向，限制下载长度和时限并核对归档 SHA；随后执行完整 OCI 验证、Docker 加载与完整导出读回。香港见证只返回小型验收回执，不再传输镜像。配置前须验证私有桶 ACL、权限范围及两地实际访问，不能仅凭构建成功晋级。
 
 ## 执行器请求与回执
 

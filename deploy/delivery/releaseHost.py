@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from imageTransfer import ensureImage, errorClass
+from imageTransfer import ensureImage, errorClass, validateCosTransfer, validateCosIdentity
 from backupShared import sharedDirectories
 from verifyBusiness import rootJson
 
@@ -127,6 +127,8 @@ def verifyTransaction(config, request, transaction, journal):
     require(final['State']['Running'] and final['Image'] == imageId(request['image']), '验收后容器停止或运行镜像改变')
     receipt.update(backupVerified=True, restoreVerified=True, backupId=backup['backupId'],
                    predecessorImage=transaction['predecessorImage'])
+    if 'transfer' in transaction:
+        receipt['transfer'] = transaction['transfer']
     transaction.update(phase='completed', receipt=receipt)
     atomicJson(journal, transaction)
     print(json.dumps(receipt))
@@ -140,7 +142,7 @@ def main():
     raw = sys.stdin.buffer.read(32769)
     require(len(raw) <= 32768, '请求过大')
     request = json.loads(raw)
-    registry = request.pop("registryCredential", None)
+    transfer = request.pop('transfer', None)
     required = {'environment', 'sourceSha', 'image', 'runId', 'runAttempt'}
     require(set(request) <= required | {'stagingReceipt', 'operation'} and required <= set(request), '请求字段不合法')
     require(request['environment'] == config['environment'], '主机环境不匹配')
@@ -151,6 +153,17 @@ def main():
         require(isinstance(request[key], str) and re.fullmatch(r'[1-9][0-9]{0,19}', request[key]) is not None, '发布编号不合法')
     operation = request.get('operation', 'deploy')
     require(operation in ('preflight', 'deploy', 'receipt', 'verify'), '操作不合法')
+    if operation == 'deploy':
+        validateCosTransfer(config, request, transfer)
+        transferIdentity = {key:transfer[key] for key in ('key','sha256','bytes')}
+    else:
+        require(transfer is None, '非发布操作不接受COS签名')
+        transferIdentity = None
+        if operation == 'preflight' and request['environment'] == 'production':
+            stage = request.get('stagingReceipt')
+            require(isinstance(stage, dict), '缺少香港验收回执')
+            transferIdentity = stage.get('transfer')
+            validateCosIdentity(config, request, transferIdentity)
     state = Path(config['stateDirectory'])
     require(state.is_dir(), '发布账本目录不存在')
     rootFile(state / 'identity.json')
@@ -176,7 +189,10 @@ def main():
                 if request['environment'] == 'production':
                     validateReceipt(request.get('stagingReceipt', {}), request, 'staging')
                     witness = rootFile(config['stagingWitness'], executable=True)
-                    validateReceipt(json.loads(run([witness], input=json.dumps(request))), request, 'staging')
+                    authoritative = json.loads(run([witness], input=json.dumps(request)))
+                    validateReceipt(authoritative, request, 'staging')
+                    require(authoritative.get('transfer') == previous.get('transfer')
+                            and request['stagingReceipt'].get('transfer') == previous.get('transfer'), 'COS对象身份不匹配')
                 previous['verificationResumedAt'] = time.time()
                 atomicJson(journal, previous)
                 verifyTransaction(config, request, previous, journal)
@@ -186,6 +202,7 @@ def main():
                     require(previous['request'][field] == request[field], '历史回执身份不匹配')
             else:
                 require(previous['request'] == request, '相同发布编号的请求发生变化')
+                require(previous.get('transfer') == transferIdentity, '相同发布编号的COS对象发生变化')
             require(previous.get('phase') == 'completed', '上次发布结果未知，需要读取事务后人工处理')
             running = inspect(config['container'])
             require(running['State']['Running'] and running['Image'] == imageId(request['image']), '历史回执与当前运行版本不一致')
@@ -213,10 +230,12 @@ def main():
             run(['mountpoint', '-q', config['dataDirectory']])
         if request['environment'] == 'production':
             validateReceipt(request.get('stagingReceipt', {}), request, 'staging')
+            require(request['stagingReceipt'].get('transfer') == transferIdentity, 'COS对象身份不匹配')
             # 独立取回香港的可信验收回执；不信任 CI 传入的 passed 声明。
             witness = rootFile(config['stagingWitness'], executable=True)
             authoritative = json.loads(run([witness], input=json.dumps(request)))
             validateReceipt(authoritative, request, 'staging')
+            require(authoritative.get('transfer') == transferIdentity, 'COS对象身份不匹配')
         execution = run(['systemctl', 'show', config['service'], '--property=ExecStart', '--value'])
         require('/usr/bin/docker start -a ' + config['container'] in execution, '服务尚未接入固定容器启动模式')
         # preflight 无拉取、停机、创建事务或写入业务数据。
@@ -226,8 +245,8 @@ def main():
             return
         # 生产仅用完整本机缓存或独立香港只读见证中继，不再直接访问GHCR。
         diagnosticPhase = 'image_transfer'
-        ensureImage(config, request, registry)
-        registry = None
+        ensureImage(config, request, transfer)
+        transfer = None
 
         diagnosticPhase = 'image_inspect'
         metadata = json.loads(run(['docker', 'image', 'inspect', request['image']]))[0]
@@ -236,7 +255,7 @@ def main():
         # 准入在停机前完成；缺少 worker、备份空间或生成验收均应在此拒绝。
         diagnosticPhase = 'readiness'
         run([config['readinessCommand']], input=json.dumps(request), timeout=300)
-        transaction = {'request': request, 'phase':'preparing', 'predecessorId':current['Image'],
+        transaction = {'request': request, 'transfer':transferIdentity, 'phase':'preparing', 'predecessorId':current['Image'],
                        'predecessorImage':current['Config']['Image'], 'startedAt':time.time()}
         diagnosticPhase = 'transaction'
         atomicJson(journal, transaction)
