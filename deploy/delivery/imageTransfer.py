@@ -9,15 +9,99 @@ import re
 import selectors
 import stat
 import subprocess
+import shutil
 import tarfile
 import tempfile
 import time
 import urllib.request
+from contextlib import contextmanager
 
 from stagingWitness import witnessCommand, witnessPayload
 
 imagePattern = r'ghcr.io/perfectuser21/zenithjoy-toonflow@sha256:[a-f0-9]{64}'
 processEnvironment = {'PATH':'/usr/sbin:/usr/bin:/sbin:/bin', 'LANG':'C.UTF-8'}
+
+
+class DiagnosticFailure(Exception):
+    pass
+
+
+class TransferProcessError(RuntimeError):
+    def __init__(self, message, exitCode):
+        super().__init__(message)
+        self.exitCode = exitCode
+
+
+def errorClass(error):
+    for kind in (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError, ValueError, KeyError, RuntimeError):
+        if isinstance(error, kind):
+            return kind.__name__
+    return 'OtherError'
+
+
+def recordEvent(handle, phase, status, error=None, exitCode=None, stderrTruncated=None):
+    event = {'phase':phase, 'status':status, 'errorClass':errorClass(error) if error else None,
+             'exit':exitCode, 'stderrTruncated':stderrTruncated, 'time':time.time()}
+    try:
+        handle.write(json.dumps(event, separators=(',', ':')) + '\n')
+        handle.flush()
+        os.fsync(handle.fileno())
+    except (OSError, ValueError) as failure:
+        raise DiagnosticFailure('private diagnostic write failed') from failure
+
+
+@contextmanager
+def transferPhase(handle, phase):
+    recordEvent(handle, phase, 'started')
+    try:
+        yield
+    except Exception as error:
+        recordEvent(handle, phase, 'failed', error,
+                    error.exitCode if isinstance(error, TransferProcessError) else None)
+        raise
+    recordEvent(handle, phase, 'completed')
+
+
+def importArchive(archive, temporary, handle):
+    # 仅固定 ctr import 的 stderr 可写入 root 私有诊断，输入为已校验 OCI 文件，不含 registry 凭据。
+    process = subprocess.Popen(ctrCommand() + ['images', 'import', '--all-platforms', '--snapshotter', 'overlayfs', str(archive)],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                               env=processEnvironment)
+    stderrPath = Path(temporary) / 'import.stderr'
+    selector = selectors.DefaultSelector()
+    deadline = time.monotonic() + 1800
+    try:
+        selector.register(process.stderr, selectors.EVENT_READ)
+        with stderrPath.open('xb') as output:
+            os.chmod(stderrPath, 0o600)
+            size = 0; truncated = False
+            try:
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired('ctr images import', 1800)
+                    if not selector.select(timeout=min(1, remaining)):
+                        continue
+                    block = os.read(process.stderr.fileno(), 65536)
+                    if not block:
+                        break
+                    available = max(0, 65536 - size)
+                    output.write(block[:available])
+                    size += min(len(block), available)
+                    truncated = truncated or len(block) > available
+            finally:
+                output.flush()
+                os.fsync(output.fileno())
+        result = process.wait(timeout=max(0.01, deadline - time.monotonic()))
+        recordEvent(handle, 'import', 'exit', exitCode=result, stderrTruncated=truncated)
+        if result != 0:
+            raise TransferProcessError('镜像导入失败', result)
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        selector.close()
+        process.stderr.close()
 
 
 def require(condition, message):
@@ -80,7 +164,9 @@ def boundedArchive(command, path, maximum, payload=None, timeout=300):
                 size += len(block)
                 require(size <= maximum, '镜像归档超容量')
                 output.write(block)
-            require(process.wait(timeout=max(1, deadline - time.monotonic())) == 0, '镜像导出或中继失败')
+            result = process.wait(timeout=max(1, deadline - time.monotonic()))
+            if result != 0:
+                raise TransferProcessError('镜像导出或中继失败', result)
             output.flush()
             os.fsync(output.fileno())
         finally:
@@ -210,45 +296,95 @@ def fetchContent(registry, image, directory):
     os.chmod(config, 0o600)
     result = subprocess.run(ctrCommand() + ['content', 'fetch', '--hosts-dir', directory, '--all-platforms', image],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1800, env=processEnvironment)
-    require(result.returncode == 0, '镜像完整内容拉取失败')
+    if result.returncode != 0:
+        raise TransferProcessError('镜像完整内容拉取失败', result.returncode)
+
+
+def registryRuntimeDirectory():
+    path = Path('/run')
+    for parent in (path, *path.parents):
+        info = parent.lstat()
+        require(stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+                and info.st_uid == 0 and not info.st_mode & 0o022, '临时凭据目录不受root保护')
+    result = subprocess.run(['/usr/bin/findmnt', '-n', '-o', 'FSTYPE', '--target', str(path)],
+                            capture_output=True, text=True, timeout=10, env=processEnvironment)
+    require(result.returncode == 0 and result.stdout.strip() == 'tmpfs', '临时凭据须位于tmpfs')
+    return path
 
 
 def ensureImage(config, request, registry):
     directory = privateDirectory(config)
     maximum = archiveLimit(config)
-    with tempfile.TemporaryDirectory(prefix='imageTransfer', dir=directory) as temporary:
+    # 未决 scratch 必须先由运维读回处理，禁止并发或反复失败无限积累。
+    with os.scandir(directory) as entries:
+        require(not any(entry.name.startswith('imageTransfer') for entry in entries), '存在未处理的镜像传输诊断')
+    temporary = tempfile.mkdtemp(prefix='imageTransfer-' + request['runId'] + '-' + request['runAttempt'] + '-', dir=directory)
+    succeeded = False
+    try:
         os.chmod(temporary, 0o700)
-        archive = Path(temporary) / 'image.oci'
-        # 完整导出并校验才算缓存命中；docker inspect成功不代表压缩blob齐全。
+        directoryFd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
         try:
+            os.fsync(directoryFd)
+        finally:
+            os.close(directoryFd)
+        events = open(Path(temporary) / 'events.jsonl', 'x', encoding='utf-8',
+                      opener=lambda p, flags: os.open(p, flags, 0o600))
+        with events:
+            scratchFd = os.open(temporary, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(scratchFd)
+            finally:
+                os.close(scratchFd)
+            _ensureImage(config, request, registry, temporary, maximum, events)
+        succeeded = True
+    finally:
+        # 失败保留本次有界归档和诊断；未知结果不得自动删除或重试。
+        if succeeded:
+            shutil.rmtree(temporary)
+
+
+def _ensureImage(config, request, registry, temporary, maximum, events):
+    archive = Path(temporary) / 'image.oci'
+    # 完整导出并校验才算缓存命中；docker inspect成功不代表压缩blob齐全。
+    try:
+        with transferPhase(events, 'cache_export'):
             boundedArchive(exportCommand(request['image']), archive, maximum)
+        with transferPhase(events, 'cache_verify'):
             verifyArchive(archive, request, maximum)
-            return
-        except (RuntimeError, OSError, ValueError, KeyError, tarfile.TarError, subprocess.SubprocessError):
-            archive.unlink(missing_ok=True)
-        if request['environment'] == 'production':
+        return
+    except (RuntimeError, OSError, ValueError, KeyError, tarfile.TarError, subprocess.SubprocessError):
+        archive.unlink(missing_ok=True)
+    if request['environment'] == 'production':
+        with transferPhase(events, 'witness_export'):
             boundedArchive(witnessCommand(config), archive, maximum, witnessPayload(request, 'exportImage'), timeout=7200)
-        else:
-            require(isinstance(registry, dict) and set(registry) == {'user', 'token'}, '缺少短期镜像读取身份')
-            require(isinstance(registry['user'], str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,99}(?:\[bot\])?', registry['user'])
-                    and isinstance(registry['token'], str) and 0 < len(registry['token']) <= 4096
-                    and not any(character in registry['token'] for character in '\r\n'), '镜像读取身份不合法')
-            with tempfile.TemporaryDirectory(prefix='registry', dir=temporary) as credentialDirectory:
-                os.chmod(credentialDirectory, 0o700)
-                auth = {'auths':{'ghcr.io':{'auth':base64.b64encode((registry['user'] + ':' + registry['token']).encode()).decode()}}}
-                dockerConfig = Path(credentialDirectory) / 'config.json'
-                dockerConfig.write_text(json.dumps(auth))
-                os.chmod(dockerConfig, 0o600)
+    else:
+        require(isinstance(registry, dict) and set(registry) == {'user', 'token'}, '缺少短期镜像读取身份')
+        require(isinstance(registry['user'], str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,99}(?:\[bot\])?', registry['user'])
+                and isinstance(registry['token'], str) and 0 < len(registry['token']) <= 4096
+                and not any(character in registry['token'] for character in '\r\n'), '镜像读取身份不合法')
+        # 凭据不放进保留的 OCI 诊断目录；非正常退出时仅遗留 root 私有 tmpfs 至重启。
+        with tempfile.TemporaryDirectory(prefix='aivideo-registry-', dir=registryRuntimeDirectory()) as credentialDirectory:
+            os.chmod(credentialDirectory, 0o700)
+            auth = {'auths':{'ghcr.io':{'auth':base64.b64encode((registry['user'] + ':' + registry['token']).encode()).decode()}}}
+            dockerConfig = Path(credentialDirectory) / 'config.json'
+            dockerConfig.write_text(json.dumps(auth))
+            os.chmod(dockerConfig, 0o600)
+            with transferPhase(events, 'registry_pull'):
                 result = subprocess.run(['docker', '--config', credentialDirectory, 'pull', request['image']],
                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1800, env=processEnvironment)
-                require(result.returncode == 0, '镜像拉取失败')
+                if result.returncode != 0:
+                    raise TransferProcessError('镜像拉取失败', result.returncode)
+            with transferPhase(events, 'registry_content'):
                 fetchContent(registry, request['image'], credentialDirectory)
+        with transferPhase(events, 'registry_export'):
             boundedArchive(exportCommand(request['image']), archive, maximum)
+    with transferPhase(events, 'archive_verify'):
         verifyArchive(archive, request, maximum)
-        result = subprocess.run(ctrCommand() + ['images', 'import', '--all-platforms', '--snapshotter', 'overlayfs', str(archive)],
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1800, env=processEnvironment)
-        require(result.returncode == 0, '镜像导入失败')
-        # 再导出读回实际containerd内容；不允许导入后以缺blob镜像进入停机阶段。
-        archive.unlink()
-        boundedArchive(exportCommand(request['image']), archive, maximum)
-        verifyArchive(archive, request, maximum)
+    with transferPhase(events, 'import'):
+        importArchive(archive, temporary, events)
+    # 再导出读回实际containerd内容；不允许导入后以缺blob镜像进入停机阶段。
+    readback = Path(temporary) / 'readback.oci'
+    with transferPhase(events, 'readback_export'):
+        boundedArchive(exportCommand(request['image']), readback, maximum)
+    with transferPhase(events, 'readback_verify'):
+        verifyArchive(readback, request, maximum)

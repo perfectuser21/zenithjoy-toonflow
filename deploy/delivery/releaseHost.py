@@ -9,8 +9,9 @@ import re
 import stat
 import subprocess
 import sys
+import tempfile
 import time
-from imageTransfer import ensureImage
+from imageTransfer import ensureImage, errorClass
 from backupShared import sharedDirectories
 from verifyBusiness import rootJson
 
@@ -18,6 +19,27 @@ configPath = Path('/etc/aivideo/release.json')
 publicOrigins = {'staging':'https://toonflow.zenjoymedia.media','production':'https://aivideo.zenithjoy.tech'}
 imagePattern = r'ghcr.io/perfectuser21/zenithjoy-toonflow@sha256:[a-f0-9]{64}'
 diagnosticPath = None
+diagnosticPhase = 'preflight'
+
+
+def recordTopFailure(error):
+    if diagnosticPath is None:
+        return
+    safeMessages = {'镜像传输超时', '镜像归档超容量', '镜像导出或中继失败',
+                    '镜像导入失败', '镜像拉取失败', '镜像完整内容拉取失败',
+                    '镜像传输空间不足', 'OCI blob类型不许可', '存在未处理的镜像传输诊断'}
+    message = str(error) if isinstance(error, RuntimeError) and str(error) in safeMessages else None
+    fd, name = tempfile.mkstemp(prefix=diagnosticPath.stem + '-top-', suffix='.json', dir=diagnosticPath.parent)
+    path = Path(name)
+    with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+        json.dump({'phase':diagnosticPhase, 'errorClass':errorClass(error), 'message':message}, handle)
+        handle.flush()
+        os.fsync(handle.fileno())
+    fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def require(condition, message):
@@ -111,7 +133,7 @@ def verifyTransaction(config, request, transaction, journal):
 
 
 def main():
-    global diagnosticPath
+    global diagnosticPath, diagnosticPhase
     require(os.geteuid() == 0, '必须通过受限 sudo 入口运行')
     rootFile(configPath)
     config = json.loads(configPath.read_text())
@@ -203,16 +225,20 @@ def main():
                               'image':request['image'], 'result':'ready', 'deployed':False}))
             return
         # 生产仅用完整本机缓存或独立香港只读见证中继，不再直接访问GHCR。
+        diagnosticPhase = 'image_transfer'
         ensureImage(config, request, registry)
         registry = None
 
+        diagnosticPhase = 'image_inspect'
         metadata = json.loads(run(['docker', 'image', 'inspect', request['image']]))[0]
         labels = metadata['Config'].get('Labels') or {}
         require(labels.get('org.opencontainers.image.revision') == request['sourceSha'], '镜像源码标签不匹配')
         # 准入在停机前完成；缺少 worker、备份空间或生成验收均应在此拒绝。
+        diagnosticPhase = 'readiness'
         run([config['readinessCommand']], input=json.dumps(request), timeout=300)
         transaction = {'request': request, 'phase':'preparing', 'predecessorId':current['Image'],
                        'predecessorImage':current['Config']['Image'], 'startedAt':time.time()}
+        diagnosticPhase = 'transaction'
         atomicJson(journal, transaction)
         # 备份成功后持续停写直到切换，避免回退备份遗漏期间的新数据。
         backup = json.loads(run([config['backupCommand']], input=json.dumps(request), timeout=900))
@@ -234,7 +260,11 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except Exception:
+    except Exception as error:
+        try:
+            recordTopFailure(error)
+        except Exception:
+            print('发布诊断写入失败；结果仍未完成。', file=sys.stderr)
         # 不回显配置、供应商凭据或原始子进程错误；详细阶段在 root 账本内读回。
         print('发布未完成；请读取主机发布事务及配置检查结果。', file=sys.stderr)
         sys.exit(1)
