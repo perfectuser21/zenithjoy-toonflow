@@ -10,7 +10,9 @@ import stat
 import subprocess
 import sys
 import time
-import tempfile
+from imageTransfer import ensureImage
+from backupShared import sharedDirectories
+from verifyBusiness import rootJson
 
 configPath = Path('/etc/aivideo/release.json')
 publicOrigins = {'staging':'https://toonflow.zenjoymedia.media','production':'https://aivideo.zenithjoy.tech'}
@@ -115,17 +117,25 @@ def main():
             print(json.dumps(previous['receipt']))
             return
         require(operation != 'receipt', '对应发布回执不存在')
-        # 配额 helper 是宿主组件，不随应用镜像隐式升级。
-        helper = Path(rootFile(config['quotaHelper']))
-        require(hashlib.sha256(helper.read_bytes()).hexdigest() == config['quotaHelperSha256'], '配额 helper 版本变化')
+        shared = config.get('dataMode') == 'sharedDirectory'
+        require(config.get('dataMode', 'quotaVolume') in ('quotaVolume', 'sharedDirectory'), '数据模式不合法')
+        if shared:
+            # 旧员工共享站保留原目录，仅 staging 允许；正式站仍必须使用配额卷。
+            sharedDirectories(config, rootJson(config['businessConfig'], private=True))
+        else:
+            # 配额 helper 是宿主组件，不随应用镜像隐式升级。
+            helper = Path(rootFile(config['quotaHelper']))
+            require(hashlib.sha256(helper.read_bytes()).hexdigest() == config['quotaHelperSha256'], '配额 helper 版本变化')
         rootFile(config['businessVerifier'], executable=True)
         rootFile(config['backupCommand'], executable=True)
-        rootFile(config['restoreVerifier'], executable=True)
+        if not shared:
+            rootFile(config['restoreVerifier'], executable=True)
         rootFile(config['switchCommand'], executable=True)
         rootFile(config['readinessCommand'], executable=True)
         current = inspect(config['container'])
         require(current['State']['Running'] is True, '当前应用未运行')
-        run(['mountpoint', '-q', config['dataDirectory']])
+        if not shared:
+            run(['mountpoint', '-q', config['dataDirectory']])
         if request['environment'] == 'production':
             validateReceipt(request.get('stagingReceipt', {}), request, 'staging')
             # 独立取回香港的可信验收回执；不信任 CI 传入的 passed 声明。
@@ -139,16 +149,8 @@ def main():
             print(json.dumps({'environment':request['environment'], 'sourceSha':request['sourceSha'],
                               'image':request['image'], 'result':'ready', 'deployed':False}))
             return
-        require(isinstance(registry, dict) and set(registry) == {'user', 'token'}, '缺少短期镜像读取身份')
-        require(isinstance(registry['user'], str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,99}(?:\[bot\])?', registry['user'])
-                and isinstance(registry['token'], str) and registry['token'] and len(registry['token']) <= 4096
-                and not any(character in registry['token'] for character in '\r\n'), '镜像读取身份不合法')
-        # GHA的短期令牌仅用于本次pull，不写入事务或持久Docker配置。
-        with tempfile.TemporaryDirectory(prefix='aivideoRegistry') as dockerConfig:
-            os.chmod(dockerConfig, 0o700)
-            run(['docker', '--config', dockerConfig, 'login', 'ghcr.io', '--username', registry['user'], '--password-stdin'],
-                input=registry['token'] + '\n')
-            run(['docker', '--config', dockerConfig, 'pull', request['image']], timeout=1800)
+        # 生产仅用完整本机缓存或独立香港只读见证中继，不再直接访问GHCR。
+        ensureImage(config, request, registry)
         registry = None
 
         metadata = json.loads(run(['docker', 'image', 'inspect', request['image']]))[0]
