@@ -16,6 +16,21 @@ def command(args, timeout=120):
                           text=True, timeout=timeout).stdout
 
 
+def stopGuard(guard):
+    # 临时timer停止后，尚未触发的service可能被PID1自动卸载；以终态核对。
+    for suffix in ('.timer', '.service'):
+        unit = guard + suffix
+        result = subprocess.run(['systemctl','stop',unit],capture_output=True,text=True,timeout=30)
+        state = subprocess.run(['systemctl','show',unit,'--property=LoadState','--property=ActiveState'],capture_output=True,text=True,timeout=30)
+        fields = dict(line.split('=',1) for line in state.stdout.splitlines() if '=' in line)
+        if state.returncode and fields.get('LoadState') != 'not-found':
+            raise RuntimeError('backup thaw guard status unavailable')
+        if fields.get('ActiveState') not in ('inactive','failed'):
+            raise RuntimeError('backup thaw guard is still active')
+        if result.returncode and fields.get('LoadState') != 'not-found':
+            raise RuntimeError('backup thaw guard stop failed')
+
+
 def digest(path):
     value = hashlib.sha256()
     with open(path, 'rb') as handle:
@@ -42,7 +57,7 @@ def main():
     if mount['target'] != data or mount['fstype'] != 'ext4':
         raise RuntimeError('unexpected data mount')
     source = mount['source']
-    backing = json.loads(command(['losetup', '-J', source]))['loopdevices'][0]['back-file']
+    backing = json.loads(command(['losetup', '-J', '-l', source]))['loopdevices'][0]['back-file']
     if Path(backing).resolve() != volume.resolve():
         raise RuntimeError('mount does not refer to configured image')
     # 胶囊先实际分配宿主空间，内部任何恢复增长都不能突破该硬容量。
@@ -117,7 +132,7 @@ def main():
         # 手动解冻成功之前保留独立兜底，避免SIGKILL留下永久冻结的卷。
         command(['fsfreeze', '--unfreeze', data], timeout=15)
         frozen = False
-        command(['systemctl', 'stop', guard + '.timer', guard + '.service'])
+        stopGuard(guard)
         guardArmed = False
         if thawMarker.exists():
             raise RuntimeError('backup thaw watchdog fired; snapshot rejected')
@@ -199,7 +214,7 @@ def main():
                 cleanupErrors.append('thaw')
         if guardArmed and not frozen:
             try:
-                command(['systemctl', 'stop', guard + '.timer', guard + '.service'])
+                stopGuard(guard)
                 guardArmed = False
             except Exception:
                 cleanupErrors.append('guard')
@@ -231,6 +246,9 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except Exception:
-        print('完整卷备份或恢复验证未通过，请检查受控备份现场。', file=sys.stderr)
+    except Exception as failure:
+        reason = str(failure) if isinstance(failure, RuntimeError) else type(failure).__name__
+        if isinstance(failure, subprocess.CalledProcessError):
+            reason = Path(failure.cmd[0]).name + ' exit ' + str(failure.returncode)
+        print('完整卷备份或恢复验证未通过: ' + reason, file=sys.stderr)
         sys.exit(1)

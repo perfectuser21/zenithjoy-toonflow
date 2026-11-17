@@ -111,3 +111,7 @@ GitHub staging/production environments、仅master分支策略、各自专用SSH
 verifyBusiness.py在staging保留shared工作区模式，production必须验证两个普通账号隔离；均要求专用画布标记、版本/bootId一致、实际截取与生成结果。verifyGeneration.py只提交一次带固定taskId任务，后续只读轮询，未知结果不重发。新identity API声明候选版本和只读能力；旧版缺此接口时不允许付费验收。
 
 网页媒体读取改为显式服务器能力开放时使用原受控接口的Range读取；桌面与旧服务器保留Blob读取。剪辑预览在metadata可用时初始化，避免必须等待整个视频下载。此优化尚未部署，不能据此宣称员工卡顿已修复。
+
+### 2026-11-17 硬容量备份实机记录
+
+新流程已在香港旧539专用卷运行：768MiB胶囊先完整预分配，原始卷3GiB；完整cmp、312个文件、8个SQLite数据库、两个项目配额和普通UID EDQUOT恢复通过。胶囊卸载后零洞压缩SHA不变，最终分配434925568字节，回执编号1794897703147183349。本次是隔离旧卷，未停员工站或杭州生产，也不代表它们已有本版本备份。Ubuntu2.37下losetup需同时指定-J与-l才输出JSON；临时systemd单元取消以LoadState和ActiveState读回，已自动卸载的inactive单元允许收尾。

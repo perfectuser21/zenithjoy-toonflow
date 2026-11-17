@@ -42,7 +42,7 @@ def main():
     mounted = json.loads(run(['findmnt','-J','-T',str(snapshot.parent),'-o','TARGET,SOURCE,FSTYPE']))['filesystems'][0]
     if mounted['target'] != str(snapshot.parent) or mounted['fstype'] != 'ext4':
         raise RuntimeError('restore requires bounded capsule mount')
-    backing = json.loads(run(['losetup','-J',mounted['source']]))['loopdevices'][0]['back-file']
+    backing = json.loads(run(['losetup','-J','-l',mounted['source']]))['loopdevices'][0]['back-file']
     if Path(backing).resolve() != snapshot.parent.parent / 'capsule.ext4':
         raise RuntimeError('restore capsule backing mismatch')
     sparseCopy(snapshot, copy)

@@ -54,7 +54,7 @@ def main():
     mount=json.loads(run(['findmnt','-J','-T',str(data),'-o','TARGET,SOURCE,FSTYPE,OPTIONS']))['filesystems'][0]
     if mount['target']!=str(data) or mount['fstype']!='ext4' or 'prjquota' not in mount['options'].split(','):
         raise RuntimeError('quota mount not available')
-    backing=json.loads(run(['losetup','-J',mount['source']]))['loopdevices'][0]['back-file']
+    backing=json.loads(run(['losetup','-J','-l',mount['source']]))['loopdevices'][0]['back-file']
     if Path(backing).resolve()!=volume:
         raise RuntimeError('volume backing identity mismatch')
     applicationData=Path(config.get('applicationDataDirectory',str(data))).resolve(strict=True)
