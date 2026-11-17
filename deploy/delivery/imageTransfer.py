@@ -330,6 +330,12 @@ def ensureImage(config, request, registry):
         events = open(Path(temporary) / 'events.jsonl', 'x', encoding='utf-8',
                       opener=lambda p, flags: os.open(p, flags, 0o600))
         with events:
+            identity = {key:request[key] for key in ('environment','sourceSha','image','runId','runAttempt')}
+            with open(Path(temporary) / 'identity.json', 'x', encoding='utf-8',
+                      opener=lambda p, flags: os.open(p, flags, 0o600)) as identityFile:
+                json.dump(identity, identityFile, separators=(',', ':'))
+                identityFile.flush()
+                os.fsync(identityFile.fileno())
             scratchFd = os.open(temporary, os.O_RDONLY | os.O_DIRECTORY)
             try:
                 os.fsync(scratchFd)
