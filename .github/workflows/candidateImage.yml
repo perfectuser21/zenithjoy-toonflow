@@ -31,6 +31,8 @@ jobs:
         id: image
         shell: bash
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@18ce135bb5112fa8ce4ed6c17ab05699d7f3a5e0 # v3.11.0
       - name: Log in to private container registry
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
@@ -44,6 +46,8 @@ jobs:
           context: .
           platforms: linux/amd64
           push: true
+          cache-from: type=gha,scope=aivideo-candidate-linux-amd64
+          cache-to: type=gha,scope=aivideo-candidate-linux-amd64,mode=max,ignore-error=true
           tags: ${{ steps.image.outputs.name }}:sha-${{ github.sha }}-run-${{ github.run_id }}-${{ github.run_attempt }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
