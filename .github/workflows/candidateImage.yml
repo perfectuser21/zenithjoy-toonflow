@@ -47,7 +47,7 @@ jobs:
           platforms: linux/amd64
           push: true
           cache-from: type=gha,scope=aivideo-candidate-linux-amd64
-          cache-to: type=gha,scope=aivideo-candidate-linux-amd64,mode=max
+          cache-to: type=gha,scope=aivideo-candidate-linux-amd64,mode=max,ignore-error=true
           tags: ${{ steps.image.outputs.name }}:sha-${{ github.sha }}-run-${{ github.run_id }}-${{ github.run_attempt }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
