@@ -132,7 +132,8 @@ def verifyArchive(path, request, maximum):
         annotations = root.get('annotations', {})
         require(annotations.get('io.containerd.image.name') == request['image'], '归档仓库身份不匹配')
         reference = annotations.get('org.opencontainers.image.ref.name')
-        require(reference is None or reference == request['image'], '归档包含额外镜像名称')
+        require(reference in (None, request['image'], '@' + request['image'].split('@')[1]),
+                '归档包含额外镜像名称')
         visited = set()
         runtimeCount = 0
         runtimeDigests = set()
