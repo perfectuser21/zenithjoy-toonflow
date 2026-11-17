@@ -54,7 +54,8 @@ jobs:
       - name: Install COS signing SDK
         run: |
           python3 -m venv "$RUNNER_TEMP/cos-venv"
-          "$RUNNER_TEMP/cos-venv/bin/pip" install -r deploy/delivery/cosRequirements.txt
+          "$RUNNER_TEMP/cos-venv/bin/pip" install setuptools==80.9.0 wheel==0.45.1
+          "$RUNNER_TEMP/cos-venv/bin/pip" install --no-build-isolation -r deploy/delivery/cosRequirements.txt
       - name: Deploy and verify Hong Kong staging
         id: deploy
         env:
@@ -96,7 +97,8 @@ jobs:
       - name: Install COS signing SDK
         run: |
           python3 -m venv "$RUNNER_TEMP/cos-venv"
-          "$RUNNER_TEMP/cos-venv/bin/pip" install -r deploy/delivery/cosRequirements.txt
+          "$RUNNER_TEMP/cos-venv/bin/pip" install setuptools==80.9.0 wheel==0.45.1
+          "$RUNNER_TEMP/cos-venv/bin/pip" install --no-build-isolation -r deploy/delivery/cosRequirements.txt
       - name: Promote same digest to Hangzhou
         env:
           RELEASE_HOST: ${{ vars.CANVAS_RELEASE_HOST }}
