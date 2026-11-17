@@ -92,6 +92,24 @@ def validateReceipt(receipt, request, environment):
             '业务验收未通过')
 
 
+def verifyTransaction(config, request, transaction, journal):
+    rootFile(config['businessVerifier'], executable=True)
+    backup = transaction['backup']
+    require(backup.get('backupVerified') is True and backup.get('restoreVerified') is True
+            and backup.get('backupId'), '本事务缺少已验证的备份')
+    running = inspect(config['container'])
+    require(running['State']['Running'] and running['Image'] == imageId(request['image']), '待验收候选已改变')
+    receipt = json.loads(run([config['businessVerifier']], input=json.dumps(request), timeout=1200))
+    validateReceipt(receipt, request, request['environment'])
+    final = inspect(config['container'])
+    require(final['State']['Running'] and final['Image'] == imageId(request['image']), '验收后容器停止或运行镜像改变')
+    receipt.update(backupVerified=True, restoreVerified=True, backupId=backup['backupId'],
+                   predecessorImage=transaction['predecessorImage'])
+    transaction.update(phase='completed', receipt=receipt)
+    atomicJson(journal, transaction)
+    print(json.dumps(receipt))
+
+
 def main():
     global diagnosticPath
     require(os.geteuid() == 0, '必须通过受限 sudo 入口运行')
@@ -110,7 +128,7 @@ def main():
     for key in ('runId', 'runAttempt'):
         require(isinstance(request[key], str) and re.fullmatch(r'[1-9][0-9]{0,19}', request[key]) is not None, '发布编号不合法')
     operation = request.get('operation', 'deploy')
-    require(operation in ('preflight', 'deploy', 'receipt'), '操作不合法')
+    require(operation in ('preflight', 'deploy', 'receipt', 'verify'), '操作不合法')
     state = Path(config['stateDirectory'])
     require(state.is_dir(), '发布账本目录不存在')
     rootFile(state / 'identity.json')
@@ -122,9 +140,25 @@ def main():
         diagnosticPath = state / ('diagnostic-' + key + '.json')
         journal = state / (key + '.json')
         require(not any(json.loads(p.read_text()).get('phase') != 'completed'
+                        and not (operation == 'verify' and p == journal)
                         for p in state.glob('[0-9]*-[0-9]*.json')), '有尚未结束的发布事务')
         if journal.exists():
             previous = json.loads(journal.read_text())
+            if operation == 'verify':
+                diagnosticPath = state / ('diagnostic-' + key + '-' + str(time.time_ns()) + '.json')
+                require(previous.get('phase') == 'verifying', '仅能继续已完成切换的验收阶段')
+                require({k:v for k,v in previous['request'].items() if k != 'operation'}
+                        == {k:v for k,v in request.items() if k != 'operation'}, '继续验收的版本身份发生变化')
+                generation = state / ('generation-' + key + '.json')
+                require(not generation.exists() and not generation.is_symlink(), '已占位生成任务；禁止再次提交模型验收')
+                if request['environment'] == 'production':
+                    validateReceipt(request.get('stagingReceipt', {}), request, 'staging')
+                    witness = rootFile(config['stagingWitness'], executable=True)
+                    validateReceipt(json.loads(run([witness], input=json.dumps(request))), request, 'staging')
+                previous['verificationResumedAt'] = time.time()
+                atomicJson(journal, previous)
+                verifyTransaction(config, request, previous, journal)
+                return
             if operation == 'receipt':
                 for field in required:
                     require(previous['request'][field] == request[field], '历史回执身份不匹配')
@@ -135,7 +169,7 @@ def main():
             require(running['State']['Running'] and running['Image'] == imageId(request['image']), '历史回执与当前运行版本不一致')
             print(json.dumps(previous['receipt']))
             return
-        require(operation != 'receipt', '对应发布回执不存在')
+        require(operation not in ('receipt', 'verify'), '对应发布事务不存在')
         shared = config.get('dataMode') == 'sharedDirectory'
         require(config.get('dataMode', 'quotaVolume') in ('quotaVolume', 'sharedDirectory'), '数据模式不合法')
         if shared:
@@ -194,15 +228,7 @@ def main():
         transaction['phase'] = 'verifying'
         atomicJson(journal, transaction)
         # 验收由固定本机程序实际执行业务请求，不能传入任意验证脚本。
-        receipt = json.loads(run([config['businessVerifier']], input=json.dumps(request), timeout=1200))
-        validateReceipt(receipt, request, request['environment'])
-        final = inspect(config['container'])
-        require(final['State']['Running'] and final['Image'] == imageId(request['image']), '验收后容器停止或运行镜像改变')
-        receipt.update(backupVerified=True, restoreVerified=True, backupId=backup['backupId'],
-                       predecessorImage=current['Config']['Image'])
-        transaction.update(phase='completed', receipt=receipt)
-        atomicJson(journal, transaction)
-        print(json.dumps(receipt))
+        verifyTransaction(config, request, transaction, journal)
 
 
 if __name__ == '__main__':
