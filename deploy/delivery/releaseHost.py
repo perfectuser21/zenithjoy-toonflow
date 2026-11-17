@@ -26,7 +26,7 @@ def recordTopFailure(error):
     if diagnosticPath is None:
         return
     safeMessages = {'镜像传输超时', '镜像归档超容量', '镜像导出或中继失败',
-                    '镜像导入失败', '镜像拉取失败', '镜像完整内容拉取失败',
+                    '镜像加载失败', '镜像拉取失败', '镜像完整内容拉取失败',
                     '镜像传输空间不足', 'OCI blob类型不许可', '存在未处理的镜像传输诊断'}
     message = str(error) if isinstance(error, RuntimeError) and str(error) in safeMessages else None
     fd, name = tempfile.mkstemp(prefix=diagnosticPath.stem + '-top-', suffix='.json', dir=diagnosticPath.parent)

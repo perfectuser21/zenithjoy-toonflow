@@ -62,12 +62,12 @@ def transferPhase(handle, phase):
     recordEvent(handle, phase, 'completed')
 
 
-def importArchive(archive, temporary, handle):
-    # 仅固定 ctr import 的 stderr 可写入 root 私有诊断，输入为已校验 OCI 文件，不含 registry 凭据。
-    process = subprocess.Popen(ctrCommand() + ['images', 'import', '--all-platforms', '--snapshotter', 'overlayfs', str(archive)],
+def loadArchive(archive, temporary, handle):
+    # 仅固定 Docker image load 的 stderr 可写入 root 私有诊断；输入为已校验 OCI，不含 registry 凭据。
+    process = subprocess.Popen(['docker', 'image', 'load', '--input', str(archive)],
                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                env=processEnvironment)
-    stderrPath = Path(temporary) / 'import.stderr'
+    stderrPath = Path(temporary) / 'load.stderr'
     selector = selectors.DefaultSelector()
     deadline = time.monotonic() + 1800
     try:
@@ -79,7 +79,7 @@ def importArchive(archive, temporary, handle):
                 while True:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
-                        raise subprocess.TimeoutExpired('ctr images import', 1800)
+                        raise subprocess.TimeoutExpired('docker image load', 1800)
                     if not selector.select(timeout=min(1, remaining)):
                         continue
                     block = os.read(process.stderr.fileno(), 65536)
@@ -93,9 +93,9 @@ def importArchive(archive, temporary, handle):
                 output.flush()
                 os.fsync(output.fileno())
         result = process.wait(timeout=max(0.01, deadline - time.monotonic()))
-        recordEvent(handle, 'import', 'exit', exitCode=result, stderrTruncated=truncated)
+        recordEvent(handle, 'load', 'exit', exitCode=result, stderrTruncated=truncated)
         if result != 0:
-            raise TransferProcessError('镜像导入失败', result)
+            raise TransferProcessError('镜像加载失败', result)
     finally:
         if process.poll() is None:
             process.kill()
@@ -386,8 +386,8 @@ def _ensureImage(config, request, registry, temporary, maximum, events):
             boundedArchive(exportCommand(request['image']), archive, maximum)
     with transferPhase(events, 'archive_verify'):
         verifyArchive(archive, request, maximum)
-    with transferPhase(events, 'import'):
-        importArchive(archive, temporary, events)
+    with transferPhase(events, 'load'):
+        loadArchive(archive, temporary, events)
     # 再导出读回实际containerd内容；不允许导入后以缺blob镜像进入停机阶段。
     readback = Path(temporary) / 'readback.oci'
     with transferPhase(events, 'readback_export'):
