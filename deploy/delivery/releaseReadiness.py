@@ -5,6 +5,8 @@ import os
 from pathlib import Path, PurePosixPath
 from verifyBusiness import rootFile, rootJson, validateBusinessConfig
 from verifyGeneration import validateGenerationConfig
+from runtimeReadiness import verifyRuntimeReadiness
+from backupShared import estimateShared, sharedDirectories
 from volumeSnapshot import scanVolume, requireSpace, capsuleSize, reserve, requireCapsuleFilesystem
 import subprocess
 import sys
@@ -26,6 +28,10 @@ def main():
         raise RuntimeError('business contract identity mismatch')
     workspaces=validateBusinessConfig(business)
     validateGenerationConfig(business)
+    runtime=verifyRuntimeReadiness(config,business,request)
+    shared=config.get('dataMode')=='sharedDirectory'
+    if shared:
+        sharedDirectories(config,business)
     execution=run(['systemctl','show',config['service'],'--property=ExecStart','--value'])
     if '/usr/bin/docker start -a '+config['container'] not in execution:
         raise RuntimeError('service is not using managed container startup')
@@ -48,6 +54,27 @@ def main():
         value=json.loads(seed.read_text())
         if value.get('deliveryAcceptance') is not True or value.get('toonflowCanvas') is not True:
             raise RuntimeError('dedicated acceptance seed missing explicit marker')
+    if shared:
+        data,_=sharedDirectories(config,business)
+        target=config['containerDataDirectory']
+        for item in current['Mounts']:
+            if item.get('Type')=='bind' and item.get('Destination')==target and item.get('Source')==str(data) and item.get('RW'):
+                break
+        else:
+            raise RuntimeError('shared data directory bind mismatch')
+        for workspace in workspaces:
+            containerPath=PurePosixPath(workspace['directory'])/workspace['canvasPath']
+            bindings=[item for item in current['Mounts'] if containerPath.is_relative_to(PurePosixPath(item['Destination']))]
+            bindings.sort(key=lambda item:len(PurePosixPath(item['Destination']).parts),reverse=True)
+            if not bindings or bindings[0].get('Destination')!=target:
+                raise RuntimeError('shared acceptance seed is shadowed or outside shared data bind')
+        estimate=estimateShared(config,business)
+        for name in ('businessVerifier','switchCommand'):
+            rootFile(config[name],executable=True)
+        print(json.dumps({'environment':request['environment'],'sourceSha':request['sourceSha'],
+                          'image':request['image'],'readinessVerified':True,'deployed':False,
+                          **runtime,'sharedBypass':True,'restoreScope':'sharedFiles','storage':estimate}))
+        return
     run(['systemctl','is-active','--quiet',config['quotaService']])
     data=Path(config['dataDirectory']).resolve(strict=True)
     volume=Path(config['volumeImage']).resolve(strict=True)
@@ -85,7 +112,7 @@ def main():
     if not isinstance(config['requiredBackupPaths'],list) or not config['requiredBackupPaths'] or config['minimumBackupDatabases']<1:
         raise RuntimeError('backup content contract missing')
     print(json.dumps({'environment':request['environment'],'sourceSha':request['sourceSha'],
-                      'image':request['image'],'readinessVerified':True,'deployed':False}))
+                      'image':request['image'],'readinessVerified':True,'deployed':False,**runtime}))
 
 
 if __name__=='__main__':

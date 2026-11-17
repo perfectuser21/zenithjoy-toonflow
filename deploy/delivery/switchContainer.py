@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from verifyBusiness import rootJson
+from backupShared import sharedDirectories
 
 
 def run(args, timeout=120):
@@ -17,6 +19,11 @@ def main():
         raise RuntimeError('root required')
     config = json.loads(Path('/etc/aivideo/release.json').read_text())
     request = json.load(sys.stdin)
+    shared = config.get('dataMode') == 'sharedDirectory'
+    if shared:
+        sharedDirectories(config, rootJson(config['businessConfig'], private=True))
+        if request.get('environment') != 'staging':
+            raise RuntimeError('shared switch requires staging request')
     current = json.loads(run(['docker', 'inspect', config['container']]))[0]
     if current['Image'] != request['predecessorId']:
         raise RuntimeError('production predecessor changed')
@@ -47,7 +54,8 @@ def main():
     run(['docker', 'rename', config['container'], oldName])
     # 执行失败时保留停止状态和事务现场，禁止盲目重启旧程序访问已迁移的数据。
     run(['docker', 'create', '--name', config['container'], *args, '-e', 'TOONFLOW_WEB_MEDIA_STREAMING=1', '-e', 'TOONFLOW_RELEASE_SHA=' + request['sourceSha'], '-e', 'TOONFLOW_RELEASE_IMAGE=' + request['image'], request['image']])
-    run(['systemctl', 'start', config['quotaService']])
+    if not shared:
+        run(['systemctl', 'start', config['quotaService']])
     run(['systemctl', 'start', config['service']])
     print(json.dumps({'predecessorContainer':oldName,'switched':True}))
 

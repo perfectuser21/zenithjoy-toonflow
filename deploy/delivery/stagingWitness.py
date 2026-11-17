@@ -20,26 +20,38 @@ def privateFile(name):
     return str(path)
 
 
-def main():
-    if os.geteuid()!=0:
-        raise RuntimeError('root required')
-    config=json.loads(Path('/etc/aivideo/release.json').read_text())
-    if config['environment']!='production':
-        raise RuntimeError('production witness only')
-    request=json.load(sys.stdin)
+def witnessPayload(request, operation='receipt'):
+    payload={key:request[key] for key in ('sourceSha','image','runId','runAttempt')}
+    payload.update(environment='staging',operation=operation)
+    return payload
+
+
+def witnessCommand(config):
     host=config['stagingWitnessHost']; user=config['stagingWitnessUser']
     if not re.fullmatch(r'[a-zA-Z0-9.-]+',host) or not re.fullmatch(r'[a-z_][a-z0-9_-]*',user):
         raise RuntimeError('invalid witness target')
     port=config.get('stagingWitnessPort',22)
     if type(port) is not int or not 1<=port<=65535:
         raise RuntimeError('invalid witness port')
-    payload={key:request[key] for key in ('sourceSha','image','runId','runAttempt')}
-    payload.update(environment='staging',operation='receipt')
-    result=subprocess.run(['ssh','-T','-p',str(port),'-i',privateFile(config['stagingWitnessKey']),
-                           '-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','StrictHostKeyChecking=yes',
-                           '-o','UserKnownHostsFile='+privateFile(config['stagingWitnessKnownHosts']),
-                           '-o','ConnectTimeout=15',user+'@'+host,'/usr/local/sbin/aivideo-read-release'],
-                          input=json.dumps(payload),capture_output=True,text=True,check=True,timeout=45)
+    return ['ssh','-T','-p',str(port),'-i',privateFile(config['stagingWitnessKey']),
+            '-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','StrictHostKeyChecking=yes',
+            '-o','UserKnownHostsFile='+privateFile(config['stagingWitnessKnownHosts']),
+            '-o','ConnectTimeout=15','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=3',
+            user+'@'+host,'/usr/local/sbin/aivideo-read-release']
+
+
+def main():
+    if os.geteuid()!=0:
+        raise RuntimeError('root required')
+    privateFile('/etc/aivideo/release.json')
+    config=json.loads(Path('/etc/aivideo/release.json').read_text())
+    if config['environment']!='production':
+        raise RuntimeError('production witness only')
+    request=json.load(sys.stdin)
+    payload=witnessPayload(request)
+    result=subprocess.run(witnessCommand(config), input=json.dumps(payload),capture_output=True,
+                          text=True,check=True,timeout=45,
+                          env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LANG':'C.UTF-8'})
     receipt=json.loads(result.stdout)
     for key in ('environment','sourceSha','image','runId','runAttempt'):
         if receipt.get(key)!=payload[key]:
