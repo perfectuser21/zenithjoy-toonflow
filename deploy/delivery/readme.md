@@ -13,13 +13,45 @@
 
 ## 尚未实现、禁止假定存在的主机能力
 
-两地主机目前均缺少 `/usr/local/sbin/aivideo-release`。本目录不包含它的实现；入口的存在检查、JSON 回执检查不能代替主机执行器的实现和审查。
+两地主机目前均缺少 `/usr/local/sbin/aivideo-release`。本目录现在包含控制器 `releaseHost.py`、完整卷备份 `backupVolume.py`、容器切换 `switchContainer.py` 的待审实现，尚未安装或演练；语法检查不能代替运行验收。
 
 该程序必须由 root 安装并保持不可被发布账号修改，专用 SSH key 通过 forced-command 仅调用它，禁止任意 shell、端口转发和 PTY。执行器须独立校验机器环境、源码标签、digest、香港验收来源与生产前驱。不能信任请求中的 passed 字段。
 
 香港：只替换当前 staging 的镜像，保留独立配额卷、权限、端口与配额 helper。不得连接杭州生产凭据或启动未经核验的 worker 恢复逻辑。
 
 杭州：目前 systemd 启动预建容器，必须先实现保留原容器配置与镜像的事务切换；停止写入后完整备份工作区、数据库及项目配额登记和扩展属性，在隔离环境完成恢复验证；切换后做真实业务读回。失败须区分尚未切换与已产生新写入，禁止盲目还原覆盖用户新数据。镜像已拉取不等于发布成功。
+
+## 主机执行器接入
+
+由运维在独立审查和香港演练通过后安装到 `/opt/aivideo/delivery/`，文件及父目录 root 所有、不可由发布账号写入。`/usr/local/sbin/aivideo-release` 必须是固定 root wrapper，清空不必要环境后执行 `releaseHost.py`，不接受任意 shell 命令。
+
+`/etc/aivideo/release.json` 的路径字段均为 root 维护的固定绝对路径：
+
+| 字段 | 用途 |
+| --- | --- |
+| environment | staging 或 production，绑定本机 |
+| stateDirectory | root 私有事务目录，内有 identity.json 的 environment |
+| container / service / quotaService | 当前应用容器、应用 unit、配额 helper unit |
+| dataDirectory / volumeImage | 挂载点及其 loop ext4 原始镜像；备份时核对二者关系 |
+| backupDirectory | root 私有备份目录，禁止发布账号写入 |
+| quotaHelper / quotaHelperSha256 | 固定配额 helper 及审定哈希 |
+| backupCommand / switchCommand | 审定安装的上述两个程序 |
+| readinessCommand | 发布前实际检查程序；尚待实现 |
+| restoreVerifier | 完整卷的独立可写副本配额恢复验收程序；尚待实现 |
+| requiredBackupPaths / minimumBackupDatabases | 必需数据路径与最少数据库数；备份缺项拒绝 |
+| businessVerifier | 固定真实业务验收程序；尚待实现 |
+| stagingWitness | 生产独立取回香港可信验收的程序；尚待实现 |
+| containerCreateArgs | root 固定的容器配置，不接受来自 CI 的挂载或权限参数 |
+
+控制器支持请求附带 `operation=preflight`，仅验证配置与当前环境，不拉镜像、不停机、不切换；生产仍必须取回香港可信回执。`operation=deploy` 先拉固定镜像、核对源码标签并执行准入，再创建持久事务记录。出现任何未完成事务，后续请求拒绝自动重试；必须先读回事实处置。
+
+备份成功后保持原应用与配额 helper 停止，直到固定切换器启动新版，避免备份后出现遗漏新写入的窗口。失败先解冻并取消独立定时兜底，再恢复原服务；解冻失败保持服务停止。
+
+备份程序在停写前要求足够的完整逻辑卷空间：源卷大小 + 1GiB 余量。当前香港根分区剩余约3.6GiB，3GiB staging 卷不满足此条件，必须先确定独立备份落点或可核对的空间方案；不能跳过空间检查。杭州 8GiB 卷剩余约15GiB，容量初步足够，尚未实际停写备份。
+
+当前香港 systemd 使用 `docker run --rm`，容器切换器会拒绝；需先演练转成 `docker start -a` 的固定容器管理方式。杭州已使用后一种方式。两地配额 helper 哈希不同，不得用同镜像发布暗中覆盖 helper。
+
+程序未包含自动数据回滚。切换后应用可能已迁移数据库或产生新写入，失败保留事务、前驱容器和完整备份，不盲目用旧镜像或备份覆盖。
 
 ## GitHub 接入
 
