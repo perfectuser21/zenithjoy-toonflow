@@ -9,6 +9,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+from volumeSnapshot import sparseCopy
 
 
 def run(args, timeout=120, **options):
@@ -23,11 +24,11 @@ def main():
     request = json.load(sys.stdin)
     snapshot = Path(request['snapshot'])
     root = Path(config['backupDirectory']).resolve(strict=True)
-    if snapshot.is_symlink() or snapshot.resolve().parent.parent != root or snapshot.name != 'data.ext4':
+    if snapshot.is_symlink() or snapshot.resolve().parent.parent.parent != root or snapshot.parent.name != 'payload' or snapshot.name != 'data.ext4':
         raise RuntimeError('snapshot outside controlled backups')
-    if not re.fullmatch(r'[0-9]+', snapshot.parent.name):
+    if not re.fullmatch(r'[0-9]+', snapshot.parent.parent.name):
         raise RuntimeError('invalid backup identity')
-    for path in (snapshot, snapshot.parent, root):
+    for path in (snapshot, snapshot.parent, snapshot.parent.parent, root):
         info = path.lstat()
         if info.st_uid != 0 or info.st_mode & 0o077:
             raise RuntimeError('backup permissions invalid')
@@ -37,11 +38,14 @@ def main():
     mount = snapshot.parent / 'quotaRestore'
     if copy.exists() or mount.exists():
         raise RuntimeError('restore attempt already exists')
-    # 副本额外容量以备份实际分配块数作下界，保留1GiB；原始逻辑卷的空间在备份前已校验。
-    stats = os.statvfs(root)
-    if stats.f_bavail * stats.f_frsize < snapshot.stat().st_blocks * 512 + 1024 ** 3:
-        raise RuntimeError('insufficient restore space')
-    run(['cp', '--sparse=always', '--reflink=never', str(snapshot), str(copy)])
+    # 只允许在本次预分配胶囊内恢复，零洞增长和配额探针受该固定容量限制。
+    mounted = json.loads(run(['findmnt','-J','-T',str(snapshot.parent),'-o','TARGET,SOURCE,FSTYPE']))['filesystems'][0]
+    if mounted['target'] != str(snapshot.parent) or mounted['fstype'] != 'ext4':
+        raise RuntimeError('restore requires bounded capsule mount')
+    backing = json.loads(run(['losetup','-J',mounted['source']]))['loopdevices'][0]['back-file']
+    if Path(backing).resolve() != snapshot.parent.parent / 'capsule.ext4':
+        raise RuntimeError('restore capsule backing mismatch')
+    sparseCopy(snapshot, copy)
     os.chmod(copy, 0o600)
     run(['cmp', '--silent', str(snapshot), str(copy)])
     mount.mkdir(mode=0o700)

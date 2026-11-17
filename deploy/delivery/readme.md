@@ -39,6 +39,7 @@
 | container / service / quotaService | 当前应用容器、应用 unit、配额 helper unit |
 | dataDirectory / volumeImage | 挂载点及其 loop ext4 原始镜像；备份时核对二者关系 |
 | backupDirectory | root 私有备份目录，禁止发布账号写入 |
+| backupCapsuleBytes | root显式配置的备份胶囊硬容量，256MiB至64GiB；实分配后仍留宿主1GiB |
 | quotaHelper / quotaHelperSha256 | 固定配额 helper 及审定哈希 |
 | backupCommand / switchCommand | 审定安装的上述两个程序 |
 | readinessCommand | 安装 releaseReadiness.py：只读核对服务、挂载、空间和所需验收入口 |
@@ -56,7 +57,7 @@
 
 备份成功后保持原应用与配额 helper 停止，直到固定切换器启动新版，避免备份后出现遗漏新写入的窗口。失败先解冻并取消独立定时兜底，再恢复原服务；解冻失败保持服务停止。
 
-备份程序在停写前要求足够的完整逻辑卷空间：2 × 源卷逻辑大小 + 1GiB 余量（快照和恢复副本各一份）。当前香港根分区剩余约2.5GiB，3GiB staging 卷至少需7GiB，不满足此条件，必须先确定独立备份落点或可核对的空间方案；不能跳过空间检查。杭州8GiB卷需至少17GiB，剩余约15GiB也不满足保守准入，必须先落实备份空间方案；尚未实际停写备份。
+备份采用root显式配置的 `backupCapsuleBytes` 硬容量胶囊：宿主ext4/4KiB块上先完整预分配，并在nodiscard格式化后再次预分配、fsync和核对；宿主保留至少1GiB。原始卷完整扫描只用于估算，最终冻结后重新扫描；稀疏快照保留全部非零块并完整cmp，实际可写配额恢复只在胶囊内部执行。胶囊满额即失败，不依赖压缩率或文件系统元数据常数推断空间安全。恢复结束后卸载胶囊，零洞压缩前后SHA相等，再持久化回执。备份目录必须与冻结数据卷处于不同文件系统。看门狗不依赖标记成功才解冻；手动解冻前保持兜底，解冻后撤销timer/service并核对触发标记，触发过一律不接受快照。此方案尚未实机演练，不代表现役备份通过。
 
 香港隔离c001实例的systemd使用 `docker run --rm`；员工站则是直接启动Bun。两者均不满足容器切换器要求，不能混作同一staging。需先完成员工站的数据保留和固定容器启动演练。杭州已使用 `docker start -a`。两地配额 helper 哈希不同，不得用同镜像发布暗中覆盖 helper。
 

@@ -5,6 +5,7 @@ import os
 from pathlib import Path, PurePosixPath
 from verifyBusiness import rootFile, rootJson, validateBusinessConfig
 from verifyGeneration import validateGenerationConfig
+from volumeSnapshot import scanVolume, requireSpace, capsuleSize, reserve, requireCapsuleFilesystem
 import subprocess
 import sys
 
@@ -70,9 +71,12 @@ def main():
     backup=Path(config['backupDirectory'])
     if backup.is_symlink() or not backup.is_dir():
         raise RuntimeError('backup directory missing')
-    stats=os.statvfs(backup)
-    if stats.f_bavail*stats.f_frsize < 2*volume.stat().st_size+1024**3:
-        raise RuntimeError('insufficient space for complete volume backup')
+    requireCapsuleFilesystem(backup)
+    capacity = capsuleSize(config)
+    requireSpace(backup, capacity + reserve)
+    estimate = scanVolume(volume)
+    if 2 * estimate['estimatedPayloadBytes'] + 64 * 1024**2 > capacity:
+        raise RuntimeError('configured backup capsule too small for estimated contents')
     # 确认所有外部实际验收入口已安装；不以文件存在代替业务验收通过。
     for name in ('restoreVerifier','businessVerifier','switchCommand'):
         path=Path(config[name])
