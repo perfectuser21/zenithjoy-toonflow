@@ -162,6 +162,7 @@ export function requestIdentity(req: Request): AuthIdentity | undefined {
 export async function multiTenantAccess(req: Request, res: Response, next: NextFunction) {
   const path = accessPath(req);
   if (path === null) return next();
+  if (path === "/api/delivery/identity" && ["GET", "HEAD"].includes(req.method)) return next();
   const backgroundRoute = path.startsWith("/api/ai/media/background/");
   if (backgroundRoute && !isEnabled()) throw Object.assign(new Error("长视频换背景尚未在此环境开放"), { status: 403 });
   const knownBackground = req.method === "POST" && backgroundBetaRoutes.has(path);

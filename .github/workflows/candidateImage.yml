@@ -2,6 +2,11 @@ name: Build candidate image
 
 on:
   workflow_dispatch:
+  workflow_call:
+    outputs:
+      image:
+        description: Immutable image produced for the caller commit
+        value: ${{ jobs.image.outputs.image }}
 
 permissions:
   contents: read
@@ -14,6 +19,8 @@ concurrency:
 jobs:
   image:
     if: github.ref == 'refs/heads/master'
+    outputs:
+      image: ${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

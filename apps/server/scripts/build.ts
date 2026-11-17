@@ -1,7 +1,7 @@
 import { $ } from "bun";
 import { cp, mkdir, realpath, rm, readdir } from "@toonflow/file";
 import { dirname, relative, resolve, sep } from "node:path";
-import config from "../../../electrobun.config";
+import { appVersion } from "../../../appVersion";
 import copyDocumentPackages from "./copyDocumentPackages";
 import copySandboxPackages from "./copySandboxPackages";
 import { createHash } from "node:crypto";
@@ -42,7 +42,7 @@ await mkdir(outputDirectory, { recursive: true });
 // ACT: 移除旧版构建遗留的宿主 SDK，避免增量构建继续把它带入发布目录。
 await rm(resolve(outputDirectory, "pluginSdk"), { recursive: true, force: true });
 // ACT: Photon、anydoc 与沙盒依赖保留运行时目录，WASM/Worker 不依赖源码目录或启动位置。
-await $`${process.execPath} build src/index.ts --target=bun --minify --external @silvia-odwyer/photon-node --external @firecrawl/anydoc --external @firecrawl/anydoc-wasm --external just-bash --define ${`process.env.appVersion:${JSON.stringify(config.app.version)}`} --define ${`__toonflowNodeHashes__:${JSON.stringify(trustedNodeHashes)}`} --define ${`__toonflowWebHashes__:${JSON.stringify(trustedWebHashes)}`} --outdir ${outputDirectory}`.cwd(resolve(projectDir, "apps/server"));
+await $`${process.execPath} build src/index.ts --target=bun --minify --external @silvia-odwyer/photon-node --external @firecrawl/anydoc --external @firecrawl/anydoc-wasm --external just-bash --define ${`process.env.appVersion:${JSON.stringify(appVersion)}`} --define ${`__toonflowNodeHashes__:${JSON.stringify(trustedNodeHashes)}`} --define ${`__toonflowWebHashes__:${JSON.stringify(trustedWebHashes)}`} --outdir ${outputDirectory}`.cwd(resolve(projectDir, "apps/server"));
 await $`${process.execPath} build packages/ffmpeg/src/ffmpegWorker.ts --target=bun --minify --outdir ${outputDirectory}`.cwd(projectDir);
 await $`${process.execPath} build apps/server/scripts/trimWorker.ts apps/server/scripts/trimStore.ts apps/server/scripts/provisionTrimStore.ts --target=bun --minify --outdir ${outputDirectory}`.cwd(projectDir);
 await $`${process.execPath} build packages/multiTenant/models/migrateUserProviderKeys.ts --target=bun --minify --outdir ${outputDirectory}`.cwd(projectDir);

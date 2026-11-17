@@ -1,0 +1,102 @@
+name: Canvas delivery
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'apps/**'
+      - 'packages/**'
+      - 'patches/**'
+      - 'bun.lock'
+      - 'package.json'
+      - 'appVersion.ts'
+      - 'electrobun.config.ts'
+      - 'tsconfig.base.json'
+      - 'Dockerfile'
+      - 'deploy/**'
+      - '.github/workflows/canvasDelivery.yml'
+      - '.github/workflows/candidateImage.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: canvas-delivery
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    if: vars.CANVAS_DELIVERY_ENABLED == 'true'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/candidateImage.yml
+
+  staging:
+    permissions:
+      contents: read
+      packages: read
+    needs: candidate
+    runs-on: ubuntu-24.04
+    environment: staging
+    timeout-minutes: 45
+    outputs:
+      receipt: ${{ steps.deploy.outputs.receipt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Deploy and verify Hong Kong staging
+        id: deploy
+        env:
+          RELEASE_HOST: ${{ vars.CANVAS_RELEASE_HOST }}
+          RELEASE_PORT: ${{ vars.CANVAS_RELEASE_PORT }}
+          RELEASE_USER: ${{ vars.CANVAS_RELEASE_USER }}
+          RELEASE_KEY: ${{ secrets.CANVAS_RELEASE_SSH_KEY }}
+          RELEASE_KNOWN_HOSTS: ${{ secrets.CANVAS_RELEASE_KNOWN_HOSTS }}
+          RELEASE_REGISTRY_USER: ${{ github.actor }}
+          RELEASE_REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_IMAGE: ${{ needs.candidate.outputs.image }}
+          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_ENVIRONMENT: staging
+        run: bash deploy/delivery/remoteRelease.sh
+      - name: Publish staging evidence
+        if: always()
+        run: |
+          if [ -f releaseReceipt.json ]; then
+            cat releaseReceipt.json >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  production:
+    permissions:
+      contents: read
+      packages: read
+    needs: [candidate, staging]
+    runs-on: ubuntu-24.04
+    environment: production
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Promote same digest to Hangzhou
+        env:
+          RELEASE_HOST: ${{ vars.CANVAS_RELEASE_HOST }}
+          RELEASE_PORT: ${{ vars.CANVAS_RELEASE_PORT }}
+          RELEASE_USER: ${{ vars.CANVAS_RELEASE_USER }}
+          RELEASE_KEY: ${{ secrets.CANVAS_RELEASE_SSH_KEY }}
+          RELEASE_KNOWN_HOSTS: ${{ secrets.CANVAS_RELEASE_KNOWN_HOSTS }}
+          RELEASE_REGISTRY_USER: ${{ github.actor }}
+          RELEASE_REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_IMAGE: ${{ needs.candidate.outputs.image }}
+          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_ENVIRONMENT: production
+          RELEASE_STAGING_RECEIPT: ${{ needs.staging.outputs.receipt }}
+        run: bash deploy/delivery/remoteRelease.sh
+      - name: Publish production evidence
+        if: always()
+        run: |
+          if [ -f releaseReceipt.json ]; then
+            cat releaseReceipt.json >> "$GITHUB_STEP_SUMMARY"
+          fi
