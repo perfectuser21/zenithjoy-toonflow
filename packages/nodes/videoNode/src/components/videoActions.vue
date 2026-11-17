@@ -14,7 +14,7 @@
     <div class="videoActionPanel nodrag nopan nowheel" @pointerdown.stop @mousedown.stop @dblclick.stop @keydown.stop>
       <template v-if="action === 'trim'">
         <p v-if="preparingPreview || previewError" class="actionHint" role="status">{{ preparingPreview ? '正在生成兼容预览…' : previewError }}</p>
-        <video ref="preview" class="clipPreview" :src="playbackSrc" controls playsinline preload="auto" aria-label="截取片段预览" @loadeddata="readDuration" @timeupdate="readTime" @play="playSelection" @error="duration = 0; handleError($event)" />
+        <video ref="preview" class="clipPreview" :src="playbackSrc" controls playsinline preload="metadata" aria-label="截取片段预览" @loadedmetadata="readDuration" @timeupdate="readTime" @play="playSelection" @error="duration = 0; handleError($event)" />
         <div class="clipTimeline" :class="{ unavailable: processing || !duration }">
           <div class="timelineHeader">
             <span>拖动左右边界，选择保留的片段</span>

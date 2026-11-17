@@ -30,9 +30,12 @@ def main():
     host=config['stagingWitnessHost']; user=config['stagingWitnessUser']
     if not re.fullmatch(r'[a-zA-Z0-9.-]+',host) or not re.fullmatch(r'[a-z_][a-z0-9_-]*',user):
         raise RuntimeError('invalid witness target')
+    port=config.get('stagingWitnessPort',22)
+    if type(port) is not int or not 1<=port<=65535:
+        raise RuntimeError('invalid witness port')
     payload={key:request[key] for key in ('sourceSha','image','runId','runAttempt')}
     payload.update(environment='staging',operation='receipt')
-    result=subprocess.run(['ssh','-T','-i',privateFile(config['stagingWitnessKey']),
+    result=subprocess.run(['ssh','-T','-p',str(port),'-i',privateFile(config['stagingWitnessKey']),
                            '-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','StrictHostKeyChecking=yes',
                            '-o','UserKnownHostsFile='+privateFile(config['stagingWitnessKnownHosts']),
                            '-o','ConnectTimeout=15',user+'@'+host,'/usr/local/sbin/aivideo-read-release'],

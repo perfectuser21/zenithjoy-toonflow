@@ -2,7 +2,9 @@
 """停写前发布准入；只读当前服务和卷，缺少条件立即拒绝。"""
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from verifyBusiness import rootFile, rootJson, validateBusinessConfig
+from verifyGeneration import validateGenerationConfig
 import subprocess
 import sys
 
@@ -18,12 +20,33 @@ def main():
     request=json.load(sys.stdin)
     if request['environment'] != config['environment']:
         raise RuntimeError('environment mismatch')
+    business=rootJson(config['businessConfig'],private=True)
+    if business['environment']!=request['environment'] or business['publicOrigin']!=config['publicOrigin']:
+        raise RuntimeError('business contract identity mismatch')
+    workspaces=validateBusinessConfig(business)
+    validateGenerationConfig(business)
     execution=run(['systemctl','show',config['service'],'--property=ExecStart','--value'])
     if '/usr/bin/docker start -a '+config['container'] not in execution:
         raise RuntimeError('service is not using managed container startup')
     current=json.loads(run(['docker','inspect',config['container']]))[0]
     if not current['State']['Running'] or current['State']['Restarting']:
         raise RuntimeError('current service not running steadily')
+    for workspace in workspaces:
+        directory=PurePosixPath(workspace['directory']); canvas=PurePosixPath(workspace['canvasPath'])
+        if not directory.is_absolute() or canvas.is_absolute() or '..' in canvas.parts or '..' in directory.parts:
+            raise RuntimeError('invalid acceptance seed path')
+        containerPath=directory/canvas
+        bindings=[m for m in current['Mounts'] if m['Type']=='bind' and containerPath.is_relative_to(PurePosixPath(m['Destination']))]
+        bindings.sort(key=lambda m:len(PurePosixPath(m['Destination']).parts),reverse=True)
+        if not bindings:
+            raise RuntimeError('acceptance seed is not on persistent data mount')
+        binding=bindings[0]; hostRoot=Path(binding['Source']).resolve(strict=True)
+        seed=hostRoot/str(containerPath.relative_to(PurePosixPath(binding['Destination'])))
+        if seed.is_symlink() or not seed.resolve(strict=True).is_relative_to(hostRoot) or seed.stat().st_size>4*1024*1024:
+            raise RuntimeError('acceptance seed escapes persistent data or exceeds limit')
+        value=json.loads(seed.read_text())
+        if value.get('deliveryAcceptance') is not True or value.get('toonflowCanvas') is not True:
+            raise RuntimeError('dedicated acceptance seed missing explicit marker')
     run(['systemctl','is-active','--quiet',config['quotaService']])
     data=Path(config['dataDirectory']).resolve(strict=True)
     volume=Path(config['volumeImage']).resolve(strict=True)
@@ -33,8 +56,14 @@ def main():
     backing=json.loads(run(['losetup','-J',mount['source']]))['loopdevices'][0]['back-file']
     if Path(backing).resolve()!=volume:
         raise RuntimeError('volume backing identity mismatch')
+    applicationData=Path(config.get('applicationDataDirectory',str(data))).resolve(strict=True)
+    if not applicationData.is_relative_to(data):
+        raise RuntimeError('application data outside configured volume')
+    target=config.get('containerDataDirectory','/app/data')
+    if not PurePosixPath(target).is_absolute() or '..' in PurePosixPath(target).parts:
+        raise RuntimeError('invalid container data target')
     for item in current['Mounts']:
-        if item.get('Destination')=='/app/data' and Path(item['Source']).resolve()==data and item.get('RW'):
+        if item.get('Destination')==target and Path(item['Source']).resolve()==applicationData and item.get('RW'):
             break
     else:
         raise RuntimeError('application data binding mismatch')

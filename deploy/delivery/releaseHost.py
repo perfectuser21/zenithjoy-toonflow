@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import time
+import tempfile
 
 configPath = Path('/etc/aivideo/release.json')
 publicOrigins = {'staging':'https://toonflow.zenjoymedia.media','production':'https://aivideo.zenithjoy.tech'}
@@ -79,6 +80,7 @@ def main():
     raw = sys.stdin.buffer.read(32769)
     require(len(raw) <= 32768, '请求过大')
     request = json.loads(raw)
+    registry = request.pop("registryCredential", None)
     required = {'environment', 'sourceSha', 'image', 'runId', 'runAttempt'}
     require(set(request) <= required | {'stagingReceipt', 'operation'} and required <= set(request), '请求字段不合法')
     require(request['environment'] == config['environment'], '主机环境不匹配')
@@ -137,7 +139,18 @@ def main():
             print(json.dumps({'environment':request['environment'], 'sourceSha':request['sourceSha'],
                               'image':request['image'], 'result':'ready', 'deployed':False}))
             return
-        run(['docker', 'pull', request['image']], timeout=1800)
+        require(isinstance(registry, dict) and set(registry) == {'user', 'token'}, '缺少短期镜像读取身份')
+        require(isinstance(registry['user'], str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,99}(?:\[bot\])?', registry['user'])
+                and isinstance(registry['token'], str) and registry['token'] and len(registry['token']) <= 4096
+                and not any(character in registry['token'] for character in '\r\n'), '镜像读取身份不合法')
+        # GHA的短期令牌仅用于本次pull，不写入事务或持久Docker配置。
+        with tempfile.TemporaryDirectory(prefix='aivideoRegistry') as dockerConfig:
+            os.chmod(dockerConfig, 0o700)
+            run(['docker', '--config', dockerConfig, 'login', 'ghcr.io', '--username', registry['user'], '--password-stdin'],
+                input=registry['token'] + '\n')
+            run(['docker', '--config', dockerConfig, 'pull', request['image']], timeout=1800)
+        registry = None
+
         metadata = json.loads(run(['docker', 'image', 'inspect', request['image']]))[0]
         labels = metadata['Config'].get('Labels') or {}
         require(labels.get('org.opencontainers.image.revision') == request['sourceSha'], '镜像源码标签不匹配')

@@ -5,6 +5,8 @@ set -euo pipefail
 : "${RELEASE_USER:?Missing environment user}"
 : "${RELEASE_KEY:?Missing dedicated release key}"
 : "${RELEASE_KNOWN_HOSTS:?Missing pinned SSH host keys}"
+: "${RELEASE_REGISTRY_USER:?Missing registry job actor}"
+: "${RELEASE_REGISTRY_TOKEN:?Missing short-lived registry token}"
 : "${RELEASE_IMAGE:?Missing immutable candidate}"
 : "${RELEASE_SHA:?Missing source revision}"
 : "${RELEASE_ENVIRONMENT:?Missing environment}"
@@ -29,9 +31,13 @@ if request['environment']=='production':
     assert stage['runId']==request['runId'] and stage['runAttempt']==request['runAttempt']
     assert stage['result']=='passed' and stage['businessVerified'] is True
     request['stagingReceipt']=stage
+request['registryCredential']={'user':os.environ['RELEASE_REGISTRY_USER'],'token':os.environ['RELEASE_REGISTRY_TOKEN']}
 print(json.dumps(request))
 PY
-ssh -T -i "$releaseTmp/key" -o BatchMode=yes -o IdentitiesOnly=yes \
+releasePort="${RELEASE_PORT:-22}"
+[[ "$releasePort" =~ ^[0-9]{1,5}$ ]]
+(( 10#$releasePort > 0 && 10#$releasePort <= 65535 ))
+ssh -T -p "$releasePort" -i "$releaseTmp/key" -o BatchMode=yes -o IdentitiesOnly=yes \
   -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$releaseTmp/knownHosts" \
   -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
   "$RELEASE_USER@$RELEASE_HOST" /usr/local/sbin/aivideo-release \

@@ -6,7 +6,7 @@
 
 同一发布版本不意味着两个环境共享数据库或素材。staging和production数据保持隔离；员工在旧香港站积累的业务内容需要单独核对迁移，发布流程不默认复制、覆盖或删除它们。员工香港站目前是systemd直接启动Bun，且数据仍是普通目录；本目录当前的容器/独立ext4配额卷执行器不能直接部署到员工站。要先完成保留数据的迁移演练及入口切换，再接入CD。
 
-当前交付的是编排入口，**不是已经可运行的完整发布系统**。`CANVAS_DELIVERY_ENABLED` 默认不存在，因此自动发布不启动。只有下列主机接入及真实演练通过后才能设为 `true`。不能通过人工写入 passed 回执启用。
+当前交付包括编排和主机执行器代码，**尚未完成员工入口切换及真实发布验收**。仓库变量 `CANVAS_DELIVERY_ENABLED=false`，因此自动发布不启动。只有下列主机接入及真实演练通过后才能设为 `true`。不能通过人工写入 passed 回执启用。
 
 ## 已实现的仓库入口
 
@@ -44,7 +44,9 @@
 | readinessCommand | 安装 releaseReadiness.py：只读核对服务、挂载、空间和所需验收入口 |
 | restoreVerifier | 安装 restoreVolume.py：克隆卷配额与降权EDQUOT验收 |
 | requiredBackupPaths / minimumBackupDatabases | 必需数据路径与最少数据库数；备份缺项拒绝 |
-| businessVerifier | 固定真实业务验收程序；尚待实现 |
+| businessVerifier | verifyBusiness.py：真实公网与本机版本一致、保存读回、截取、生成；尚未安装运行 |
+| businessConfig | root 私有业务验收配置；专用验收画布需 deliveryAcceptance 标记 |
+| applicationDataDirectory / containerDataDirectory | 可选的卷内应用目录及容器挂载目标，迁移员工站时保留原绝对路径 |
 | stagingWitness | 安装 stagingWitness.py，生产独立取回香港可信验收；主机尚未配置 |
 | expectedQuotaKiB / expectedQuotaInodes | 本次配置的已审定限额，当前账号为5242880KiB与100000个inode |
 | serviceUid / serviceGid | 恢复副本上非特权配额探针的UID/GID，必须大于零 |
@@ -54,7 +56,7 @@
 
 备份成功后保持原应用与配额 helper 停止，直到固定切换器启动新版，避免备份后出现遗漏新写入的窗口。失败先解冻并取消独立定时兜底，再恢复原服务；解冻失败保持服务停止。
 
-备份程序在停写前要求足够的完整逻辑卷空间：2 × 源卷逻辑大小 + 1GiB 余量（快照和恢复副本各一份）。当前香港根分区剩余约3.6GiB，3GiB staging 卷至少需7GiB，不满足此条件，必须先确定独立备份落点或可核对的空间方案；不能跳过空间检查。杭州8GiB卷需至少17GiB，剩余约15GiB也不满足保守准入，必须先落实备份空间方案；尚未实际停写备份。
+备份程序在停写前要求足够的完整逻辑卷空间：2 × 源卷逻辑大小 + 1GiB 余量（快照和恢复副本各一份）。当前香港根分区剩余约2.5GiB，3GiB staging 卷至少需7GiB，不满足此条件，必须先确定独立备份落点或可核对的空间方案；不能跳过空间检查。杭州8GiB卷需至少17GiB，剩余约15GiB也不满足保守准入，必须先落实备份空间方案；尚未实际停写备份。
 
 香港隔离c001实例的systemd使用 `docker run --rm`；员工站则是直接启动Bun。两者均不满足容器切换器要求，不能混作同一staging。需先完成员工站的数据保留和固定容器启动演练。杭州已使用 `docker start -a`。两地配额 helper 哈希不同，不得用同镜像发布暗中覆盖 helper。
 
@@ -67,11 +69,12 @@
 | 类型 | 名称 | 内容 |
 | --- | --- | --- |
 | variable | CANVAS_RELEASE_HOST | 对应环境可由 GitHub runner 访问的 SSH 域名/IP |
+| variable | CANVAS_RELEASE_PORT | 香港现有公网6443，杭州22 |
 | variable | CANVAS_RELEASE_USER | 仅能调用执行器的专用发布账号 |
 | secret | CANVAS_RELEASE_SSH_KEY | 从 1Password 管理的专用私钥 |
 | secret | CANVAS_RELEASE_KNOWN_HOSTS | 独立核实的 SSH host key；禁止运行时 ssh-keyscan 信任 |
 
-主机拉取私有 GHCR 镜像使用其独立最小读取权限凭据，不接收工作流命令行传入的仓库 token。GitHub 环境权限与发布者范围配置完成后才启用仓库变量 `CANVAS_DELIVERY_ENABLED=true`。
+主机拉取私有 GHCR 镜像使用当前 job 的短期 GITHUB_TOKEN（packages:read），经 SSH stdin 传入，仅用于私有临时 Docker 配置；不写事务日志，不保留长期 GitHub PAT。GitHub 环境权限与发布者范围配置完成后才启用仓库变量 `CANVAS_DELIVERY_ENABLED=true`。
 
 ## 执行器请求与回执
 
@@ -97,3 +100,13 @@
 ### 只读香港见证的权限合同
 
 生产配置 `stagingWitnessHost`、`stagingWitnessUser`、`stagingWitnessKey`、`stagingWitnessKnownHosts`；后两个必须是root保护的文件。见证key与部署key分开，从1Password管理，不复用个人SSH身份。香港见证账号的authorized_keys强制命令只能调用受限sudo的readRelease.py包装器（安装为aivideo-read-release），禁PTY、转发和任意shell。包装器只接受operation=receipt且environment=staging，不得把见证账号直接绑定到可deploy的releaseHost.py。控制器在任何回执输出前都会拒绝尚未完成的事务，即使旧回执镜像恰好仍在运行。当前只完成代码，尚未安装账号、密钥或wrapper。
+
+## 本轮接入与验证现状
+
+GitHub staging/production environments、仅master分支策略、各自专用SSH key和固定host key已配置。两地发布账号均只允许sudo固定发布器且禁止交互shell/转发；公网认证已实测，发布器尚未安装，因此认证成功后明确返回command not found。香港使用现有6443端口，不增加新监听；临时relay方案已撤销授权。
+
+员工站Cloudflare Access增设独立机器验收策略，保留原人员登录策略。机器凭据仅在1Password及私有缓存；实际公网ffmpeg/status通过，媒体Range请求206且仅传回1024字节。员工数据在线兼容副本用现有c001镜像保留原路径启动，2秒截取耗时0.803秒、ffprobe读回2秒；兼容容器随后停止。在线副本不算一致性备份，未替换现役员工服务。
+
+verifyBusiness.py在staging保留shared工作区模式，production必须验证两个普通账号隔离；均要求专用画布标记、版本/bootId一致、实际截取与生成结果。verifyGeneration.py只提交一次带固定taskId任务，后续只读轮询，未知结果不重发。新identity API声明候选版本和只读能力；旧版缺此接口时不允许付费验收。
+
+网页媒体读取改为显式服务器能力开放时使用原受控接口的Range读取；桌面与旧服务器保留Blob读取。剪辑预览在metadata可用时初始化，避免必须等待整个视频下载。此优化尚未部署，不能据此宣称员工卡顿已修复。

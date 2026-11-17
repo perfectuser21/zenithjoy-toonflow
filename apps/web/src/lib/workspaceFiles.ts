@@ -8,6 +8,14 @@ type WorkspaceEntry = { name: string; path: string; type: "file" | "directory" }
 export type TextSnapshot = { text: string; revision: string; encoding: "utf-8" | "utf-8-bom" | "utf-16le" | "utf-16be" };
 const client = axios.create({ baseURL: "/api/workspaces/files", headers: { "x-toonflow-workspace": "1" } });
 registerApiLanguage(client);
+let directMediaUrls: Promise<boolean> | undefined;
+function canUseDirectMediaUrls() {
+  // 仅显式配置的服务器部署开放直接媒体URL；本机任意目录仍使用带工作区头的读取。
+  return directMediaUrls ??= axios.get("/api/delivery/identity", { timeout: 5000 })
+    .then(({ data }) => data.code === 200 && data.data?.capabilities?.directWorkspaceMediaUrls === true)
+    .catch(() => false);
+}
+
 const fileUrls = new Map<string, { directory: string; path: string; url: Promise<string>; users: number }>();
 
 function cachePath(path: string) {
@@ -62,8 +70,12 @@ export default function useWorkspaceFiles(directory?: MaybeRefOrGetter<string | 
     const key = JSON.stringify([directory, path, mimeType]);
     let entry = fileUrls.get(key);
     if (!entry) {
-      const url = client.get<Blob>("/read", { params: { directory, path }, responseType: "blob" })
+      const readBlob = () => client.get<Blob>("/read", { params: { directory, path }, responseType: "blob" })
         .then(({ data }) => URL.createObjectURL(mimeType ? new Blob([data], { type: mimeType }) : data));
+      const url = /^(video|audio)\//i.test(mimeType ?? "")
+        ? canUseDirectMediaUrls().then(allowed => allowed
+          ? `/api/workspaces/files/read?${new URLSearchParams({ directory, path })}` : readBlob())
+        : readBlob();
       entry = { directory, path, url, users: 0 };
       fileUrls.set(key, entry);
       const current = entry;
@@ -80,7 +92,7 @@ export default function useWorkspaceFiles(directory?: MaybeRefOrGetter<string | 
         if (--current.users) return;
         if (fileUrls.get(key) === current) fileUrls.delete(key);
         // 等待中的读取也要在最后一个使用者离开后释放，不撤销其他节点仍使用的 URL。
-        void current.url.then(url => URL.revokeObjectURL(url), () => {});
+        void current.url.then(url => { if (url.startsWith("blob:")) URL.revokeObjectURL(url); }, () => {});
       },
     };
   }

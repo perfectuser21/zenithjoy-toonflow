@@ -9,6 +9,9 @@ on:
       - 'patches/**'
       - 'bun.lock'
       - 'package.json'
+      - 'appVersion.ts'
+      - 'electrobun.config.ts'
+      - 'tsconfig.base.json'
       - 'Dockerfile'
       - 'deploy/**'
       - '.github/workflows/canvasDelivery.yml'
@@ -31,6 +34,9 @@ jobs:
     uses: ./.github/workflows/candidateImage.yml
 
   staging:
+    permissions:
+      contents: read
+      packages: read
     needs: candidate
     runs-on: ubuntu-24.04
     environment: staging
@@ -45,9 +51,12 @@ jobs:
         id: deploy
         env:
           RELEASE_HOST: ${{ vars.CANVAS_RELEASE_HOST }}
+          RELEASE_PORT: ${{ vars.CANVAS_RELEASE_PORT }}
           RELEASE_USER: ${{ vars.CANVAS_RELEASE_USER }}
           RELEASE_KEY: ${{ secrets.CANVAS_RELEASE_SSH_KEY }}
           RELEASE_KNOWN_HOSTS: ${{ secrets.CANVAS_RELEASE_KNOWN_HOSTS }}
+          RELEASE_REGISTRY_USER: ${{ github.actor }}
+          RELEASE_REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_IMAGE: ${{ needs.candidate.outputs.image }}
           RELEASE_SHA: ${{ github.sha }}
           RELEASE_ENVIRONMENT: staging
@@ -60,6 +69,9 @@ jobs:
           fi
 
   production:
+    permissions:
+      contents: read
+      packages: read
     needs: [candidate, staging]
     runs-on: ubuntu-24.04
     environment: production
@@ -71,9 +83,12 @@ jobs:
       - name: Promote same digest to Hangzhou
         env:
           RELEASE_HOST: ${{ vars.CANVAS_RELEASE_HOST }}
+          RELEASE_PORT: ${{ vars.CANVAS_RELEASE_PORT }}
           RELEASE_USER: ${{ vars.CANVAS_RELEASE_USER }}
           RELEASE_KEY: ${{ secrets.CANVAS_RELEASE_SSH_KEY }}
           RELEASE_KNOWN_HOSTS: ${{ secrets.CANVAS_RELEASE_KNOWN_HOSTS }}
+          RELEASE_REGISTRY_USER: ${{ github.actor }}
+          RELEASE_REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_IMAGE: ${{ needs.candidate.outputs.image }}
           RELEASE_SHA: ${{ github.sha }}
           RELEASE_ENVIRONMENT: production

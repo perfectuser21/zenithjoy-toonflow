@@ -684,7 +684,7 @@ export async function start(cwd: string, taskId: string, mediaType: "image" | "v
   });
 }
 
-export async function status(cwd: string, taskIds: string[], resume = false, owner?: AuthIdentity | null, recoveryOnly = false) {
+export async function status(cwd: string, taskIds: string[], resume = false, owner?: AuthIdentity | null, recoveryOnly = false, readOnly = false) {
   requireOwner(owner);
   cwd = await realpath(cwd);
   return Promise.all(taskIds.map(taskId => {
@@ -692,6 +692,20 @@ export async function status(cwd: string, taskIds: string[], resume = false, own
     return locked(key, async () => {
       let task = await load(cwd, taskId, key, owner);
       if (!task) return { taskId, state: "interrupted" as const, resumable: false, result: error<GeneratedMedia[]>("生成任务不存在", null, 404) };
+      // 发布验收轮询仅观察已提交任务，禁止隐式恢复、预占或结算。
+      if (readOnly) {
+        if (!task.active && task.record.executionLeaseId) {
+          const ownerId = task.record.ownerUserId ?? task.record.ownerAdminId;
+          if (!ownerId) invalid("媒体任务租约归属无效", 409);
+          const published = await readMediaLease(task.record.cwd, task.record.executionLeaseId, task.record.taskId, ownerId);
+          if (published && typeof published.checkpointGeneration === "number" && typeof published.checkpointId === "string") {
+            const latest = await load(cwd, taskId, key, owner, true, published.checkpointGeneration, published.checkpointId);
+            if (!latest || latest.record.executionLeaseId !== task.record.executionLeaseId) invalid("媒体任务发布记录无效", 409);
+            return snapshot(latest, owner);
+          }
+        }
+        return snapshot(task, owner);
+      }
       let taskRecoveryOnly = recoveryOnly;
       if (task.record.executionLeaseId) {
         const policy = await backgroundMediaPolicy(cwd);

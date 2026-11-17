@@ -46,7 +46,7 @@ def main():
                     raise RuntimeError('another container still writes data')
     run(['docker', 'rename', config['container'], oldName])
     # 执行失败时保留停止状态和事务现场，禁止盲目重启旧程序访问已迁移的数据。
-    run(['docker', 'create', '--name', config['container'], *args, request['image']])
+    run(['docker', 'create', '--name', config['container'], *args, '-e', 'TOONFLOW_WEB_MEDIA_STREAMING=1', '-e', 'TOONFLOW_RELEASE_SHA=' + request['sourceSha'], '-e', 'TOONFLOW_RELEASE_IMAGE=' + request['image'], request['image']])
     run(['systemctl', 'start', config['quotaService']])
     run(['systemctl', 'start', config['service']])
     print(json.dumps({'predecessorContainer':oldName,'switched':True}))
