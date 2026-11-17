@@ -8,11 +8,27 @@ import sqlite3
 import subprocess
 import sys
 import time
+from volumeSnapshot import scanVolume, requireSpace, sparseCopy, capsuleSize, reserve, requireCapsuleFilesystem
 
 
 def command(args, timeout=120):
     return subprocess.run(args, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           text=True, timeout=timeout).stdout
+
+
+def stopGuard(guard):
+    # 临时timer停止后，尚未触发的service可能被PID1自动卸载；以终态核对。
+    for suffix in ('.timer', '.service'):
+        unit = guard + suffix
+        result = subprocess.run(['systemctl','stop',unit],capture_output=True,text=True,timeout=30)
+        state = subprocess.run(['systemctl','show',unit,'--property=LoadState','--property=ActiveState'],capture_output=True,text=True,timeout=30)
+        fields = dict(line.split('=',1) for line in state.stdout.splitlines() if '=' in line)
+        if state.returncode and fields.get('LoadState') != 'not-found':
+            raise RuntimeError('backup thaw guard status unavailable')
+        if fields.get('ActiveState') not in ('inactive','failed'):
+            raise RuntimeError('backup thaw guard is still active')
+        if result.returncode and fields.get('LoadState') != 'not-found':
+            raise RuntimeError('backup thaw guard stop failed')
 
 
 def digest(path):
@@ -41,16 +57,36 @@ def main():
     if mount['target'] != data or mount['fstype'] != 'ext4':
         raise RuntimeError('unexpected data mount')
     source = mount['source']
-    backing = json.loads(command(['losetup', '-J', source]))['loopdevices'][0]['back-file']
+    backing = json.loads(command(['losetup', '-J', '-l', source]))['loopdevices'][0]['back-file']
     if Path(backing).resolve() != volume.resolve():
         raise RuntimeError('mount does not refer to configured image')
-    # 保守按两份完整逻辑卷预留；不以稀疏文件预计压缩率作为容量保证。
-    stats = os.statvfs(target)
-    if stats.f_bavail * stats.f_frsize < 2 * volume.stat().st_size + 1024 ** 3:
-        raise RuntimeError('insufficient backup space')
-    snapshot = target / 'data.ext4'
-    restored = target / 'restored'
-    restored.mkdir(mode=0o700)
+    # 胶囊先实际分配宿主空间，内部任何恢复增长都不能突破该硬容量。
+    if target.stat().st_dev == Path(data).stat().st_dev:
+        raise RuntimeError('backup control directory must be outside frozen filesystem')
+    requireCapsuleFilesystem(target)
+    capacity = capsuleSize(config)
+    requireSpace(target, capacity + reserve)
+    capsule = target / 'capsule.ext4'
+    capsuleFd = os.open(capsule, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        os.posix_fallocate(capsuleFd, 0, capacity)
+        os.fsync(capsuleFd)
+    finally:
+        os.close(capsuleFd)
+    requireSpace(target, reserve)
+    command(['mkfs.ext4', '-q', '-F', '-m', '0', '-E', 'nodiscard,lazy_itable_init=0,lazy_journal_init=0', str(capsule)])
+    # 格式化不得撤销物理预留；再次实分配并核对后才允许停写。
+    with open(capsule,'r+b',buffering=0) as allocated:
+        os.posix_fallocate(allocated.fileno(),0,capacity)
+        os.fsync(allocated.fileno())
+    if capsule.stat().st_blocks * 512 < capacity:
+        raise RuntimeError('capsule allocation not fully reserved')
+    requireSpace(target,reserve)
+    payload = target / 'payload'
+    payload.mkdir(mode=0o700)
+    snapshot = payload / 'data.ext4'
+    restored = payload / 'restored'
+    capsuleMounted = False
     services = [config['service'], config['quotaService']]
     active = [unit for unit in services if subprocess.run(['systemctl', 'is-active', '--quiet', unit]).returncode == 0]
     frozen = False
@@ -59,7 +95,12 @@ def main():
     stopped = False
     backupReady = False
     guard = 'aivideo-backup-thaw-' + key
+    thawMarker = target / 'guardTriggered'
     try:
+        command(['mount','-o','loop,nosuid,nodev,noexec,nodiscard',str(capsule),str(payload)])
+        capsuleMounted = True
+        os.chmod(payload,0o700)
+        restored.mkdir(mode=0o700)
         stopped = True
         for unit in services:
             command(['systemctl', 'stop', unit])
@@ -74,21 +115,27 @@ def main():
                     if item.get('RW') and source and (Path(source).resolve() == Path(data).resolve() or Path(source).resolve() in Path(data).resolve().parents or Path(data).resolve() in Path(source).resolve().parents):
                         raise RuntimeError('data volume still has running container writer')
         # 独立 PID1 定时解冻兜底，发布进程被杀也不会把生产卷永久冻结。
-        command(['systemd-run', '--quiet', '--unit=' + guard, '--on-active=180s',
-                 '/usr/sbin/fsfreeze', '--unfreeze', data])
+        guardCode = 'import os,subprocess,sys\ntry:\n f=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)\n try:\n  os.write(f,b"triggered");os.fsync(f)\n finally:os.close(f)\nfinally:\n subprocess.run(["/usr/sbin/fsfreeze","--unfreeze",sys.argv[2]],check=True)\n'
+        command(['systemd-run', '--quiet', '--unit=' + guard, '--on-active=300s',
+                 '/usr/bin/python3', '-c', guardCode, str(thawMarker), data])
         guardArmed = True
         frozen = True
         command(['fsfreeze', '--freeze', data], timeout=30)
-        command(['cp', '--sparse=always', '--reflink=never', str(volume), str(snapshot)], timeout=90)
+        storage = scanVolume(volume)
+        requireSpace(payload, 2 * storage['estimatedPayloadBytes'] + 64 * 1024**2)
+        sparseCopy(volume, snapshot)
         os.chmod(snapshot, 0o600)
         with open(snapshot, 'rb') as durable:
             os.fsync(durable.fileno())
         # 原始字节级核对，连同 ext4 project id、配额及 xattr 一起核验。
         command(['cmp', '--silent', str(volume), str(snapshot)], timeout=60)
+        # 手动解冻成功之前保留独立兜底，避免SIGKILL留下永久冻结的卷。
         command(['fsfreeze', '--unfreeze', data], timeout=15)
         frozen = False
-        command(['systemctl', 'stop', guard + '.timer'])
+        stopGuard(guard)
         guardArmed = False
+        if thawMarker.exists():
+            raise RuntimeError('backup thaw watchdog fired; snapshot rejected')
         # 恢复到独立只读挂载，不连接服务、不启动后台任务、不修改原始卷。
         command(['mount', '-o', 'loop,ro,noload,nosuid,nodev,noexec', str(snapshot), str(restored)])
         mounted = True
@@ -133,7 +180,18 @@ def main():
             raise RuntimeError('quota restore has not been verified')
         receipt = {'backupId':key, 'backupVerified':True, 'restoreVerified':True,
                    'sha256':digest(snapshot), 'filesVerifiedReadable':fileCount,
-                   'databasesVerified':databaseCount, 'sourceSha':request['sourceSha']}
+                   'databasesVerified':databaseCount, 'storage':storage, 'sourceSha':request['sourceSha']}
+        command(['umount', str(payload)])
+        capsuleMounted = False
+        capsuleHash = digest(capsule)
+        command(['fallocate', '--dig-holes', str(capsule)], timeout=180)
+        if digest(capsule) != capsuleHash:
+            raise RuntimeError('capsule compaction changed logical bytes')
+        with open(capsule, 'rb') as durable:
+            os.fsync(durable.fileno())
+        receipt['capsuleSha256'] = capsuleHash
+        receipt['capsuleCapacityBytes'] = capacity
+        receipt['capsuleAllocatedBytes'] = capsule.stat().st_blocks * 512
         with open(target / 'receipt.json', 'x') as handle:
             os.chmod(handle.fileno(), 0o600)
             json.dump(receipt, handle)
@@ -156,7 +214,7 @@ def main():
                 cleanupErrors.append('thaw')
         if guardArmed and not frozen:
             try:
-                command(['systemctl', 'stop', guard + '.timer'])
+                stopGuard(guard)
                 guardArmed = False
             except Exception:
                 cleanupErrors.append('guard')
@@ -166,6 +224,12 @@ def main():
                 mounted = False
             except Exception:
                 cleanupErrors.append('restoreMount')
+        if capsuleMounted and not mounted:
+            try:
+                command(['umount',str(payload)])
+                capsuleMounted = False
+            except Exception:
+                cleanupErrors.append('capsuleMount')
         if stopped and not backupReady and not frozen:
             for unit in reversed(active):
                 try:
@@ -182,6 +246,9 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except Exception:
-        print('完整卷备份或恢复验证未通过，请检查受控备份现场。', file=sys.stderr)
+    except Exception as failure:
+        reason = str(failure) if isinstance(failure, RuntimeError) else type(failure).__name__
+        if isinstance(failure, subprocess.CalledProcessError):
+            reason = Path(failure.cmd[0]).name + ' exit ' + str(failure.returncode)
+        print('完整卷备份或恢复验证未通过: ' + reason, file=sys.stderr)
         sys.exit(1)
