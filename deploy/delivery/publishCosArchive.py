@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import base64
 import hashlib
+import io
 import json
 import logging
 import os
@@ -22,6 +23,33 @@ maximum = 768 * 1024 * 1024
 imagePattern = r'ghcr.io/perfectuser21/zenithjoy-toonflow@sha256:[a-f0-9]{64}'
 
 
+def networkEvidence(error):
+    """仅提取固定枚举，不输出可能含 URL 或凭据的原始异常。"""
+    allowed={'CosClientError','ConnectionError','ConnectTimeout','ReadTimeout','Timeout',
+             'TimeoutError','SSLError','SSLEOFError','ConnectionResetError','ProtocolError',
+             'MaxRetryError','OSError'}
+    patterns=(('the write operation timed out','write_timeout'),
+              ('read timed out','read_timeout'),
+              ('connection reset','connection_reset'),
+              ('connection aborted','connection_aborted'))
+    queue=[error]; seen=set(); kinds=set(); signals=set()
+    while queue and len(seen)<64:
+        value=queue.pop(); marker=id(value)
+        if marker in seen: continue
+        seen.add(marker)
+        if isinstance(value,BaseException):
+            name=type(value).__name__
+            if name in allowed: kinds.add(name)
+            queue.extend((value.__cause__,value.__context__,*value.args))
+        elif isinstance(value,(tuple,list)):
+            queue.extend(value[:32])
+        elif isinstance(value,str):
+            lowered=value.lower()
+            for fragment,signal in patterns:
+                if fragment in lowered: signals.add(signal)
+    return sorted(kinds),sorted(signals)
+
+
 def report(phase,status,started,size=None,error=None):
     value={'phase':phase,'status':status,'elapsedSeconds':round(time.monotonic()-started,3),'bytes':size}
     if error is not None:
@@ -30,6 +58,10 @@ def report(phase,status,started,size=None,error=None):
                                               'RuntimeError','ValueError','OSError','KeyError') else 'OtherError'
         if isinstance(error,subprocess.CalledProcessError):
             value['exit']=error.returncode
+        if name=='CosClientError':
+            kinds,signals=networkEvidence(error)
+            if kinds: value['networkTypes']=kinds
+            if signals: value['networkSignals']=signals
         if name=='CosServiceError':
             try:
                 code=error.get_error_code(); statusCode=error.get_status_code()
@@ -117,7 +149,8 @@ def multipartUpload(client,bucket,key,archive,metadata,root):
         if len(content)!=length: raise RuntimeError('multipart short read')
         digest=hashlib.md5(content).digest()
         result=client.upload_part(Bucket=bucket,Key=key,UploadId=uploadId,PartNumber=number,
-                                  Body=content,ContentMD5=base64.b64encode(digest).decode())
+                                  Body=io.BytesIO(content),ContentLength=str(length),
+                                  ContentMD5=base64.b64encode(digest).decode())
         etag=result['ETag']
         if not isinstance(etag,str) or etag.strip('"').lower()!=digest.hex():
             raise RuntimeError('multipart part checksum mismatch')
@@ -214,6 +247,7 @@ def upload():
     key=f"aivideoReleases/{request['sourceSha']}/{request['runId']}/{request['runAttempt']}/image.oci"
     client=CosS3Client(CosConfig(Region=region,SecretId=os.environ['CANVAS_COS_SECRET_ID'],
                                  SecretKey=os.environ['CANVAS_COS_SECRET_KEY'],Scheme='https',
+                                 Endpoint='cos.accelerate.myqcloud.com',
                                  EnableOldDomain=True,AllowRedirects=False,Timeout=60),retry=0)
     with phase('cos_head',size):
         try:
