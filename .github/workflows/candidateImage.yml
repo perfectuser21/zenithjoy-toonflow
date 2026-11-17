@@ -3,10 +3,21 @@ name: Build candidate image
 on:
   workflow_dispatch:
   workflow_call:
+    secrets:
+      CANVAS_COS_SECRET_ID:
+        required: true
+      CANVAS_COS_SECRET_KEY:
+        required: true
     outputs:
       image:
         description: Immutable image produced for the caller commit
         value: ${{ jobs.image.outputs.image }}
+      archiveKey:
+        value: ${{ jobs.image.outputs.archiveKey }}
+      archiveSha256:
+        value: ${{ jobs.image.outputs.archiveSha256 }}
+      archiveBytes:
+        value: ${{ jobs.image.outputs.archiveBytes }}
 
 permissions:
   contents: read
@@ -21,6 +32,9 @@ jobs:
     if: github.ref == 'refs/heads/master'
     outputs:
       image: ${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}
+      archiveKey: ${{ steps.archive.outputs.key }}
+      archiveSha256: ${{ steps.archive.outputs.sha256 }}
+      archiveBytes: ${{ steps.archive.outputs.bytes }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -53,6 +67,21 @@ jobs:
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
+      - name: Install OCI and COS tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y skopeo
+          python3 -m venv "$RUNNER_TEMP/cos-venv"
+          "$RUNNER_TEMP/cos-venv/bin/pip" install -r deploy/delivery/cosRequirements.txt
+      - name: Publish verified private COS archive
+        id: archive
+        env:
+          CANDIDATE_IMAGE: ${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}
+          CANVAS_COS_BUCKET: ${{ vars.CANVAS_COS_BUCKET }}
+          CANVAS_COS_REGION: ${{ vars.CANVAS_COS_REGION }}
+          CANVAS_COS_SECRET_ID: ${{ secrets.CANVAS_COS_SECRET_ID }}
+          CANVAS_COS_SECRET_KEY: ${{ secrets.CANVAS_COS_SECRET_KEY }}
+        run: '"$RUNNER_TEMP/cos-venv/bin/python" deploy/delivery/publishCosArchive.py'
       - name: Record immutable candidate
         env:
           IMAGE_NAME: ${{ steps.image.outputs.name }}

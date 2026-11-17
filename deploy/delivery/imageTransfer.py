@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """固定 OCI digest 的完整性校验及香港只读中继；不接触业务服务。"""
-import base64
 import hashlib
 import json
 import os
@@ -14,9 +13,8 @@ import tarfile
 import tempfile
 import time
 import urllib.request
+import urllib.parse
 from contextlib import contextmanager
-
-from stagingWitness import witnessCommand, witnessPayload
 
 imagePattern = r'ghcr.io/perfectuser21/zenithjoy-toonflow@sha256:[a-f0-9]{64}'
 processEnvironment = {'PATH':'/usr/sbin:/usr/bin:/sbin:/bin', 'LANG':'C.UTF-8'}
@@ -276,43 +274,51 @@ def exportCommand(image):
     return ctrCommand() + ['images', 'export', '--all-platforms', '--skip-manifest-json', '-', image]
 
 
-def fetchContent(registry, image, directory):
-    basic = base64.b64encode((registry['user'] + ':' + registry['token']).encode()).decode()
-    request = urllib.request.Request('https://ghcr.io/token?service=ghcr.io&scope=repository:perfectuser21/zenithjoy-toonflow:pull',
-                                     headers={'Authorization':'Basic ' + basic})
-    # 禁止重定向，避免把短期凭据发往其他域名。
+def validateCosIdentity(config, request, transfer):
+    require(isinstance(transfer,dict) and set(transfer)=={'key','sha256','bytes'}, 'COS对象字段不合法')
+    bucket=config['cosBucket']; region=config['cosRegion']; prefix=config['cosPrefix']
+    require(isinstance(bucket,str) and re.fullmatch(r'[a-z0-9][a-z0-9-]{0,61}-[0-9]{6,20}',bucket)
+            and isinstance(region,str) and re.fullmatch(r'ap-[a-z0-9-]+',region)
+            and prefix=='aivideoReleases', 'COS固定配置不合法')
+    key=f"{prefix}/{request['sourceSha']}/{request['runId']}/{request['runAttempt']}/image.oci"
+    require(transfer['key']==key and isinstance(transfer['sha256'],str)
+            and re.fullmatch(r'[a-f0-9]{64}',transfer['sha256'])
+            and type(transfer['bytes']) is int and 0<transfer['bytes']<=archiveLimit(config), 'COS对象身份不合法')
+    return bucket,region,key
+
+
+def validateCosTransfer(config, request, transfer):
+    require(isinstance(transfer,dict) and set(transfer)=={'key','sha256','bytes','url'}, 'COS传输字段不合法')
+    bucket,region,key=validateCosIdentity(config,request,{k:transfer[k] for k in ('key','sha256','bytes')})
+    url=transfer['url']
+    require(isinstance(url,str) and len(url)<=8192 and not any(c in url for c in '\r\n'), 'COS签名不合法')
+    parsed=urllib.parse.urlsplit(url)
+    require(parsed.scheme=='https' and parsed.netloc==f'{bucket}.cos.{region}.myqcloud.com'
+            and parsed.path=='/'+key and bool(parsed.query) and not parsed.fragment, 'COS地址不匹配')
+
+
+def downloadCos(transfer, archive, maximum):
     class noRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, request, filePointer, code, message, headers, newUrl):
             return None
-    with urllib.request.build_opener(noRedirect).open(request, timeout=30) as response:
-        bearer = json.loads(response.read(65537))['token']
-    require(isinstance(bearer, str) and 0 < len(bearer) <= 16384
-            and re.fullmatch(r'[A-Za-z0-9._~+/-]+=*', bearer), 'registry bearer不合法')
-    hosts = Path(directory) / 'ghcr.io'
-    hosts.mkdir(mode=0o700)
-    config = hosts / 'hosts.toml'
-    config.write_text('server = "https://ghcr.io"\n[host."https://ghcr.io"]\n  capabilities = ["pull", "resolve"]\n'
-                      '  [host."https://ghcr.io".header]\n    Authorization = ["Bearer ' + bearer + '"]\n')
-    os.chmod(config, 0o600)
-    result = subprocess.run(ctrCommand() + ['content', 'fetch', '--hosts-dir', directory, '--all-platforms', image],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1800, env=processEnvironment)
-    if result.returncode != 0:
-        raise TransferProcessError('镜像完整内容拉取失败', result.returncode)
+    opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),noRedirect)
+    request=urllib.request.Request(transfer['url'],headers={'Accept-Encoding':'identity'})
+    digest=hashlib.sha256(); size=0; deadline=time.monotonic()+7200
+    with archive.open('xb') as output, opener.open(request,timeout=30) as response:
+        os.chmod(archive,0o600)
+        require(response.status==200 and response.headers.get('Content-Encoding') in (None,'identity')
+                and response.headers.get('Content-Length')==str(transfer['bytes']), 'COS响应不合法')
+        while block:=response.read1(1024*1024):
+            require(time.monotonic()<deadline, 'COS下载超时')
+            size+=len(block)
+            require(size<=transfer['bytes'] and size<=maximum, 'COS归档超容量')
+            digest.update(block); output.write(block)
+        require(size==transfer['bytes'] and digest.hexdigest()==transfer['sha256'], 'COS归档校验失败')
+        output.flush(); os.fsync(output.fileno())
 
 
-def registryRuntimeDirectory():
-    path = Path('/run')
-    for parent in (path, *path.parents):
-        info = parent.lstat()
-        require(stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode)
-                and info.st_uid == 0 and not info.st_mode & 0o022, '临时凭据目录不受root保护')
-    result = subprocess.run(['/usr/bin/findmnt', '-n', '-o', 'FSTYPE', '--target', str(path)],
-                            capture_output=True, text=True, timeout=10, env=processEnvironment)
-    require(result.returncode == 0 and result.stdout.strip() == 'tmpfs', '临时凭据须位于tmpfs')
-    return path
-
-
-def ensureImage(config, request, registry):
+def ensureImage(config, request, transfer):
+    validateCosTransfer(config, request, transfer)
     directory = privateDirectory(config)
     maximum = archiveLimit(config)
     # 未决 scratch 必须先由运维读回处理，禁止并发或反复失败无限积累。
@@ -341,7 +347,7 @@ def ensureImage(config, request, registry):
                 os.fsync(scratchFd)
             finally:
                 os.close(scratchFd)
-            _ensureImage(config, request, registry, temporary, maximum, events)
+            _ensureImage(config, request, transfer, temporary, maximum, events)
         succeeded = True
     finally:
         # 失败保留本次有界归档和诊断；未知结果不得自动删除或重试。
@@ -349,7 +355,7 @@ def ensureImage(config, request, registry):
             shutil.rmtree(temporary)
 
 
-def _ensureImage(config, request, registry, temporary, maximum, events):
+def _ensureImage(config, request, transfer, temporary, maximum, events):
     archive = Path(temporary) / 'image.oci'
     # 完整导出并校验才算缓存命中；docker inspect成功不代表压缩blob齐全。
     try:
@@ -360,30 +366,8 @@ def _ensureImage(config, request, registry, temporary, maximum, events):
         return
     except (RuntimeError, OSError, ValueError, KeyError, tarfile.TarError, subprocess.SubprocessError):
         archive.unlink(missing_ok=True)
-    if request['environment'] == 'production':
-        with transferPhase(events, 'witness_export'):
-            boundedArchive(witnessCommand(config), archive, maximum, witnessPayload(request, 'exportImage'), timeout=7200)
-    else:
-        require(isinstance(registry, dict) and set(registry) == {'user', 'token'}, '缺少短期镜像读取身份')
-        require(isinstance(registry['user'], str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,99}(?:\[bot\])?', registry['user'])
-                and isinstance(registry['token'], str) and 0 < len(registry['token']) <= 4096
-                and not any(character in registry['token'] for character in '\r\n'), '镜像读取身份不合法')
-        # 凭据不放进保留的 OCI 诊断目录；非正常退出时仅遗留 root 私有 tmpfs 至重启。
-        with tempfile.TemporaryDirectory(prefix='aivideo-registry-', dir=registryRuntimeDirectory()) as credentialDirectory:
-            os.chmod(credentialDirectory, 0o700)
-            auth = {'auths':{'ghcr.io':{'auth':base64.b64encode((registry['user'] + ':' + registry['token']).encode()).decode()}}}
-            dockerConfig = Path(credentialDirectory) / 'config.json'
-            dockerConfig.write_text(json.dumps(auth))
-            os.chmod(dockerConfig, 0o600)
-            with transferPhase(events, 'registry_pull'):
-                result = subprocess.run(['docker', '--config', credentialDirectory, 'pull', request['image']],
-                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1800, env=processEnvironment)
-                if result.returncode != 0:
-                    raise TransferProcessError('镜像拉取失败', result.returncode)
-            with transferPhase(events, 'registry_content'):
-                fetchContent(registry, request['image'], credentialDirectory)
-        with transferPhase(events, 'registry_export'):
-            boundedArchive(exportCommand(request['image']), archive, maximum)
+    with transferPhase(events, 'cos_download'):
+        downloadCos(transfer, archive, maximum)
     with transferPhase(events, 'archive_verify'):
         verifyArchive(archive, request, maximum)
     with transferPhase(events, 'load'):
