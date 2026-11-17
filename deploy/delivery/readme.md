@@ -15,6 +15,8 @@
 - `canvasDelivery.yml`：master 自动触发；同一发布锁串行、进行中的发布不取消；staging 成功后 production 才能启动；生产不重新构建镜像。
 - `remoteRelease.sh`：固定 SSH 主机密钥、专用 SSH 身份、请求经 stdin；校验当前 run/attempt、源码 SHA、镜像 digest、实际运行镜像及业务验收回执；生产额外要求备份、恢复、前驱与备份编号。缺项、SSH 断线、未知结果均失败。
 
+镜像传输失败时保留本次已接收 OCI 和 root 私有阶段诊断；启动时遇到已有 `imageTransfer*` 临时目录即拒绝新传输，由运维先读回身份、空间和事务后处理，不能自动删除未知结果。启动时保留至少两个归档上限加 1 GiB 空间；最终归档与加载后读回归档各有独立上限。归档验证后通过 Docker Engine `image load` 加载，与此前人工 898 导入使用的入口一致，再完整导出读回验证；这不说明之前失败的根因已确定。本机缓存导出或校验失败只是缓存未命中，其不完整缓存文件会删除；随后从香港接收的归档失败时保留。短期 registry 凭据单独放 `/run` 的 root 私有 tmpfs，异常终止可能残留至重启，不放入保留诊断目录。香港见证 stdout 保持原 OCI 直通，源端日志不推测字节数。
+
 ## 尚未实现、禁止假定存在的主机能力
 
 两地主机目前均缺少 `/usr/local/sbin/aivideo-release`。本目录现在包含控制器 `releaseHost.py`、完整卷备份 `backupVolume.py`、容器切换 `switchContainer.py`、配额恢复 `restoreVolume.py` 和准入检查 `releaseReadiness.py` 的实现，尚未安装或演练；语法检查不能代替运行验收。
