@@ -39,6 +39,8 @@ ssh -T -i "$releaseTmp/key" -o BatchMode=yes -o IdentitiesOnly=yes \
 python3 - "$releaseTmp/request.json" "$releaseTmp/receipt.json" <<'PY'
 import json,sys,os
 request=json.load(open(sys.argv[1])); receipt=json.load(open(sys.argv[2]))
+origins={'staging':'https://toonflow.zenjoymedia.media','production':'https://aivideo.zenithjoy.tech'}
+assert receipt.get('publicOrigin')==origins[request['environment']], 'release public origin mismatch'
 for key in ('environment','sourceSha','image','runId','runAttempt'):
     assert receipt[key]==request[key],f'receipt mismatch: {key}'
 assert receipt['result']=='passed' and receipt['businessVerified'] is True
@@ -47,7 +49,7 @@ if request['environment']=='production':
     assert receipt['backupVerified'] is True and receipt['restoreVerified'] is True
     assert receipt['predecessorImage'] and receipt['backupId']
 # 仅公开固定白名单字段，原始远端输出不打印到 CI 日志。
-keys=('environment','sourceSha','image','runId','runAttempt','result','businessVerified','runningImage','backupVerified','restoreVerified','predecessorImage','backupId')
+keys=('publicOrigin','environment','sourceSha','image','runId','runAttempt','result','businessVerified','runningImage','backupVerified','restoreVerified','predecessorImage','backupId')
 public={k:receipt[k] for k in keys if k in receipt}
 encoded=json.dumps(public,separators=(',',':'))
 with open('releaseReceipt.json','w') as f: f.write(encoded+'\n')

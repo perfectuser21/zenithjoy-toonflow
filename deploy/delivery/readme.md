@@ -2,6 +2,10 @@
 
 目标：Mac 研发 → PR CI → master 构建不可变镜像 → 香港唯一 staging → 同一镜像杭州唯一 production。
 
+固定员工入口为香港 `https://toonflow.zenjoymedia.media`，正式入口为杭州 `https://aivideo.zenithjoy.tech`。隔离的c001回环实例不代表员工入口验收通过。配置及发布回执必须包含匹配的publicOrigin；真实业务验收器须验证该公网入口对应本候选。
+
+同一发布版本不意味着两个环境共享数据库或素材。staging和production数据保持隔离；员工在旧香港站积累的业务内容需要单独核对迁移，发布流程不默认复制、覆盖或删除它们。员工香港站目前是systemd直接启动Bun，且数据仍是普通目录；本目录当前的容器/独立ext4配额卷执行器不能直接部署到员工站。要先完成保留数据的迁移演练及入口切换，再接入CD。
+
 当前交付的是编排入口，**不是已经可运行的完整发布系统**。`CANVAS_DELIVERY_ENABLED` 默认不存在，因此自动发布不启动。只有下列主机接入及真实演练通过后才能设为 `true`。不能通过人工写入 passed 回执启用。
 
 ## 已实现的仓库入口
@@ -29,6 +33,7 @@
 
 | 字段 | 用途 |
 | --- | --- |
+| publicOrigin | 员工staging或production的固定公网入口 |
 | environment | staging 或 production，绑定本机 |
 | stateDirectory | root 私有事务目录，内有 identity.json 的 environment |
 | container / service / quotaService | 当前应用容器、应用 unit、配额 helper unit |
@@ -40,7 +45,7 @@
 | restoreVerifier | 安装 restoreVolume.py：克隆卷配额与降权EDQUOT验收 |
 | requiredBackupPaths / minimumBackupDatabases | 必需数据路径与最少数据库数；备份缺项拒绝 |
 | businessVerifier | 固定真实业务验收程序；尚待实现 |
-| stagingWitness | 生产独立取回香港可信验收的程序；尚待实现 |
+| stagingWitness | 安装 stagingWitness.py，生产独立取回香港可信验收；主机尚未配置 |
 | expectedQuotaKiB / expectedQuotaInodes | 本次配置的已审定限额，当前账号为5242880KiB与100000个inode |
 | serviceUid / serviceGid | 恢复副本上非特权配额探针的UID/GID，必须大于零 |
 | containerCreateArgs | root 固定的容器配置，不接受来自 CI 的挂载或权限参数 |
@@ -51,7 +56,7 @@
 
 备份程序在停写前要求足够的完整逻辑卷空间：2 × 源卷逻辑大小 + 1GiB 余量（快照和恢复副本各一份）。当前香港根分区剩余约3.6GiB，3GiB staging 卷至少需7GiB，不满足此条件，必须先确定独立备份落点或可核对的空间方案；不能跳过空间检查。杭州8GiB卷需至少17GiB，剩余约15GiB也不满足保守准入，必须先落实备份空间方案；尚未实际停写备份。
 
-当前香港 systemd 使用 `docker run --rm`，容器切换器会拒绝；需先演练转成 `docker start -a` 的固定容器管理方式。杭州已使用后一种方式。两地配额 helper 哈希不同，不得用同镜像发布暗中覆盖 helper。
+香港隔离c001实例的systemd使用 `docker run --rm`；员工站则是直接启动Bun。两者均不满足容器切换器要求，不能混作同一staging。需先完成员工站的数据保留和固定容器启动演练。杭州已使用 `docker start -a`。两地配额 helper 哈希不同，不得用同镜像发布暗中覆盖 helper。
 
 程序未包含自动数据回滚。切换后应用可能已迁移数据库或产生新写入，失败保留事务、前驱容器和完整备份，不盲目用旧镜像或备份覆盖。
 
@@ -88,3 +93,7 @@
 ## 2026-11-17 隔离恢复验收证据
 
 在香港私有 mount namespace 中，对旧539测试环境已有的离线完整备份执行了 restoreVolume.py，不停止现役服务，不覆盖主机 /etc 配置。两个账号项目的project ID、继承属性及块/inode限额核对通过，新建独立project后普通UID写入超过1MiB被EDQUOT拒绝。源gzip解压流与验收快照SHA256一致。此次证明配额恢复环节，未证明现役c001完整备份、生产恢复或整个CD通过。具体命令及哈希记录在Brain任务a802fa98-e2a0-4169-9db6-a878e3474509。
+
+### 只读香港见证的权限合同
+
+生产配置 `stagingWitnessHost`、`stagingWitnessUser`、`stagingWitnessKey`、`stagingWitnessKnownHosts`；后两个必须是root保护的文件。见证key与部署key分开，从1Password管理，不复用个人SSH身份。香港见证账号的authorized_keys强制命令只能调用受限sudo的readRelease.py包装器（安装为aivideo-read-release），禁PTY、转发和任意shell。包装器只接受operation=receipt且environment=staging，不得把见证账号直接绑定到可deploy的releaseHost.py。控制器在任何回执输出前都会拒绝尚未完成的事务，即使旧回执镜像恰好仍在运行。当前只完成代码，尚未安装账号、密钥或wrapper。

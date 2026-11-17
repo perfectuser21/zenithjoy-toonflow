@@ -12,6 +12,7 @@ import sys
 import time
 
 configPath = Path('/etc/aivideo/release.json')
+publicOrigins = {'staging':'https://toonflow.zenjoymedia.media','production':'https://aivideo.zenithjoy.tech'}
 imagePattern = r'ghcr.io/perfectuser21/zenithjoy-toonflow@sha256:[a-f0-9]{64}'
 
 
@@ -65,6 +66,7 @@ def imageId(image):
 def validateReceipt(receipt, request, environment):
     for key in ('sourceSha', 'image', 'runId', 'runAttempt'):
         require(receipt.get(key) == request[key], '验收版本身份不匹配')
+    require(receipt.get('publicOrigin') == publicOrigins[environment], '验收入口不是已指定的员工站或正式站')
     require(receipt.get('environment') == environment and receipt.get('result') == 'passed'
             and receipt.get('businessVerified') is True and receipt.get('runningImage') == request['image'],
             '业务验收未通过')
@@ -80,12 +82,13 @@ def main():
     required = {'environment', 'sourceSha', 'image', 'runId', 'runAttempt'}
     require(set(request) <= required | {'stagingReceipt', 'operation'} and required <= set(request), '请求字段不合法')
     require(request['environment'] == config['environment'], '主机环境不匹配')
+    require(config.get('publicOrigin') == publicOrigins[request['environment']], '主机发布入口配置不匹配')
     require(re.fullmatch(r'[a-f0-9]{40}', request['sourceSha']) is not None, '源码版本不合法')
     require(re.fullmatch(imagePattern, request['image']) is not None, '镜像必须为固定 digest')
     for key in ('runId', 'runAttempt'):
         require(isinstance(request[key], str) and re.fullmatch(r'[1-9][0-9]{0,19}', request[key]) is not None, '发布编号不合法')
     operation = request.get('operation', 'deploy')
-    require(operation in ('preflight', 'deploy'), '操作不合法')
+    require(operation in ('preflight', 'deploy', 'receipt'), '操作不合法')
     state = Path(config['stateDirectory'])
     require(state.is_dir(), '发布账本目录不存在')
     rootFile(state / 'identity.json')
@@ -95,16 +98,21 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         key = request['runId'] + '-' + request['runAttempt']
         journal = state / (key + '.json')
+        require(not any(json.loads(p.read_text()).get('phase') != 'completed'
+                        for p in state.glob('[0-9]*-[0-9]*.json')), '有尚未结束的发布事务')
         if journal.exists():
             previous = json.loads(journal.read_text())
-            require(previous['request'] == request, '相同发布编号的请求发生变化')
+            if operation == 'receipt':
+                for field in required:
+                    require(previous['request'][field] == request[field], '历史回执身份不匹配')
+            else:
+                require(previous['request'] == request, '相同发布编号的请求发生变化')
             require(previous.get('phase') == 'completed', '上次发布结果未知，需要读取事务后人工处理')
             running = inspect(config['container'])
             require(running['State']['Running'] and running['Image'] == imageId(request['image']), '历史回执与当前运行版本不一致')
             print(json.dumps(previous['receipt']))
             return
-        require(not any(json.loads(p.read_text()).get('phase') != 'completed'
-                        for p in state.glob('[0-9]*-[0-9]*.json')), '有尚未结束的发布事务')
+        require(operation != 'receipt', '对应发布回执不存在')
         # 配额 helper 是宿主组件，不随应用镜像隐式升级。
         helper = Path(rootFile(config['quotaHelper']))
         require(hashlib.sha256(helper.read_bytes()).hexdigest() == config['quotaHelperSha256'], '配额 helper 版本变化')
