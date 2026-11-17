@@ -75,6 +75,10 @@
 | secret | CANVAS_RELEASE_SSH_KEY | 从 1Password 管理的专用私钥 |
 | secret | CANVAS_RELEASE_KNOWN_HOSTS | 独立核实的 SSH host key；禁止运行时 ssh-keyscan 信任 |
 
+生产可选经香港跳板连接杭州：仅在 `production` environment 同时配置 variable `CANVAS_RELEASE_JUMP_HOST`、`CANVAS_RELEASE_JUMP_PORT`、`CANVAS_RELEASE_JUMP_USER`，以及 secret `CANVAS_RELEASE_JUMP_KEY`、`CANVAS_RELEASE_JUMP_KNOWN_HOSTS`；全部不配置时沿用直连，缺一项即失败。两个主机各自使用独立密钥和预先核实的 host key，非标准端口按 SSH known_hosts 的 `[主机]:端口` 格式登记。staging 不使用跳板。
+
+跳板应使用独立账号及密钥，仅允许到固定杭州地址和端口的 SSH TCP 转发，禁止 shell、PTY、agent 转发及其他目标；杭州 SSH 防火墙只放行香港固定出口 IP。CI 不接受来自发布请求的跳板命令或目标，也不进行 agent 转发。网络规则、跳板与身份须由运维先行配置并验证，本文不代替实际部署验收。
+
 主机拉取私有 GHCR 镜像使用当前 job 的短期 GITHUB_TOKEN（packages:read），经 SSH stdin 传入，仅用于私有临时 Docker 配置；不写事务日志，不保留长期 GitHub PAT。GitHub 环境权限与发布者范围配置完成后才启用仓库变量 `CANVAS_DELIVERY_ENABLED=true`。
 
 ## 执行器请求与回执

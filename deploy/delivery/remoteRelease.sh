@@ -10,17 +10,52 @@ set -euo pipefail
 : "${RELEASE_IMAGE:?Missing immutable candidate}"
 : "${RELEASE_SHA:?Missing source revision}"
 : "${RELEASE_ENVIRONMENT:?Missing environment}"
-[[ "$RELEASE_HOST" =~ ^[a-zA-Z0-9.-]+$ ]]
-[[ "$RELEASE_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]
-[[ "$RELEASE_SHA" =~ ^[a-f0-9]{40}$ ]]
-[[ "$RELEASE_IMAGE" =~ ^ghcr.io/perfectuser21/zenithjoy-toonflow@sha256:[a-f0-9]{64}$ ]]
-[[ "$RELEASE_ENVIRONMENT" == staging || "$RELEASE_ENVIRONMENT" == production ]]
-releaseTmp=$(mktemp -d)
+[[ "$RELEASE_HOST" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ ]] || exit 1
+[[ "$RELEASE_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || exit 1
+[[ "$RELEASE_SHA" =~ ^[a-f0-9]{40}$ ]] || exit 1
+[[ "$RELEASE_IMAGE" =~ ^ghcr.io/perfectuser21/zenithjoy-toonflow@sha256:[a-f0-9]{64}$ ]] || exit 1
+if [[ "$RELEASE_ENVIRONMENT" != staging && "$RELEASE_ENVIRONMENT" != production ]]; then
+  echo 'Invalid release environment' >&2; exit 1
+fi
+releasePort="${RELEASE_PORT:-22}"
+[[ "$releasePort" =~ ^[0-9]{1,5}$ ]] || exit 1
+(( 10#$releasePort > 0 && 10#$releasePort <= 65535 )) || exit 1
+jumpCount=0
+for jumpName in RELEASE_JUMP_HOST RELEASE_JUMP_PORT RELEASE_JUMP_USER RELEASE_JUMP_KEY RELEASE_JUMP_KNOWN_HOSTS; do
+  if [[ -n "${!jumpName:-}" ]]; then ((jumpCount+=1)); fi
+done
+if (( jumpCount != 0 )); then
+  if [[ "$RELEASE_ENVIRONMENT" != production || "$jumpCount" != 5 ]]; then
+    echo 'Jump settings require production and all five values' >&2; exit 1
+  fi
+  [[ "$RELEASE_JUMP_HOST" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ ]] || exit 1
+  [[ "$RELEASE_JUMP_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || exit 1
+  [[ "$RELEASE_JUMP_PORT" =~ ^[0-9]{1,5}$ ]] || exit 1
+  (( 10#$RELEASE_JUMP_PORT > 0 && 10#$RELEASE_JUMP_PORT <= 65535 )) || exit 1
+fi
+umask 077
+releaseTmp=$(mktemp -d /tmp/aivideo-release.XXXXXXXX)
 trap 'rm -rf "$releaseTmp"' EXIT
 chmod 700 "$releaseTmp"
 printf '%s\n' "$RELEASE_KEY" > "$releaseTmp/key"
 printf '%s\n' "$RELEASE_KNOWN_HOSTS" > "$releaseTmp/knownHosts"
 chmod 600 "$releaseTmp/key" "$releaseTmp/knownHosts"
+if (( jumpCount == 5 )); then
+  printf '%s\n' "$RELEASE_JUMP_KEY" > "$releaseTmp/jumpKey"
+  printf '%s\n' "$RELEASE_JUMP_KNOWN_HOSTS" > "$releaseTmp/jumpKnownHosts"
+  chmod 600 "$releaseTmp/jumpKey" "$releaseTmp/jumpKnownHosts"
+fi
+{
+  printf 'Host releaseTarget\n  HostName %s\n  User %s\n  Port %s\n' "$RELEASE_HOST" "$RELEASE_USER" "$releasePort"
+  printf '  IdentityFile %s/key\n  UserKnownHostsFile %s/knownHosts\n' "$releaseTmp" "$releaseTmp"
+  if (( jumpCount == 5 )); then
+    printf '  ProxyJump releaseJump\n'
+    printf 'Host releaseJump\n  HostName %s\n  User %s\n  Port %s\n' "$RELEASE_JUMP_HOST" "$RELEASE_JUMP_USER" "$RELEASE_JUMP_PORT"
+    printf '  IdentityFile %s/jumpKey\n  UserKnownHostsFile %s/jumpKnownHosts\n' "$releaseTmp" "$releaseTmp"
+  fi
+  printf 'Host *\n  BatchMode yes\n  IdentitiesOnly yes\n  IdentityAgent none\n  ForwardAgent no\n  StrictHostKeyChecking yes\n  GlobalKnownHostsFile /dev/null\n  ClearAllForwardings yes\n  ControlMaster no\n  ConnectTimeout 15\n  ServerAliveInterval 15\n  ServerAliveCountMax 4\n'
+} > "$releaseTmp/config"
+chmod 600 "$releaseTmp/config"
 # 请求通过 stdin 传输；公网入口与模型密钥不写入发布回执。
 python3 - <<'PY' > "$releaseTmp/request.json"
 import os,json
@@ -34,13 +69,7 @@ if request['environment']=='production':
 request['registryCredential']={'user':os.environ['RELEASE_REGISTRY_USER'],'token':os.environ['RELEASE_REGISTRY_TOKEN']}
 print(json.dumps(request))
 PY
-releasePort="${RELEASE_PORT:-22}"
-[[ "$releasePort" =~ ^[0-9]{1,5}$ ]]
-(( 10#$releasePort > 0 && 10#$releasePort <= 65535 ))
-ssh -T -p "$releasePort" -i "$releaseTmp/key" -o BatchMode=yes -o IdentitiesOnly=yes \
-  -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$releaseTmp/knownHosts" \
-  -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
-  "$RELEASE_USER@$RELEASE_HOST" /usr/local/sbin/aivideo-release \
+ssh -F "$releaseTmp/config" -T releaseTarget /usr/local/sbin/aivideo-release \
   < "$releaseTmp/request.json" > "$releaseTmp/receipt.json"
 python3 - "$releaseTmp/request.json" "$releaseTmp/receipt.json" <<'PY'
 import json,sys,os

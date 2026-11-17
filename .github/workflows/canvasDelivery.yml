@@ -88,6 +88,11 @@ jobs:
           RELEASE_USER: ${{ vars.CANVAS_RELEASE_USER }}
           RELEASE_KEY: ${{ secrets.CANVAS_RELEASE_SSH_KEY }}
           RELEASE_KNOWN_HOSTS: ${{ secrets.CANVAS_RELEASE_KNOWN_HOSTS }}
+          RELEASE_JUMP_HOST: ${{ vars.CANVAS_RELEASE_JUMP_HOST }}
+          RELEASE_JUMP_PORT: ${{ vars.CANVAS_RELEASE_JUMP_PORT }}
+          RELEASE_JUMP_USER: ${{ vars.CANVAS_RELEASE_JUMP_USER }}
+          RELEASE_JUMP_KEY: ${{ secrets.CANVAS_RELEASE_JUMP_KEY }}
+          RELEASE_JUMP_KNOWN_HOSTS: ${{ secrets.CANVAS_RELEASE_JUMP_KNOWN_HOSTS }}
           RELEASE_REGISTRY_USER: ${{ github.actor }}
           RELEASE_REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_IMAGE: ${{ needs.candidate.outputs.image }}
