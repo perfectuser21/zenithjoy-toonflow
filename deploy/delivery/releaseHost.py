@@ -17,6 +17,7 @@ from verifyBusiness import rootJson
 configPath = Path('/etc/aivideo/release.json')
 publicOrigins = {'staging':'https://toonflow.zenjoymedia.media','production':'https://aivideo.zenithjoy.tech'}
 imagePattern = r'ghcr.io/perfectuser21/zenithjoy-toonflow@sha256:[a-f0-9]{64}'
+diagnosticPath = None
 
 
 def require(condition, message):
@@ -38,9 +39,25 @@ def rootFile(path, executable=False):
 
 
 def run(args, timeout=120, input=None):
-    result = subprocess.run(args, input=input, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, timeout=timeout, env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C.UTF-8'})
-    require(result.returncode == 0, '子操作失败: ' + Path(args[0]).name)
+    try:
+        result = subprocess.run(args, input=input, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, timeout=timeout, env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C.UTF-8'})
+    except subprocess.TimeoutExpired as error:
+        if diagnosticPath is not None:
+            def text(value):
+                return value.decode('utf-8', errors='replace') if isinstance(value, bytes) else value or ''
+            atomicJson(diagnosticPath, {'command': Path(args[0]).name, 'timedOut': True,
+                                       'stdout': text(error.stdout)[-1048576:],
+                                       'stderr': text(error.stderr)[-1048576:]})
+        raise RuntimeError('子操作超时: ' + Path(args[0]).name) from None
+    if result.returncode != 0:
+        if diagnosticPath is not None:
+            # 只写root发布账本，不把供应商响应、配置或子进程stderr输出至CI。
+            atomicJson(diagnosticPath, {'command': Path(args[0]).name,
+                                       'exit': result.returncode,
+                                       'stdout': result.stdout[-1048576:],
+                                       'stderr': result.stderr[-1048576:]})
+        raise RuntimeError('子操作失败: ' + Path(args[0]).name)
     return result.stdout
 
 
@@ -76,6 +93,7 @@ def validateReceipt(receipt, request, environment):
 
 
 def main():
+    global diagnosticPath
     require(os.geteuid() == 0, '必须通过受限 sudo 入口运行')
     rootFile(configPath)
     config = json.loads(configPath.read_text())
@@ -101,6 +119,7 @@ def main():
     with open(state / 'release.lock', 'a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         key = request['runId'] + '-' + request['runAttempt']
+        diagnosticPath = state / ('diagnostic-' + key + '.json')
         journal = state / (key + '.json')
         require(not any(json.loads(p.read_text()).get('phase') != 'completed'
                         for p in state.glob('[0-9]*-[0-9]*.json')), '有尚未结束的发布事务')

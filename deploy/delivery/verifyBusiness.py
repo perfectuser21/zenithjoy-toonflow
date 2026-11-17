@@ -93,7 +93,7 @@ class publicClient:
         self.opener = urllib.request.build_opener(
             urllib.request.ProxyHandler({}), noRedirect(), urllib.request.HTTPCookieProcessor(self.jar))
 
-    def request(self, method, path, query=None, body=None, raw=False, expected=200, limit=20 * 1024 * 1024, sse=False):
+    def request(self, method, path, query=None, body=None, raw=False, expected=200, limit=20 * 1024 * 1024, sse=False, timeout=240):
         require(path.startswith('/api/') and '?' not in path, '接口路径非法')
         url = self.origin + path + ('?' + urllib.parse.urlencode(query) if query else '')
         headers = {'Origin': self.origin, 'Referer': self.origin + '/', 'x-toonflow-workspace': '1',
@@ -104,7 +104,7 @@ class publicClient:
                 body = json.dumps(body).encode()
         request = urllib.request.Request(url, data=body, headers=headers, method=method)
         try:
-            response = self.opener.open(request, timeout=240)
+            response = self.opener.open(request, timeout=timeout)
         except urllib.error.HTTPError as error:
             response = error
         with response:

@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
+from verifyBusiness import publicClient
 from verifyBusiness import rootJson
 from backupShared import sharedDirectories
 
@@ -57,6 +59,31 @@ def main():
     if not shared:
         run(['systemctl', 'start', config['quotaService']])
     run(['systemctl', 'start', config['service']])
+    # Type=simple的active只表示启动命令已执行；等待同一候选后端真实接收HTTP。
+    business = rootJson(config['businessConfig'], private=True)
+    local = publicClient(business['localOrigin'].rstrip('/'))
+    deadline = time.monotonic() + 90
+    while True:
+        if time.monotonic() >= deadline:
+            raise RuntimeError('candidate backend did not become ready')
+        try:
+            state = json.loads(run(['docker', 'inspect', config['container']],
+                                   timeout=min(5, deadline - time.monotonic())))[0]
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError('candidate backend did not become ready')
+            identity = local.request('GET', '/api/delivery/identity', timeout=min(5, remaining))
+            if (state['State']['Running'] and not state['State']['Restarting']
+                    and state['Config']['Image'] == request['image']
+                    and identity.get('sourceSha') == request['sourceSha']
+                    and identity.get('image') == request['image']
+                    and isinstance(identity.get('bootId'), str)):
+                break
+        except (RuntimeError, OSError, ValueError, subprocess.SubprocessError):
+            pass
+        if time.monotonic() >= deadline:
+            raise RuntimeError('candidate backend did not become ready')
+        time.sleep(1)
     print(json.dumps({'predecessorContainer':oldName,'switched':True}))
 
 
