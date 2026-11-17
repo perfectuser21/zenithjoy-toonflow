@@ -46,7 +46,7 @@ def main():
         raise RuntimeError('mount does not refer to configured image')
     # 保守按两份完整逻辑卷预留；不以稀疏文件预计压缩率作为容量保证。
     stats = os.statvfs(target)
-    if stats.f_bavail * stats.f_frsize < volume.stat().st_size + 1024 ** 3:
+    if stats.f_bavail * stats.f_frsize < 2 * volume.stat().st_size + 1024 ** 3:
         raise RuntimeError('insufficient backup space')
     snapshot = target / 'data.ext4'
     restored = target / 'restored'

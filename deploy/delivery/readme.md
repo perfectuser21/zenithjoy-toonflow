@@ -13,7 +13,7 @@
 
 ## 尚未实现、禁止假定存在的主机能力
 
-两地主机目前均缺少 `/usr/local/sbin/aivideo-release`。本目录现在包含控制器 `releaseHost.py`、完整卷备份 `backupVolume.py`、容器切换 `switchContainer.py` 的待审实现，尚未安装或演练；语法检查不能代替运行验收。
+两地主机目前均缺少 `/usr/local/sbin/aivideo-release`。本目录现在包含控制器 `releaseHost.py`、完整卷备份 `backupVolume.py`、容器切换 `switchContainer.py`、配额恢复 `restoreVolume.py` 和准入检查 `releaseReadiness.py` 的实现，尚未安装或演练；语法检查不能代替运行验收。
 
 该程序必须由 root 安装并保持不可被发布账号修改，专用 SSH key 通过 forced-command 仅调用它，禁止任意 shell、端口转发和 PTY。执行器须独立校验机器环境、源码标签、digest、香港验收来源与生产前驱。不能信任请求中的 passed 字段。
 
@@ -36,18 +36,20 @@
 | backupDirectory | root 私有备份目录，禁止发布账号写入 |
 | quotaHelper / quotaHelperSha256 | 固定配额 helper 及审定哈希 |
 | backupCommand / switchCommand | 审定安装的上述两个程序 |
-| readinessCommand | 发布前实际检查程序；尚待实现 |
-| restoreVerifier | 完整卷的独立可写副本配额恢复验收程序；尚待实现 |
+| readinessCommand | 安装 releaseReadiness.py：只读核对服务、挂载、空间和所需验收入口 |
+| restoreVerifier | 安装 restoreVolume.py：克隆卷配额与降权EDQUOT验收 |
 | requiredBackupPaths / minimumBackupDatabases | 必需数据路径与最少数据库数；备份缺项拒绝 |
 | businessVerifier | 固定真实业务验收程序；尚待实现 |
 | stagingWitness | 生产独立取回香港可信验收的程序；尚待实现 |
+| expectedQuotaKiB / expectedQuotaInodes | 本次配置的已审定限额，当前账号为5242880KiB与100000个inode |
+| serviceUid / serviceGid | 恢复副本上非特权配额探针的UID/GID，必须大于零 |
 | containerCreateArgs | root 固定的容器配置，不接受来自 CI 的挂载或权限参数 |
 
 控制器支持请求附带 `operation=preflight`，仅验证配置与当前环境，不拉镜像、不停机、不切换；生产仍必须取回香港可信回执。`operation=deploy` 先拉固定镜像、核对源码标签并执行准入，再创建持久事务记录。出现任何未完成事务，后续请求拒绝自动重试；必须先读回事实处置。
 
 备份成功后保持原应用与配额 helper 停止，直到固定切换器启动新版，避免备份后出现遗漏新写入的窗口。失败先解冻并取消独立定时兜底，再恢复原服务；解冻失败保持服务停止。
 
-备份程序在停写前要求足够的完整逻辑卷空间：源卷大小 + 1GiB 余量。当前香港根分区剩余约3.6GiB，3GiB staging 卷不满足此条件，必须先确定独立备份落点或可核对的空间方案；不能跳过空间检查。杭州 8GiB 卷剩余约15GiB，容量初步足够，尚未实际停写备份。
+备份程序在停写前要求足够的完整逻辑卷空间：2 × 源卷逻辑大小 + 1GiB 余量（快照和恢复副本各一份）。当前香港根分区剩余约3.6GiB，3GiB staging 卷至少需7GiB，不满足此条件，必须先确定独立备份落点或可核对的空间方案；不能跳过空间检查。杭州8GiB卷需至少17GiB，剩余约15GiB也不满足保守准入，必须先落实备份空间方案；尚未实际停写备份。
 
 当前香港 systemd 使用 `docker run --rm`，容器切换器会拒绝；需先演练转成 `docker start -a` 的固定容器管理方式。杭州已使用后一种方式。两地配额 helper 哈希不同，不得用同镜像发布暗中覆盖 helper。
 
@@ -82,3 +84,7 @@
 4. 杭州真实数据完整备份、隔离恢复、切换与回退演练有可核验回执。
 5. workflow 真实跑通，读回两地同一 digest。
 6. 旧香港用户数据核对迁移完成后另行关闭旧站；发布 workflow 不删除旧站或用户内容。
+
+## 2026-11-17 隔离恢复验收证据
+
+在香港私有 mount namespace 中，对旧539测试环境已有的离线完整备份执行了 restoreVolume.py，不停止现役服务，不覆盖主机 /etc 配置。两个账号项目的project ID、继承属性及块/inode限额核对通过，新建独立project后普通UID写入超过1MiB被EDQUOT拒绝。源gzip解压流与验收快照SHA256一致。此次证明配额恢复环节，未证明现役c001完整备份、生产恢复或整个CD通过。具体命令及哈希记录在Brain任务a802fa98-e2a0-4169-9db6-a878e3474509。
