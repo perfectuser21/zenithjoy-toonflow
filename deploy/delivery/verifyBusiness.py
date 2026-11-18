@@ -240,6 +240,18 @@ def snapshot(client, account):
     return result, canvas
 
 
+def verifyMashupNode(client):
+    nodes = client.request('GET', '/api/nodes/get')
+    require(isinstance(nodes, list) and any(
+        isinstance(node, dict) and node.get('name') == 'mashupNode'
+        and node.get('enabled') is True and not node.get('loadError')
+        for node in nodes), '当前工作区无法添加批量混剪节点')
+    bundle = client.request('GET', '/api/nodes/files', {'name': 'mashupNode'}, raw=True)
+    header = re.match(rb'/\*! toonflowNode:([^\r\n]+) \*/\r?\n', bundle)
+    require(header and json.loads(header[1]).get('displayName') == '批量混剪'
+            and len(bundle) > header.end(), '公网未返回批量混剪节点脚本')
+
+
 def saveCanvas(client, fresh, workspace, request, required, dedicated=False):
     previous, canvas = snapshot(client, workspace)
     require(not dedicated or canvas.get('deliveryAcceptance') is True, '缺少明确标记的专用验收seed画布')
@@ -350,6 +362,7 @@ def verifyShared(client, config, request, required):
     # shared由root配置固定；不调用只适用于普通账号或MCP的登录/session接口。
     snapshot(client, workspace)
     fresh = newPublicClient(config)
+    verifyMashupNode(fresh)
     saveCanvas(client, fresh, workspace, request, required, dedicated=True)
     status = client.request('GET', '/api/ffmpeg/status')
     require(all(status.get('tools', {}).get(name, {}).get('path')
@@ -430,6 +443,7 @@ def main():
     clients = [newPublicClient(config) for _ in accounts]
     for client, account in zip(clients, accounts):
         client.login(account)
+        verifyMashupNode(client)
         _, seed = snapshot(client, account)
         require(seed.get('deliveryAcceptance') is True, '账号画布未明确标记为专用验收seed，禁止写入')
     denyCrossAccount(clients[0], accounts[1])

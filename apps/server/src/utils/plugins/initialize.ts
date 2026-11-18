@@ -8,6 +8,7 @@ export const trustedNodeNames: Readonly<Record<string, string>> = {
   videoGenerationNode: "视频生成",
   imageNode: "图片",
   imageGenerationNode: "图片生成",
+  mashupNode: "批量混剪",
 };
 
 export async function initializeTrustedNodes(targetDirectory: string, sourceDirectory: string) {
