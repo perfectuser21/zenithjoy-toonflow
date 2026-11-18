@@ -14,6 +14,7 @@ import { trimStoreRequest } from "@/utils/media/trimStoreClient";
 import { withSealedMedia } from "@/utils/media/sealedMedia";
 import { ensureTrimSingleton } from "@/utils/media/trimSingleton";
 import { readTrimSecret } from "@/utils/media/trimSecret";
+import { createTrimReadQueue } from "@/utils/media/trimReadQueue";
 
 const maxInput = 512 * 1024 * 1024, maxOutput = 128 * 1024 * 1024;
 let databasePromise: ReturnType<typeof openDatabase> | undefined;
@@ -177,7 +178,7 @@ export async function releaseInterruptedTrimSpace(cwd: string, ownerId: string, 
   if (!released) invalid("暂无法确认中断任务的空间状态", 409);
 }
 
-let managedReadBusy = false;
+const managedReads = createTrimReadQueue();
 /** 托管素材在回调内持有限额；不存在记录时由调用方读取普通工作区素材。 */
 export async function withManagedTrim<T>(cwd: string, ownerId: string, reference: string, signal: AbortSignal, consume: (bytes: Buffer) => Promise<T>): Promise<{ managed: false } | { managed: true; value: T }> {
   if (!trimMode().read) return { managed: false };
@@ -191,13 +192,11 @@ export async function withManagedTrim<T>(cwd: string, ownerId: string, reference
   if (!record) return { managed: false };
   await ensureTrimSingleton();
   if (record.state !== "committed" || !record.digest || !record.requestHash || !record.sourceDigest) invalid("裁剪结果尚未确认", 409);
-  if (managedReadBusy) invalid("裁剪素材正在读取，请稍后重试", 429);
-  managedReadBusy = true;
-  try {
+  return managedReads.run(signal, async () => {
     const bytes = await trimStoreRequest("GET", ownerId, workspaceHash, match[1]!, signal);
     if (!bytes || bytes.length !== record.bytes || createHash("sha256").update(bytes).digest("hex") !== record.digest) invalid("裁剪结果无法确认", 409);
     return { managed: true, value: await consume(bytes) };
-  } finally { managedReadBusy = false; }
+  });
 }
 
 export async function trimStatus(cwd: string, ownerId: string, operationId: string, sourcePath: string, start: number, end: number, allowRecovery = true) {
@@ -213,9 +212,8 @@ export async function trimStatus(cwd: string, ownerId: string, operationId: stri
   if (!allowRecovery && record.state !== "committed") return { status: "pending" as const };
   const path = `assets/${nodeId}/video.mp4`;
   if (record.state !== "committed") {
-    if (managedReadBusy) return { status: "pending" as const };
-    managedReadBusy = true;
-    try {
+    if (managedReads.busy) return { status: "pending" as const };
+    const recoveryStatus = await managedReads.run(AbortSignal.timeout(30000), async () => {
       const workspaceHash = createHash("sha256").update(cwd).digest("hex");
       const recovered = await databaseAccess(() => recoverTrimIntent(db, ownerId, workspaceHash, nodeId, async intent => {
         try {
@@ -230,7 +228,8 @@ export async function trimStatus(cwd: string, ownerId: string, operationId: stri
       if (!recovered) return { status: "pending" as const };
       const updated = await databaseAccess(() => readOwnTrimReservation(db, ownerId, workspaceHash, nodeId));
       if (updated?.state === "interrupted") return { status: "interrupted" as const };
-    } finally { managedReadBusy = false; }
+    });
+    if (recoveryStatus) return recoveryStatus;
   }
   const result = await withManagedTrim(cwd, ownerId, path, AbortSignal.timeout(30000), async () => true);
   if (!result.managed) invalid("裁剪结果无法确认", 409);
