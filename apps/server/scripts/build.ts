@@ -6,6 +6,7 @@ import copyDocumentPackages from "./copyDocumentPackages";
 import copySandboxPackages from "./copySandboxPackages";
 import { createHash } from "node:crypto";
 import { readFile } from "@toonflow/file";
+import { trustedNodeNames } from "../src/utils/plugins/initialize";
 
 const projectDir = resolve(import.meta.dirname, "../../..");
 if (process.env.TOONFLOW_RELEASE_PREREQUISITES !== "1") {
@@ -14,9 +15,8 @@ if (process.env.TOONFLOW_RELEASE_PREREQUISITES !== "1") {
   process.exit(0);
 }
 const outputDirectory = resolve(projectDir, "build/server");
-const trustedNodeNames = ["videoNode", "textNode", "videoGenerationNode"];
 const trustedNodeHashes: Record<string, string> = {};
-for (const name of trustedNodeNames) {
+for (const name of Object.keys(trustedNodeNames)) {
   const bytes = await readFile(resolve(projectDir, `build/nodes/${name}.umd.js`));
   if (!bytes.byteLength) throw new Error(`审计节点 ${name} 构建产物为空`);
   trustedNodeHashes[name] = createHash("sha256").update(bytes).digest("hex");

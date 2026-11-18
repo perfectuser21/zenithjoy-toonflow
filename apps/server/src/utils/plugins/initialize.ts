@@ -1,8 +1,23 @@
+import { createHash } from "node:crypto";
 import { copyFile, cp, mkdir, readFile, readdir, rename, unlink, writeAtomic, writeFile } from "@toonflow/file";
 import { resolve } from "node:path";
 
-export default async function initializePlugins(targetDirectory: string, sourceDirectory: string, fileFilter?: RegExp | readonly string[], revision?: string) {
-  const marker = resolve(targetDirectory, "initialized");
+export const trustedNodeNames: Readonly<Record<string, string>> = { videoNode: "视频", textNode: "文本", videoGenerationNode: "视频生成" };
+
+export async function initializeTrustedNodes(targetDirectory: string, sourceDirectory: string) {
+  const files = Object.keys(trustedNodeNames).map(name => `${name}.umd.js`);
+  const revision = createHash("sha256");
+  for (const file of files) {
+    const bytes = await readFile(resolve(sourceDirectory, file));
+    revision.update(file).update("\0").update(createHash("sha256").update(bytes).digest());
+  }
+  await initializePlugins(targetDirectory, sourceDirectory, files, revision.digest("hex"), "trustedNodesRevision");
+}
+
+export default async function initializePlugins(
+  targetDirectory: string, sourceDirectory: string, fileFilter?: RegExp | readonly string[], revision?: string, markerName = "initialized",
+) {
+  const marker = resolve(targetDirectory, markerName);
   const initialized = await readFile(marker, "utf8").catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return null;
     throw error;
