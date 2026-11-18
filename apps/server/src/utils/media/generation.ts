@@ -315,7 +315,7 @@ async function configuredProvider(request: MediaGenerationRequest, mediaType: "i
   let providerConfig = record(configurations[info.id]);
   if (info.id === "openaiImage" && (gatewayUrl || gatewayToken || gatewayRevision)) {
     if (!gatewayUrl || !gatewayToken || gatewayRevision !== info.revision) {
-      invalid("图片网关配置不完整或供应商版本未授权，请联系管理员", 503);
+      throw Object.assign(new Error("图片网关配置不完整或供应商版本未授权，请联系管理员"), { status: 503 });
     }
     providerConfig = { gatewayUrl, apiKey: gatewayToken };
   }
