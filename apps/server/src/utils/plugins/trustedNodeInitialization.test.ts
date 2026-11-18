@@ -11,7 +11,7 @@ test("existing workspaces receive trusted nodes from each release", async () => 
     const target = join(root, "nodes");
     await mkdir(source);
     await mkdir(target);
-    const nodeFiles = ["videoNode.umd.js", "textNode.umd.js", "videoGenerationNode.umd.js"];
+    const nodeFiles = ["videoNode.umd.js", "textNode.umd.js", "videoGenerationNode.umd.js", "imageNode.umd.js", "imageGenerationNode.umd.js"];
     for (const file of nodeFiles) {
       await writeFile(join(source, file), `candidate:${file}`);
       await writeFile(join(target, file), `old:${file}`);
