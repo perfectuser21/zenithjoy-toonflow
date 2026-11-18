@@ -311,9 +311,14 @@ async function configuredProvider(request: MediaGenerationRequest, mediaType: "i
   const configurations = record(conf.get("settings", {}).mediaProviderConfigs);
   const gatewayUrl = process.env.TOONFLOW_OPENAI_IMAGE_GATEWAY_URL;
   const gatewayToken = process.env.TOONFLOW_OPENAI_IMAGE_GATEWAY_TOKEN;
-  const providerConfig = info.id === "openaiImage" && (gatewayUrl || gatewayToken)
-    ? { gatewayUrl, apiKey: gatewayToken }
-    : record(configurations[info.id]);
+  const gatewayRevision = process.env.TOONFLOW_OPENAI_IMAGE_GATEWAY_SOURCE_SHA256;
+  let providerConfig = record(configurations[info.id]);
+  if (info.id === "openaiImage" && (gatewayUrl || gatewayToken || gatewayRevision)) {
+    if (!gatewayUrl || !gatewayToken || gatewayRevision !== info.revision) {
+      invalid("图片网关配置不完整或供应商版本未授权，请联系管理员", 503);
+    }
+    providerConfig = { gatewayUrl, apiKey: gatewayToken };
+  }
   const provider = await loadMediaProviderSource(info.source, providerConfig, signal, checkedFetch, directory, saveTaskData, false, taskId);
   return { provider, request };
 }
