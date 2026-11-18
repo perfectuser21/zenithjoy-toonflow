@@ -285,7 +285,7 @@ async function prepareRequest<T>(directory: string | undefined, mediaType: "imag
 
 async function configuredProvider(request: MediaGenerationRequest, mediaType: "image" | "video" | "audio", signal?: AbortSignal, directory?: string,
   saveTaskData?: (data: ProviderTaskData) => Promise<void>, resume = false, modelRouteCipher?: string, actor?: ModelActor, legacyTaskOwnerId?: string,
-  beforeNetwork?: () => Promise<void>, onWanSubmit?: () => void) {
+  beforeNetwork?: () => Promise<void>, onWanSubmit?: () => void, taskId?: string) {
   const checkedFetch: typeof fetch | undefined = beforeNetwork || onWanSubmit ? Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     await beforeNetwork?.();
     if (onWanSubmit) {
@@ -303,13 +303,13 @@ async function configuredProvider(request: MediaGenerationRequest, mediaType: "i
   if (modelGateway.enabled() || modelRouteCipher) {
     if (!actor) throw Object.assign(new Error("请先登录 Toonflow"), { status: 401 });
     const { upstream } = await modelGateway.resolve(mediaType, request.providerId, request.modelId, modelRouteCipher, request, { actor, legacyTaskOwnerId });
-    const provider = await loadMediaProviderSource(upstream.source, upstream.config, signal, checkedFetch, directory, saveTaskData, upstream.cloud);
+    const provider = await loadMediaProviderSource(upstream.source, upstream.config, signal, checkedFetch, directory, saveTaskData, upstream.cloud, taskId);
     return { provider, request: { ...request, providerId: provider.id, modelId: upstream.upstreamModelId } };
   }
   const info = await getMediaProvider(request.providerId);
   if (!resume && !info.models.some(model => model.id === request.modelId && model.type === mediaType)) invalid("所选媒体模型不存在或类型不匹配，请重新选择");
   const configurations = record(conf.get("settings", {}).mediaProviderConfigs);
-  const provider = await loadMediaProviderSource(info.source, record(configurations[info.id]), signal, checkedFetch, directory, saveTaskData);
+  const provider = await loadMediaProviderSource(info.source, record(configurations[info.id]), signal, checkedFetch, directory, saveTaskData, false, taskId);
   return { provider, request };
 }
 
@@ -430,7 +430,7 @@ async function executeMedia(
       let beforeManagedNetwork: (() => Promise<void>) | undefined;
       const { provider, request: upstreamRequest } = await configuredProvider(request, mediaType, signal, directory,
         task ? data => task.save({ providerData: data }) : undefined, false, modelRouteCipher, task?.actor, task?.legacyTaskOwnerId,
-        async () => { await task?.beforeNetwork?.(); await beforeManagedNetwork?.(); }, task?.onWanSubmit);
+        async () => { await task?.beforeNetwork?.(); await beforeManagedNetwork?.(); }, task?.onWanSubmit, task?.taskId);
       const generate = mediaType === "image" ? provider.generateImage : mediaType === "video" ? provider.generateVideo : provider.generateAudio;
       if (typeof generate !== "function") invalid(t`此供应商不支持${translateMessage({ image: "图片", video: "视频", audio: "音频" }[mediaType])}生成`);
       const rules = Array.isArray(provider.rules) ? provider.rules : [];
