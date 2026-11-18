@@ -32,6 +32,9 @@
       </el-dropdown>
     </template>
     <div v-loading="generating || uploading" class="videoContent nopan" :aria-busy="generating || uploading">
+      <div v-if="actions?.backgroundProgress" class="nodrag" role="status">
+        {{ actions.backgroundProgress }} <el-button text @click.stop="actions.cancel()">取消截取</el-button>
+      </div>
       <videoPlayer
         v-if="previewUrl"
         ref="player"

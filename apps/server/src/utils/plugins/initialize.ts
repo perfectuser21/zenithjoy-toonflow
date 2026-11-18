@@ -9,6 +9,7 @@ export const trustedNodeNames: Readonly<Record<string, string>> = {
   imageNode: "图片",
   imageGenerationNode: "图片生成",
   mashupNode: "批量混剪",
+  videoConcatNode: "合成成片",
 };
 
 export async function initializeTrustedNodes(targetDirectory: string, sourceDirectory: string) {

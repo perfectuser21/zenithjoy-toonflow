@@ -73,9 +73,10 @@
       <p v-else class="actionHint">{{ action === 'extractAudio' ? '提取音轨并生成音频节点，保留原视频。' : '生成静音视频和音频两个节点，保留原视频。' }}</p>
       <div v-if="processing" class="processingStatus" role="status" aria-live="polite">
         <el-progress :percentage="100" :indeterminate="true" :showText="false" />
-        <span>{{ cancelling ? '正在取消处理…' : '正在处理视频…' }}</span>
+        <span>{{ progressLabel }}</span>
       </div>
       <div class="panelActions">
+        <el-button v-if="processing && action === 'trim' && !cancelling" @click="visible = false">后台继续</el-button>
         <el-button v-if="accountMode === 'customer' && (pendingTrim?.recoverOnly || (pendingTrim && interruptedOperation === pendingTrim.operationId)) && !processing" @click="clearRecoverySelection">{{ pendingTrim && interruptedOperation === pendingTrim.operationId ? '释放空间并结束' : '放弃查看此记录' }}</el-button>
         <el-button :disabled="cancelling" @click="processing ? cancel() : visible = false">{{ processing ? '取消处理' : '取消' }}</el-button>
         <el-button type="primary" :loading="processing" :disabled="disabled || !file || (action === 'trim' && (accountMode === 'loading' || accountMode === 'error' || (!pendingTrim && !validRange)))" @click="run">{{ action === 'trim' && pendingTrim ? '检查并恢复' : actionLabels[action] }}</el-button>
@@ -94,6 +95,7 @@ import { processVideo } from "../videoProcessing";
 import { canClearUnsubmittedTrim } from "./trimNotSubmitted";
 import { useMediaPreview } from "@toonflow/node-shared/mediaPreview";
 import { useNodePersistence } from "@toonflow/nodes-scaffold/nodeDocument";
+import { EventSourceParserStream } from "eventsource-parser/stream";
 
 const props = defineProps<{ file?: NodeMediaValue; src: string; disabled?: boolean }>();
 const { node } = useNode();
@@ -120,8 +122,11 @@ let trimCanvasId = "";
 let trimCanvasPath = "";
 const { src: playbackSrc, preparing: preparingPreview, error: previewError, handleError, handleLoaded } = useMediaPreview(() => visible.value && action.value === "trim" ? props.src : "", "video");
 const processing = ref(false);
+const trimQueued = ref(false);
 const creatingAnalysis = ref(false);
 const cancelling = ref(false);
+const progressLabel = computed(() => cancelling.value ? "正在取消处理…" : trimQueued.value ? "已排队，等待截取…" : "正在处理视频…");
+const backgroundProgress = computed(() => !visible.value && processing.value && action.value === "trim" ? progressLabel.value : "");
 const preview = ref<HTMLVideoElement>();
 const duration = ref(0);
 const start = ref(0);
@@ -272,7 +277,7 @@ async function createFrameAnalysis() {
   }
 }
 
-defineExpose({ open, processing, createFrameAnalysis, creatingAnalysis });
+defineExpose({ open, processing, backgroundProgress, cancel, createFrameAnalysis, creatingAnalysis });
 
 function readDuration(event: Event) {
   if (!handleLoaded(event)) return;
@@ -436,6 +441,25 @@ async function usesCustomerAccount(signal: AbortSignal) {
   return null;
 }
 
+async function readTrimResponse(response: Response) {
+  if (!response.headers.get("content-type")?.includes("text/event-stream")) return response.json();
+  if (!response.body) throw new Error("未收到截取状态，请检查并恢复");
+  const reader = response.body.pipeThrough(new TextDecoderStream()).pipeThrough(new EventSourceParserStream()).getReader();
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error("截取连接已结束，请检查并恢复");
+      const event = JSON.parse(value.data);
+      if (event.phase === "queued") trimQueued.value = true;
+      if (event.phase === "running") trimQueued.value = false;
+      if (event.result) return event.result;
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+
 async function trimForCustomer(workspace: WorkspaceFiles, source: string, start: number, end: number, signal: AbortSignal) {
   const { directory } = await workspace.list();
   if (directory !== trimDirectory || getCanvas?.()?.id !== trimCanvasId) throw new Error("工作区或画布已变化，请重新打开裁剪");
@@ -457,12 +481,12 @@ async function trimForCustomer(workspace: WorkspaceFiles, source: string, start:
     const state = await check.json();
     if (!check.ok || state?.code !== 200) throw new Error("无法确认上次裁剪状态，请稍后重试");
     if (state.data?.status === "ready" && state.data.nodeId === pending.operationId && state.data.outputPath === `assets/${pending.operationId}/video.mp4`) return { nodeId: pending.operationId, outputPath: state.data.outputPath as string, duration: pending.end - pending.start, width: preview.value?.videoWidth ?? 0, height: preview.value?.videoHeight ?? 0 };
-    if (state.data?.status === "pending") throw new Error("上次裁剪状态尚未确认，请联系管理员");
+    if (state.data?.status === "pending") throw new Error(state.data.phase === "queued" ? "上次截取正在排队" : state.data.phase === "running" ? "上次截取正在执行" : "上次裁剪状态尚未确认，请联系管理员");
     if (state.data?.status === "interrupted") { interruptedOperation.value = pending.operationId; throw new Error("上次截取已中断，可放弃查看后重新截取"); }
     if (state.data?.status !== "notFound" || pending.recoverOnly) throw new Error("无法确认上次裁剪状态，请联系管理员");
   }
-  const response = await fetch("/api/ffmpeg/trim", { method: "POST", headers: { "Content-Type": "application/json", "x-toonflow-workspace": "1" }, body: JSON.stringify({ directory, operationId: pending.operationId, source: pending.source, start: pending.start, end: pending.end }), signal });
-  const body = await response.json();
+  const response = await fetch("/api/ffmpeg/trim", { method: "POST", headers: { Accept: "text/event-stream", "Content-Type": "application/json", "x-toonflow-workspace": "1" }, body: JSON.stringify({ directory, operationId: pending.operationId, source: pending.source, start: pending.start, end: pending.end }), signal });
+  const body = await readTrimResponse(response);
   if (canClearUnsubmittedTrim(!previous, response.status, body, pending.operationId)) {
     const cleanupSignal = AbortSignal.timeout(10000);
     if (await usesCustomerAccount(cleanupSignal) !== trimUserId || (await workspace.list()).directory !== trimDirectory || getCanvas?.()?.id !== trimCanvasId) throw new Error("账号、工作区或画布已变化，请重新打开裁剪");
@@ -603,6 +627,7 @@ async function process() {
       if (results.some(result => result.status === "rejected" && result.reason?.response?.data?.data?.code !== "ENOENT")) ElMessage.error("部分临时媒体文件清理失败，未能全部删除。");
     }
     if (current.signal.aborted) visible.value = false;
+    trimQueued.value = false;
     processing.value = cancelling.value = false;
     controller = undefined;
   }

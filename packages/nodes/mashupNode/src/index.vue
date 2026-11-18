@@ -43,7 +43,7 @@ import { nodeSkeleton, uploadNodeFile, useNode, useNodeInputs, type NodeHandle }
 import { useNodePersistence } from "@toonflow/nodes-scaffold/nodeDocument";
 import { getMediaMimeType } from "@toonflow/node-shared/mediaTypes";
 import { combinationCount, groupNames, renderBatch, type MashupClip, type MashupGroup } from "./mashupBatch";
-import { renderMashup } from "./renderMashup";
+import { concatVideo } from "@toonflow/node-shared/concatVideo";
 import { downloadZip } from "./mashupDownload";
 
 defineOptions({
@@ -159,7 +159,7 @@ async function run(first: boolean) {
         }
         blobs.push(lastClip[slot].blob);
       }
-      const output = await renderMashup(blobs, signal);
+      const output = await concatVideo(blobs, signal);
       signal.throwIfAborted(); ensureCurrent(saved);
       const name = String(index + 1).padStart(3, "0") + "_" + clips.map(clip => clip.name.replace(/\.[^.]+$/, "").replace(/[^\p{L}\p{N}._-]/gu, "_").slice(0, 24)).join("-") + ".mp4";
       const url = await uploadNodeFile(workspace, id, new File([output], name, { type: "video/mp4" }));

@@ -5,6 +5,7 @@ import {
 } from "mediabunny";
 
 const workspaceFileLimit = 100 * 1024 * 1024;
+export const maxConcatClips = 6;
 
 async function inspectClip(input: Input, position: number) {
   const label = `第 ${position} 段`;
@@ -55,10 +56,9 @@ async function inspectClip(input: Input, position: number) {
   return { video, audio, videoConfig, audioConfig, transformationMatrix, start, duration, fingerprint };
 }
 
-/** Lossless packet remux for segments exported from the same source preset. */
-export async function renderMashup(clips: readonly Blob[], signal?: AbortSignal): Promise<Blob> {
+export async function concatVideo(clips: readonly Blob[], signal?: AbortSignal): Promise<Blob> {
   signal?.throwIfAborted();
-  if (clips.length < 2 || clips.length > 6) throw new Error("混剪需要 2 至 6 个片段");
+  if (clips.length < 2 || clips.length > maxConcatClips) throw new Error("请选择 2 至 6 个视频片段");
   if (clips.some(clip => !clip.size || clip.size > workspaceFileLimit)) {
     throw new Error("每个视频须为不超过 100 MB 的非空文件");
   }
@@ -115,7 +115,7 @@ export async function renderMashup(clips: readonly Blob[], signal?: AbortSignal)
     signal?.throwIfAborted();
     await output.finalize();
     signal?.throwIfAborted();
-    if (!target.buffer?.byteLength) throw new Error("混剪输出为空");
+    if (!target.buffer?.byteLength) throw new Error("合成输出为空");
     if (target.buffer.byteLength > workspaceFileLimit) throw new Error("成片超过工作区单文件 100 MB 限制");
     return new Blob([target.buffer], { type: "video/mp4" });
   } finally {

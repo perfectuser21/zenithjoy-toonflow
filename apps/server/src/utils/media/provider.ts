@@ -1,6 +1,6 @@
 import { t, translateMessage, validationOptions } from "@/lib/i18n";
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, unlink, writeAtomicSync } from "@toonflow/file";
 import { dirname, join } from "node:path";
 import { createContext, SourceTextModule } from "node:vm";
@@ -536,7 +536,7 @@ export async function deleteMediaProvider(fileName: string, revision: string) {
 }
 
 export async function loadMediaProviderSource(source: string, config: Record<string, unknown> = {}, signal?: AbortSignal, fetchRequest = fetch, cwd?: string,
-  saveTaskData?: (data: ProviderTaskData) => Promise<void>, platformAccount = false) {
+  saveTaskData?: (data: ProviderTaskData) => Promise<void>, platformAccount = false, taskId?: string) {
   signal?.throwIfAborted();
   const { id, value } = parseProvider(source);
   if (platformAccount && id !== "toonflow") invalid("账号媒体供应商 ID 必须为 toonflow", 403);
@@ -617,8 +617,23 @@ export async function loadMediaProviderSource(source: string, config: Record<str
         if (++pendingRequests > 1) overlappingRequests = true;
         const requestId = ++requestCount;
         failure = undefined;
+        const gatewayRequestId = id === "openaiImage" ? randomUUID() : undefined;
+        if (gatewayRequestId) {
+          const headers = new Headers(init?.headers);
+          headers.set("x-client-request-id", gatewayRequestId);
+          init = { ...init, headers };
+        }
         try {
           const response = await provider.tool.fetch(input, init);
+          if (gatewayRequestId) {
+            const upstream = response.headers.get("x-request-id");
+            const upstreamRequestId = upstream && /^req_[a-zA-Z0-9_-]{1,120}$/.test(upstream) ? upstream : undefined;
+            console.info(JSON.stringify({ event: "canvasOpenaiImageGateway", taskId, requestId: gatewayRequestId, upstreamRequestId, status: response.status }));
+            if (response.ok && (response.headers.get("x-client-request-id") !== gatewayRequestId || !upstreamRequestId)) {
+              await response.body?.cancel().catch(() => {});
+              throw new Error("图片网关未返回可核对的请求编号");
+            }
+          }
           if (!response.ok) failure = { status: response.status, message: await responseErrorMessage(response, provider.config) };
           else {
             const readJson = response.json;
