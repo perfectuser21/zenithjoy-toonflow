@@ -1,5 +1,6 @@
 name: Server build
 on:
+  workflow_call:
   pull_request:
     paths:
       - "apps/**"
@@ -31,10 +32,16 @@ jobs:
         with:
           bun-version-file: package.json
       - run: bun install --frozen-lockfile
-      - name: Test trusted canvas node updates
+      - name: Install FFmpeg for media regression
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: Test trusted canvas nodes and ordered video exports
         run: bun test apps/server/src/utils/plugins/trustedNodeInitialization.test.ts
       - name: Typecheck server
         run: bun run --cwd apps/server typecheck
       - name: Typecheck canvas web
         run: bun run --cwd apps/web typecheck
+      - name: Typecheck mashup node
+        run: bun run --cwd packages/nodes/mashupNode typecheck
       - run: bun run build:server

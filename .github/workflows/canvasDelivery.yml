@@ -17,6 +17,7 @@ on:
       - 'deploy/**'
       - '.github/workflows/canvasDelivery.yml'
       - '.github/workflows/candidateImage.yml'
+      - '.github/workflows/serverBuild.yml'
   workflow_dispatch:
 
 permissions:
@@ -27,7 +28,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  regression:
+    if: vars.CANVAS_DELIVERY_ENABLED == 'true'
+    uses: ./.github/workflows/serverBuild.yml
+
   candidate:
+    needs: regression
     if: vars.CANVAS_DELIVERY_ENABLED == 'true'
     permissions:
       contents: read
