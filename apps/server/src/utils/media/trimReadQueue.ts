@@ -1,4 +1,4 @@
-export function createTrimReadQueue(maxWaiting = 32) {
+export function createTrimReadQueue(maxWaiting = 32, fullMessage = "裁剪预览请求过多，请稍后重试") {
   let busy = false;
   const pending = new Set<() => void>();
 
@@ -9,7 +9,7 @@ export function createTrimReadQueue(maxWaiting = 32) {
       return;
     }
     if (pending.size >= maxWaiting) {
-      throw Object.assign(new Error("裁剪预览请求过多，请稍后重试"), { status: 429 });
+      throw Object.assign(new Error(fullMessage), { status: 429 });
     }
     await new Promise<void>((resolve, reject) => {
       const start = () => {
