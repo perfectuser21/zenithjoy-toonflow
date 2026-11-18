@@ -19,6 +19,14 @@ on:
       - '.github/workflows/candidateImage.yml'
       - '.github/workflows/serverBuild.yml'
   workflow_dispatch:
+    inputs:
+      staging_run:
+        description: 'Approved staging run ID. Leave empty to deploy staging only.'
+        type: string
+      team_verified:
+        description: 'The team tested and approved this version on Hong Kong staging.'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -29,7 +37,7 @@ concurrency:
 
 jobs:
   regression:
-    if: vars.CANVAS_DELIVERY_ENABLED == 'true'
+    if: vars.CANVAS_DELIVERY_ENABLED == 'true' && (github.event_name == 'push' || inputs.staging_run == '')
     uses: ./.github/workflows/serverBuild.yml
 
   candidate:
@@ -51,8 +59,6 @@ jobs:
     runs-on: ubuntu-24.04
     environment: staging
     timeout-minutes: 240
-    outputs:
-      receipt: ${{ steps.deploy.outputs.receipt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -81,6 +87,12 @@ jobs:
           CANVAS_COS_SECRET_ID: ${{ secrets.CANVAS_COS_SECRET_ID }}
           CANVAS_COS_SECRET_KEY: ${{ secrets.CANVAS_COS_SECRET_KEY }}
         run: bash deploy/delivery/remoteRelease.sh
+      - name: Save staging receipt for manual promotion
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: staging-release-${{ github.run_attempt }}
+          path: releaseReceipt.json
+          if-no-files-found: error
       - name: Publish staging evidence
         if: always()
         run: |
@@ -89,10 +101,11 @@ jobs:
           fi
 
   production:
+    if: vars.CANVAS_DELIVERY_ENABLED == 'true' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && inputs.staging_run != '' && inputs.team_verified
     permissions:
+      actions: read
       contents: read
       packages: read
-    needs: [candidate, staging]
     runs-on: ubuntu-24.04
     environment: production
     timeout-minutes: 240
@@ -100,6 +113,30 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - name: Read the approved staging receipt
+        id: staged
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAGING_RUN: ${{ inputs.staging_run }}
+        run: |
+          [[ "$STAGING_RUN" =~ ^[1-9][0-9]*$ ]]
+          run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$STAGING_RUN")
+          jq -e '.path == ".github/workflows/canvasDelivery.yml" and
+            .head_branch == "master" and .status == "completed" and .conclusion == "success" and
+            (.event == "push" or .event == "workflow_dispatch")' <<< "$run" > /dev/null
+          attempt=$(jq -er '.run_attempt' <<< "$run")
+          source=$(jq -er '.head_sha' <<< "$run")
+          gh run download "$STAGING_RUN" --repo "$GITHUB_REPOSITORY" --name "staging-release-$attempt" --dir "$RUNNER_TEMP/approved-staging"
+          receipt="$RUNNER_TEMP/approved-staging/releaseReceipt.json"
+          jq -e --arg run "$STAGING_RUN" --arg attempt "$attempt" --arg source "$source" '
+            .environment == "staging" and .runId == $run and .runAttempt == $attempt and
+            .sourceSha == $source and .result == "passed" and .businessVerified == true and
+            .runningImage == .image and
+            .transfer.key == "aivideoReleases/\($source)/\($run)/\($attempt)/image.oci"
+          ' "$receipt" > /dev/null
+          jq -r '"image=\(.image)", "source=\(.sourceSha)", "archive_key=\(.transfer.key)",
+            "archive_sha256=\(.transfer.sha256)", "archive_bytes=\(.transfer.bytes)"' "$receipt" >> "$GITHUB_OUTPUT"
+          echo "receipt=$(jq -c . "$receipt")" >> "$GITHUB_OUTPUT"
       - name: Install COS signing SDK
         run: |
           python3 -m venv "$RUNNER_TEMP/cos-venv"
@@ -117,13 +154,13 @@ jobs:
           RELEASE_JUMP_USER: ${{ vars.CANVAS_RELEASE_JUMP_USER }}
           RELEASE_JUMP_KEY: ${{ secrets.CANVAS_RELEASE_JUMP_KEY }}
           RELEASE_JUMP_KNOWN_HOSTS: ${{ secrets.CANVAS_RELEASE_JUMP_KNOWN_HOSTS }}
-          RELEASE_IMAGE: ${{ needs.candidate.outputs.image }}
-          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_IMAGE: ${{ steps.staged.outputs.image }}
+          RELEASE_SHA: ${{ steps.staged.outputs.source }}
           RELEASE_ENVIRONMENT: production
-          RELEASE_STAGING_RECEIPT: ${{ needs.staging.outputs.receipt }}
-          RELEASE_COS_KEY: ${{ needs.candidate.outputs.archiveKey }}
-          RELEASE_COS_SHA256: ${{ needs.candidate.outputs.archiveSha256 }}
-          RELEASE_COS_BYTES: ${{ needs.candidate.outputs.archiveBytes }}
+          RELEASE_STAGING_RECEIPT: ${{ steps.staged.outputs.receipt }}
+          RELEASE_COS_KEY: ${{ steps.staged.outputs.archive_key }}
+          RELEASE_COS_SHA256: ${{ steps.staged.outputs.archive_sha256 }}
+          RELEASE_COS_BYTES: ${{ steps.staged.outputs.archive_bytes }}
           CANVAS_COS_BUCKET: ${{ vars.CANVAS_COS_BUCKET }}
           CANVAS_COS_REGION: ${{ vars.CANVAS_COS_REGION }}
           CANVAS_COS_SECRET_ID: ${{ secrets.CANVAS_COS_SECRET_ID }}

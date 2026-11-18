@@ -83,6 +83,8 @@
 
 GitHub 环境权限与发布者范围配置完成后才启用仓库变量 `CANVAS_DELIVERY_ENABLED=true`。
 
+master 推送只部署香港 staging。通知团队在 https://toonflow.zenjoymedia.media 试用，团队确认后再手动运行 Canvas delivery，填写通过的 staging run ID 并勾选团队已验收。正式任务使用这次 staging 归档的同一源码、镜像和 COS 对象，杭州仍向香港读取当前见证。
+
 COS 中转由 CI 将固定 digest 的完整 OCI 归档上传至既有私有桶，不创建桶或自动删除对象。repository variables `CANVAS_COS_BUCKET`、`CANVAS_COS_REGION` 与 repository secrets `CANVAS_COS_SECRET_ID`、`CANVAS_COS_SECRET_KEY` 使用仅限 `aivideoReleases/` 的读写身份，不授予删除或分块清理权限。对象键绑定源码 SHA、run 和 attempt；已有对象仅在长度与 SHA 元数据相同才复用。两个 environment 各自生成短期 GET 签名，签名仅经受限 SSH stdin 提供，不写日志、输出或回执。
 
 两地主机 root 固定配置 `cosBucket`、`cosRegion` 和 `cosPrefix`（必须为 `aivideoReleases`）。主机只接受对应 COS HTTPS 域名和本次确定的对象路径，拒绝重定向，限制下载长度和时限并核对归档 SHA；随后执行完整 OCI 验证、Docker 加载与完整导出读回。香港见证只返回小型验收回执，不再传输镜像。配置前须验证私有桶 ACL、权限范围及两地实际访问，不能仅凭构建成功晋级。

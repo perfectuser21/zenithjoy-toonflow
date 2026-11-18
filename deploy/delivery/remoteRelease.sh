@@ -60,6 +60,11 @@ import os,json,logging,re
 from qcloud_cos import CosConfig,CosS3Client
 logging.disable(logging.CRITICAL)
 request={'environment':os.environ['RELEASE_ENVIRONMENT'],'sourceSha':os.environ['RELEASE_SHA'],'image':os.environ['RELEASE_IMAGE'],'runId':os.environ['GITHUB_RUN_ID'],'runAttempt':os.environ['GITHUB_RUN_ATTEMPT']}
+stage=None
+if request['environment']=='production':
+    stage=json.loads(os.environ['RELEASE_STAGING_RECEIPT'])
+    request.update(runId=stage['runId'],runAttempt=stage['runAttempt'])
+    assert all(re.fullmatch(r'[1-9][0-9]*',request[k]) for k in ('runId','runAttempt'))
 key=os.environ['RELEASE_COS_KEY']; digest=os.environ['RELEASE_COS_SHA256']; length=int(os.environ['RELEASE_COS_BYTES'])
 assert key==f"aivideoReleases/{request['sourceSha']}/{request['runId']}/{request['runAttempt']}/image.oci"
 assert re.fullmatch(r'[a-f0-9]{64}',digest) and 0<length<=768*1024*1024
@@ -67,10 +72,8 @@ client=CosS3Client(CosConfig(Region=os.environ['CANVAS_COS_REGION'],SecretId=os.
                              SecretKey=os.environ['CANVAS_COS_SECRET_KEY'],Scheme='https',EnableOldDomain=True))
 url=client.get_presigned_url(Method='GET',Bucket=os.environ['CANVAS_COS_BUCKET'],Key=key,Expired=7200)
 transfer={'key':key,'sha256':digest,'bytes':length}
-if request['environment']=='production':
-    stage=json.loads(os.environ['RELEASE_STAGING_RECEIPT'])
+if stage is not None:
     assert stage['environment']=='staging' and stage['sourceSha']==request['sourceSha'] and stage['image']==request['image']
-    assert stage['runId']==request['runId'] and stage['runAttempt']==request['runAttempt']
     assert stage['result']=='passed' and stage['businessVerified'] is True
     assert stage['transfer']==transfer
     request['stagingReceipt']=stage
