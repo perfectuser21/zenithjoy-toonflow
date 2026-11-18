@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { combinationCount, combinationAt, renderBatch, type MashupClip } from "../../../../../packages/nodes/mashupNode/src/mashupBatch";
-import { initializeTrustedNodes } from "./initialize";
+import { initializeTrustedNodes, trustedNodeNames } from "./initialize";
 
 test("existing workspaces receive trusted nodes from each release", async () => {
   const root = await mkdtemp(join(tmpdir(), "toonflowTrustedNodes"));
@@ -13,12 +13,12 @@ test("existing workspaces receive trusted nodes from each release", async () => 
     const target = join(root, "nodes");
     await mkdir(source);
     await mkdir(target);
-    const nodeFiles = ["videoNode.umd.js", "textNode.umd.js", "videoGenerationNode.umd.js", "imageNode.umd.js", "imageGenerationNode.umd.js"];
+    const nodeFiles = Object.keys(trustedNodeNames).map(name => `${name}.umd.js`);
+    expect(trustedNodeNames.videoConcatNode).toBe("合成成片");
     for (const file of nodeFiles) {
       await writeFile(join(source, file), `candidate:${file}`);
       await writeFile(join(target, file), `old:${file}`);
     }
-    await writeFile(join(source, "mashupNode.umd.js"), "candidate:mashupNode");
     await writeFile(join(target, "initialized"), "existing workspace");
     await writeFile(join(target, "textNode.disabled"), "");
     await writeFile(join(source, "customNode.umd.js"), "bundled");
@@ -27,7 +27,6 @@ test("existing workspaces receive trusted nodes from each release", async () => 
     for (const file of nodeFiles) {
       expect(await readFile(join(target, file), "utf8")).toBe(`candidate:${file}`);
     }
-    expect(await readFile(join(target, "mashupNode.umd.js"), "utf8")).toBe("candidate:mashupNode");
     await writeFile(join(source, "videoNode.umd.js"), "next release");
     await initializeTrustedNodes(target, source);
     expect(await readFile(join(target, "videoNode.umd.js"), "utf8")).toBe("next release");
@@ -69,7 +68,7 @@ test("resumes after the last persisted result, and refuses empty groups or an in
 
 
 test("the four exported MP4s contain the selected pictures and original audio in playback order", async () => {
-  const { renderMashup } = await import("../../../../../packages/nodes/mashupNode/src/renderMashup");
+  const { concatVideo } = await import("../../../../../packages/nodeShared/src/concatVideo");
   const root = await mkdtemp(join(tmpdir(), "toonflowMashupMedia"));
   const colors = ["red", "lime", "blue", "yellow"];
   const tones = [330, 440, 550, 660];
@@ -87,7 +86,7 @@ test("the four exported MP4s contain the selected pictures and original audio in
       pixels.push(samplePicture(path, 0.3));
     }
     for (const a of [0, 1]) for (const b of [2, 3]) {
-      const merged = await renderMashup([sources[a]!, sources[b]!]);
+      const merged = await concatVideo([sources[a]!, sources[b]!]);
       const path = join(root, `output${a}${b}.mp4`);
       await writeFile(path, new Uint8Array(await merged.arrayBuffer()));
       const duration = Number(execFileSync("ffprobe", ["-v", "error", "-show_entries", "format=duration",

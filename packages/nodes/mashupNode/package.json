@@ -15,8 +15,7 @@
   },
   "dependencies": {
     "@tabler/icons-vue": "^3.46.0",
-    "client-zip": "2.5.1",
-    "mediabunny": "1.66.0"
+    "client-zip": "2.5.1"
   },
   "devDependencies": {
     "@toonflow/node-shared": "workspace:*",
