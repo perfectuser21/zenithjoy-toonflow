@@ -16,18 +16,46 @@ export default router.get("/", validateFields({ directory: z.string().min(1).max
   const actor = requestIdentity(req);
   if (actor?.role === "user") {
     const directory = await u.workspace.resolveWorkspace(req, req.query.directory as string);
-    const managed = await withManagedTrim(directory, actor.id, req.query.path as string, AbortSignal.timeout(30000), async bytes => {
-      const current = await authenticateWeb(req);
-      if (!current || current.id !== actor.id || current.role !== "user" || await u.workspace.resolveWorkspace(req, req.query.directory as string) !== directory) throw Object.assign(new Error("账号或工作区权限已变化"), { status: 403 });
-      if (req.query.snapshot === "true") throw Object.assign(new Error("视频不是文本文件"), { status: 415 });
-      await new Promise<void>(done => {
-        const timer = setTimeout(() => { res.destroy(); done(); }, 30000);
-        const finish = () => { clearTimeout(timer); done(); };
-        res.once("finish", finish); res.once("close", finish);
-        res.set("Cache-Control", "no-store").type("video/mp4").send(bytes);
+    const controller = new AbortController();
+    const cancel = () => controller.abort();
+    res.once("close", cancel);
+    if (res.destroyed) cancel();
+    try {
+      const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(30000)]);
+      const managed = await withManagedTrim(directory, actor.id, req.query.path as string, signal, async bytes => {
+        const current = await authenticateWeb(req);
+        if (!current || current.id !== actor.id || current.role !== "user" || await u.workspace.resolveWorkspace(req, req.query.directory as string) !== directory) throw Object.assign(new Error("账号或工作区权限已变化"), { status: 403 });
+        if (req.query.snapshot === "true") throw Object.assign(new Error("视频不是文本文件"), { status: 415 });
+        if (res.destroyed) return;
+        res.set({ "Cache-Control": "no-store", "Accept-Ranges": "bytes" }).type("video/mp4");
+        const acceptsRange = req.get("Range")?.startsWith("bytes=") && !req.get("If-Range");
+        const range = acceptsRange ? req.range(bytes.length, { combine: true }) : undefined;
+        if (range === -1) {
+          res.set("Content-Range", `bytes */${bytes.length}`).status(416).end();
+          return;
+        }
+        const single = Array.isArray(range) && range.type === "bytes" && range.length === 1 ? range[0] : undefined;
+        const body = single ? bytes.subarray(single.start, single.end + 1) : bytes;
+        if (single) res.set("Content-Range", `bytes ${single.start}-${single.end}/${bytes.length}`).status(206);
+        await new Promise<void>(done => {
+          const timer = setTimeout(() => { res.destroy(); finish(); }, 30000);
+          const finish = () => {
+            clearTimeout(timer);
+            res.off("finish", finish);
+            res.off("close", finish);
+            done();
+          };
+          res.once("finish", finish);
+          res.once("close", finish);
+          if (single) res.set("Content-Length", String(body.length)).end(req.method === "HEAD" ? undefined : body);
+          else res.send(body);
+        });
       });
-    });
-    if (managed.managed) return;
+      if (managed.managed || res.destroyed) return;
+    } catch (error) {
+      if (!res.destroyed) throw error;
+      return;
+    } finally { res.off("close", cancel); }
   }
   const { path } = await u.workspaceFile.resolveWorkspaceFile(req, req.query.directory as string, req.query.path as string);
   const file = await lstat(path);

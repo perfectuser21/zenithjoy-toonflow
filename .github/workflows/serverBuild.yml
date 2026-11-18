@@ -33,6 +33,8 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Test trusted canvas node updates
         run: bun test apps/server/src/utils/plugins/trustedNodeInitialization.test.ts
+      - name: Test simultaneous clip previews
+        run: bun test apps/server/src/utils/media/trimReadQueue.test.ts
       - name: Typecheck server
         run: bun run --cwd apps/server typecheck
       - name: Typecheck canvas web
