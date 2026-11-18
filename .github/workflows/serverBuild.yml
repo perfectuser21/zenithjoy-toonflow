@@ -31,6 +31,8 @@ jobs:
         with:
           bun-version-file: package.json
       - run: bun install --frozen-lockfile
+      - name: Test trusted canvas node updates
+        run: bun test apps/server/src/utils/plugins/trustedNodeInitialization.test.ts
       - name: Typecheck server
         run: bun run --cwd apps/server typecheck
       - name: Typecheck canvas web

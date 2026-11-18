@@ -4,13 +4,13 @@ import { lstat, mkdir, readFile, readdir, writeAtomic } from "@toonflow/file";
 import { dirname, resolve } from "node:path";
 import { z } from "zod";
 import conf from "@/utils/conf";
+import { trustedNodeNames } from "./initialize";
 import { loadToolModule, parseTool, validateToolConfig } from "./tools";
 
 export const nodeNameSchema = z.string().max(96).regex(/^[a-z][a-zA-Z0-9]*$/);
 export const nodesDirectory = resolve(dirname(conf.path), "nodes");
 declare const __toonflowNodeHashes__: Record<string, string> | undefined;
 const trustedNodeHashes = typeof __toonflowNodeHashes__ === "undefined" ? {} : __toonflowNodeHashes__;
-const trustedNodeNames: Record<string, string> = { videoNode: "视频", textNode: "文本", videoGenerationNode: "视频生成" };
 
 export async function readTrustedNode(name: string) {
   const expected = trustedNodeHashes[name];
