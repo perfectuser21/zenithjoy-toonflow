@@ -309,7 +309,12 @@ async function configuredProvider(request: MediaGenerationRequest, mediaType: "i
   const info = await getMediaProvider(request.providerId);
   if (!resume && !info.models.some(model => model.id === request.modelId && model.type === mediaType)) invalid("所选媒体模型不存在或类型不匹配，请重新选择");
   const configurations = record(conf.get("settings", {}).mediaProviderConfigs);
-  const provider = await loadMediaProviderSource(info.source, record(configurations[info.id]), signal, checkedFetch, directory, saveTaskData, false, taskId);
+  const gatewayUrl = process.env.TOONFLOW_OPENAI_IMAGE_GATEWAY_URL;
+  const gatewayToken = process.env.TOONFLOW_OPENAI_IMAGE_GATEWAY_TOKEN;
+  const providerConfig = info.id === "openaiImage" && (gatewayUrl || gatewayToken)
+    ? { gatewayUrl, apiKey: gatewayToken }
+    : record(configurations[info.id]);
+  const provider = await loadMediaProviderSource(info.source, providerConfig, signal, checkedFetch, directory, saveTaskData, false, taskId);
   return { provider, request };
 }
 
