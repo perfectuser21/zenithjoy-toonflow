@@ -2,7 +2,14 @@ import { createHash } from "node:crypto";
 import { copyFile, cp, mkdir, readFile, readdir, rename, unlink, writeAtomic, writeFile } from "@toonflow/file";
 import { resolve } from "node:path";
 
-export const trustedNodeNames: Readonly<Record<string, string>> = { videoNode: "视频", textNode: "文本", videoGenerationNode: "视频生成", mashupNode: "批量混剪" };
+export const trustedNodeNames: Readonly<Record<string, string>> = {
+  videoNode: "视频",
+  textNode: "文本",
+  videoGenerationNode: "视频生成",
+  imageNode: "图片",
+  imageGenerationNode: "图片生成",
+  mashupNode: "批量混剪",
+};
 
 export async function initializeTrustedNodes(targetDirectory: string, sourceDirectory: string) {
   const files = Object.keys(trustedNodeNames).map(name => `${name}.umd.js`);

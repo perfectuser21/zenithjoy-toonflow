@@ -38,6 +38,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends ffmpeg
       - name: Test trusted canvas nodes and ordered video exports
         run: bun test apps/server/src/utils/plugins/trustedNodeInitialization.test.ts
+      - name: Test simultaneous clip previews
+        run: bun test apps/server/src/utils/media/trimReadQueue.test.ts
       - name: Typecheck server
         run: bun run --cwd apps/server typecheck
       - name: Typecheck canvas web

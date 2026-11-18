@@ -1,18 +1,19 @@
 <template>
-  <el-dialog v-model="visible" class="publishWorkDialog" :title="projectPickerVisible ? '选择项目' : '发布作品'" width="min(960px, calc(100vw - 32px))" alignCenter appendToBody destroyOnClose :closeOnClickModal="false" :closeOnPressEscape="!submitting" :showClose="!submitting" :beforeClose="close" @closed="emit('closed')">
+  <el-dialog v-model="visible" class="publishWorkDialog" :title="heading" width="min(960px, calc(100vw - 32px))" alignCenter appendToBody destroyOnClose :closeOnClickModal="false" :closeOnPressEscape="!submitting" :showClose="!submitting" :beforeClose="close" @closed="emit('closed')">
     <template #header="{ titleId, titleClass }">
       <div class="publishHeader">
-        <el-button v-if="projectPickerVisible" ref="backButton" class="backButton" text circle :icon="IconArrowLeft" aria-label="返回发布作品" @click="projectPickerVisible = false" />
-        <h2 :id="titleId" :class="titleClass">{{ projectPickerVisible ? '选择项目' : '发布作品' }}</h2>
+        <el-button v-if="picker" ref="backButton" class="backButton" text circle :icon="IconArrowLeft" aria-label="返回发布作品" @click="picker = undefined" />
+        <h2 :id="titleId" :class="titleClass">{{ heading }}</h2>
       </div>
     </template>
-    <publishProjectPicker v-if="projectPickerVisible" @select="selectProject" />
-    <el-form v-show="!projectPickerVisible" class="publishContent" labelPosition="top" :disabled="submitting" @submit.prevent="publishWork">
+    <publishProjectPicker v-if="picker === 'project'" @select="selectProject" />
+    <publishCoverPicker v-else-if="picker === 'cover'" @select="selectProjectCover" />
+    <el-form v-show="!picker" class="publishContent" labelPosition="top" :disabled="submitting" @submit.prevent="publishWork">
       <div class="mediaPanel">
         <el-form-item label="上传作品" required>
           <input ref="workInput" type="file" accept=".mp4,.webm,video/mp4,video/webm" :disabled="submitting" hidden @change="selectMediaInput($event, 'work')" />
           <div class="workUpload" @dragover.prevent @drop.prevent="selectMedia($event.dataTransfer?.files[0], 'work')">
-            <videoPlayer v-if="work" class="workPreview" :src="work.url" :label="work.file.name" :active="visible && !projectPickerVisible" />
+            <videoPlayer v-if="work" class="workPreview" :src="work.url" :label="work.file.name" :active="visible && !picker" />
             <button v-else class="uploadPrompt" type="button" aria-label="上传作品" :disabled="submitting" @click="workInput?.click()">
               <icon-cloud-upload :size="30" stroke="1.5" aria-hidden="true" />
               <strong>点击选择或拖入作品</strong>
@@ -38,6 +39,7 @@
             </span>
             <icon-plus class="coverAction" :size="18" aria-hidden="true" />
           </button>
+          <el-button ref="coverSelectButton" class="projectCoverAction" text size="small" :disabled="submitting" @click="picker = 'cover'">从项目选择封面</el-button>
         </el-form-item>
       </div>
       <div class="detailsPanel">
@@ -48,7 +50,7 @@
           <el-input v-model="description" type="textarea" placeholder="请输入作品描述" :rows="5" :maxlength="500" showWordLimit resize="none" />
         </el-form-item>
         <el-form-item label="公开项目">
-          <button ref="projectSelectButton" class="projectSelect" type="button" :disabled="submitting" :aria-label="selectedProject ? '更换项目' : '选择项目'" @click="projectPickerVisible = true">
+          <button ref="projectSelectButton" class="projectSelect" type="button" :disabled="submitting" :aria-label="selectedProject ? '更换项目' : '选择项目'" @click="picker = 'project'">
             <icon-folder :size="24" stroke="1.5" aria-hidden="true" />
             <span>{{ selectedProject?.name || '选择项目' }}</span>
             <icon-plus :size="18" aria-hidden="true" />
@@ -63,14 +65,14 @@
     </div>
     <el-alert v-if="uploadError" :title="uploadError" type="error" :closable="false" showIcon />
     <template #footer>
-      <el-button :disabled="submitting" @click="close()">{{ projectPickerVisible ? '返回' : '取消' }}</el-button>
-      <el-button v-if="!projectPickerVisible" type="primary" :loading="submitting" @click="publishWork">发布作品</el-button>
+      <el-button :disabled="submitting" @click="close()">{{ picker ? '返回' : '取消' }}</el-button>
+      <el-button v-if="!picker" type="primary" :loading="submitting" @click="publishWork">发布作品</el-button>
     </template>
   </el-dialog>
 </template>
 
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, ref, shallowRef, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import { ElMessage, type ButtonInstance } from "element-plus";
 import { IconArrowLeft, IconCloudUpload, IconFolder, IconPhotoPlus, IconPlus } from "@tabler/icons-vue";
 import axios from "axios";
@@ -81,6 +83,7 @@ import useWorkspaceFiles from "@/lib/workspaceFiles";
 import { toonflowAccountToken } from "@/stores/settings";
 import videoPlayer from "@/components/videoPlayer.vue";
 import publishProjectPicker from "./publishProjectPicker.vue";
+import publishCoverPicker from "./publishCoverPicker.vue";
 
 const emit = defineEmits<{ closed: [] }>();
 const visible = ref(true);
@@ -91,7 +94,9 @@ const coverInput = ref<HTMLInputElement>();
 const work = shallowRef<{ file: File; url: string }>();
 const cover = shallowRef<{ file: File; url: string }>();
 const selectedProject = shallowRef<{ name: string; directory?: string; files?: File[] }>();
-const projectPickerVisible = ref(false);
+const picker = ref<"project" | "cover">();
+const heading = computed(() => picker.value === "cover" ? "选择项目封面" : picker.value === "project" ? "选择项目" : "发布作品");
+const coverSelectButton = ref<ButtonInstance>();
 const projectSelectButton = ref<HTMLButtonElement>();
 const backButton = ref<ButtonInstance>();
 const submitting = ref(false);
@@ -103,22 +108,28 @@ let controller: AbortController | undefined;
 
 function selectProject(project: { name: string; directory?: string; files?: File[] }) {
   selectedProject.value = project;
-  projectPickerVisible.value = false;
+  picker.value = undefined;
+}
+
+function selectProjectCover(file: File) {
+  selectMedia(file, "cover");
+  picker.value = undefined;
 }
 
 function close(done?: () => void) {
   if (submitting.value) return;
-  if (projectPickerVisible.value) { projectPickerVisible.value = false; return; }
+  if (picker.value) { picker.value = undefined; return; }
   if (done) done();
   else visible.value = false;
 }
 
-watch(projectPickerVisible, async value => {
+watch(picker, async (value, previous) => {
   await nextTick();
   if (value) {
     projectSelectButton.value?.closest(".el-dialog__body")?.scrollTo({ top: 0 });
     backButton.value?.$el.focus();
-  } else projectSelectButton.value?.focus();
+  } else if (previous === "cover") coverSelectButton.value?.$el.focus();
+  else projectSelectButton.value?.focus();
 });
 
 function selectMedia(file: File | undefined, kind: "work" | "cover") {
@@ -202,7 +213,7 @@ async function uploadFile(file: File, kind: ExploreUploadSignatureParams["kind"]
 }
 
 async function publishWork() {
-  if (submitting.value || projectPickerVisible.value || !visible.value) return;
+  if (submitting.value || picker.value || !visible.value) return;
   const token = toonflowAccountToken.value;
   if (!token) { ElMessage.warning("请先在账号设置中登录"); return; }
   const title = name.value.trim();
@@ -349,6 +360,8 @@ onBeforeUnmount(() => {
 
           > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
         }
+
+        .projectCoverAction { margin-top: 8px; }
 
         .coverUpload {
           display: flex;
