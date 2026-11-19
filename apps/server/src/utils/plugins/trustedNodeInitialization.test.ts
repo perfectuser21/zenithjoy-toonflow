@@ -109,3 +109,50 @@ test("the four exported MP4s contain the selected pictures and original audio in
     await rm(root, { recursive: true, force: true });
   }
 }, 30000);
+
+test("short, overlong and delayed AAC each stay inside their own video segment", async () => {
+  const { concatVideo } = await import("../../../../../packages/nodeShared/src/concatVideo");
+  const root = await mkdtemp(join(tmpdir(), "toonflowConcatAudio"));
+  const ffmpeg = (...args: string[]) => execFileSync("ffmpeg", ["-nostdin", "-loglevel", "error", ...args]);
+  try {
+    const sources: Blob[] = [];
+    for (const [color, tone, length, delay] of [
+      ["red", "330", "0.45", "0"],
+      ["lime", "550", "1.45", "0"],
+      ["blue", "770", "0.65", "0.35"],
+    ]) {
+      const path = join(root, color + ".mp4");
+      ffmpeg("-f", "lavfi", "-i", `color=${color}:size=64x64:rate=25:duration=1`,
+        "-itsoffset", delay!, "-f", "lavfi", "-i", `sine=frequency=${tone}:sample_rate=48000:duration=${length}`,
+        "-c:v", "libx264", "-c:a", "aac", path);
+      sources.push(new Blob([new Uint8Array(await readFile(path))], { type: "video/mp4" }));
+    }
+    const path = join(root, "merged.mp4");
+    await writeFile(path, new Uint8Array(await (await concatVideo(sources)).arrayBuffer()));
+    const duration = Number(execFileSync("ffprobe", ["-v", "error", "-show_entries", "format=duration",
+      "-of", "default=nw=1:nk=1", path], { encoding: "utf8" }));
+    expect(Math.abs(duration - 3)).toBeLessThan(0.045);
+    // Decode the entire stream once. Seeking each window independently could hide a discontinuity at a seam.
+    const pcm = ffmpeg("-i", path, "-vn", "-af", "aresample=8000:async=1:first_pts=0",
+      "-ac", "1", "-f", "s16le", "pipe:1");
+    for (const [time, hz] of [[0.10, 330], [0.70, 0], [1.10, 550], [1.80, 550], [2.10, 0], [2.65, 770]] as const) {
+      const start = Math.round(time * 8000);
+      const length = 800;
+      expect(pcm.length).toBeGreaterThanOrEqual(2 * (start + length));
+      let peak = 0;
+      let crossings = 0;
+      for (let i = start; i < start + length; i++) {
+        const sample = pcm.readInt16LE(i * 2);
+        peak = Math.max(peak, Math.abs(sample));
+        if (pcm.readInt16LE((i - 1) * 2) < 0 && sample >= 0) crossings++;
+      }
+      if (hz === 0) expect(peak).toBeLessThan(100);
+      else {
+        expect(peak).toBeGreaterThan(1000);
+        expect(Math.abs(crossings * 10 - hz)).toBeLessThanOrEqual(10);
+      }
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 30000);
