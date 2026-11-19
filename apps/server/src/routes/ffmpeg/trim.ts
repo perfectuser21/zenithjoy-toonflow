@@ -50,8 +50,7 @@ export default Router().get("/capabilities", async (req, res) => {
       res.set({ "Content-Type": "text/event-stream", "Cache-Control": "no-store, no-transform", "X-Accel-Buffering": "no" }).flushHeaders();
       heartbeat = setInterval(() => { if (!res.destroyed && !res.writableEnded && !res.writableNeedDrain) res.write(": waiting\n\n"); }, 10000);
     }
-    const queueSignal = AbortSignal.any([controller.signal, AbortSignal.timeout(360000)]);
-    const result = await jobs.run({ ...value, cwd, ownerId: actor.id }, queueSignal, async () => {
+    const result = await jobs.run({ ...value, cwd, ownerId: actor.id }, controller.signal, async () => {
       if (!trimMode().create) throw Object.assign(new Error("裁剪暂处于只读模式"), { status: 503 });
       return trimVideo(cwd, value.source, value.start, value.end, AbortSignal.any([controller.signal, AbortSignal.timeout(185000)]), actor.id, authorize, value.operationId);
     }, phase => { if (stream) send({ phase }); });
