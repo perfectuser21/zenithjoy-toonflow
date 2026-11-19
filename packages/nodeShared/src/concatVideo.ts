@@ -1,6 +1,6 @@
 import {
-  BlobSource, BufferTarget, EncodedAudioPacketSource, EncodedPacketSink, EncodedVideoPacketSource,
-  Input, MP4, Mp4OutputFormat, Output, QTFF,
+  AdtsOutputFormat, AudioSample, AudioSampleSink, AudioSampleSource, BlobSource, BufferTarget, EncodedAudioPacketSource, EncodedPacketSink, EncodedVideoPacketSource,
+  Input, MP4, Mp4OutputFormat, NullTarget, Output, QTFF, QUALITY_HIGH,
   type EncodedPacket, type InputTrack,
 } from "mediabunny";
 
@@ -34,14 +34,15 @@ async function inspectClip(input: Input, position: number) {
   const end = await video.computeDuration();
   const duration = end - start;
   if (!Number.isFinite(duration) || duration <= 0) throw new Error(`${label} 的播放时长无效`);
+  let fitAudio = false;
+  let audioEnd = end;
   if (audio && audioConfig) {
     const audioStart = Math.max(0, await audio.getFirstTimestamp());
-    const audioEnd = await audio.computeDuration();
-    // A gap between AAC packets cannot be represented by stretching encoded AAC samples.
+    audioEnd = await audio.computeDuration();
     const sampleDuration = 1 / audioConfig.sampleRate;
-    if (Math.abs(start - audioStart) > sampleDuration || Math.abs(end - audioEnd) > sampleDuration) {
-      throw new Error(`${label} 的原声与画面起止时间不同，请导出音画对齐的片段后再拼接`);
-    }
+    const boundary = await new EncodedPacketSink(audio).getPacket(start, { metadataOnly: true });
+    fitAudio = Math.abs(start - audioStart) > sampleDuration || Math.abs(end - audioEnd) > sampleDuration
+      || !!(boundary && boundary.timestamp < start && boundary.microsecondTimestamp + boundary.microsecondDuration > Math.round(start * 1e6));
   }
 
   const transformationMatrix = await video.getTransformationMatrix();
@@ -53,7 +54,44 @@ async function inspectClip(input: Input, position: number) {
       : new Uint8Array(value);
     return Array.from(bytes);
   });
-  return { video, audio, videoConfig, audioConfig, transformationMatrix, start, duration, fingerprint };
+  return { video, audio, videoConfig, audioConfig, transformationMatrix, start, duration, audioEnd, fingerprint, fitAudio };
+}
+
+async function writeFittedAudio(segment: Awaited<ReturnType<typeof inspectClip>>, offset: number, output: AudioSampleSource, signal?: AbortSignal) {
+  const { audio, audioConfig, start, duration } = segment;
+  if (!audio || !audioConfig) return;
+  const { sampleRate, numberOfChannels } = audioConfig;
+  let cursor = Math.round(offset * sampleRate);
+  const end = Math.round((offset + duration) * sampleRate);
+  const soundEnd = Math.min(end, Math.round((offset + segment.audioEnd - start) * sampleRate));
+
+  async function padTo(frame: number) {
+    while (cursor < frame) {
+      signal?.throwIfAborted();
+      const count = Math.min(frame - cursor, sampleRate);
+      const silence = new AudioSample({ format: "f32", data: new Float32Array(count * numberOfChannels), sampleRate, numberOfChannels, timestamp: cursor / sampleRate });
+      try { await output.add(silence); } finally { silence.close(); }
+      cursor += count;
+    }
+  }
+
+  for await (const sample of new AudioSampleSink(audio).samples(undefined, Math.min(segment.audioEnd, start + duration))) {
+    try {
+      signal?.throwIfAborted();
+      const frame = Math.round((offset + sample.timestamp - start) * sampleRate);
+      await padTo(Math.min(end, frame));
+      const from = Math.max(0, cursor - frame);
+      const to = Math.min(sample.numberOfFrames, soundEnd - frame);
+      if (to <= from) continue;
+      const slice = sample.trim(from, to);
+      try {
+        slice.setTimestamp(cursor / sampleRate);
+        await output.add(slice);
+      } finally { slice.close(); }
+      cursor += to - from;
+    } finally { sample.close(); }
+  }
+  await padTo(end);
 }
 
 export async function concatVideo(clips: readonly Blob[], signal?: AbortSignal): Promise<Blob> {
@@ -66,7 +104,12 @@ export async function concatVideo(clips: readonly Blob[], signal?: AbortSignal):
   const inputs = clips.map(blob => new Input({ source: new BlobSource(blob), formats: [MP4, QTFF] }));
   const target = new BufferTarget();
   const output = new Output({ format: new Mp4OutputFormat(), target });
+  let audioEncoder: Output | undefined;
   let payloadBytes = 0;
+  function countBytes(size: number) {
+    payloadBytes += size;
+    if (payloadBytes > workspaceFileLimit) throw new Error("成片超过工作区单文件 100 MB 限制");
+  }
   async function copyTrack(track: InputTrack, start: number, offset: number, write: (packet: EncodedPacket) => Promise<void>) {
     let copied = false;
     for await (const packet of new EncodedPacketSink(track).packets()) {
@@ -79,8 +122,7 @@ export async function concatVideo(clips: readonly Blob[], signal?: AbortSignal):
         }
         continue;
       }
-      payloadBytes += packet.byteLength;
-      if (payloadBytes > workspaceFileLimit) throw new Error("成片超过工作区单文件 100 MB 限制");
+      countBytes(packet.byteLength);
       await write(packet.clone({ timestamp: offset + packet.timestamp - start }));
       copied = true;
     }
@@ -100,19 +142,42 @@ export async function concatVideo(clips: readonly Blob[], signal?: AbortSignal):
     }
     const videoOutput = new EncodedVideoPacketSource("avc");
     const audioOutput = first.audio ? new EncodedAudioPacketSource("aac") : null;
+    const totalDuration = segments.reduce((sum, segment) => sum + segment.duration, 0);
+    const packets: { packet: EncodedPacket; meta?: EncodedAudioChunkMetadata }[] = [];
+    let fittedAudio: AudioSampleSource | undefined;
+    if (segments.some(clip => clip.fitAudio)) {
+      // AAC encoders emit priming and trailing packets; retain priming but end the MP4 track at the final picture.
+      audioEncoder = new Output({ format: new AdtsOutputFormat(), target: new NullTarget() });
+      fittedAudio = new AudioSampleSource({ codec: "aac", quality: QUALITY_HIGH, onEncodedPacket(packet, meta) {
+        if (packet.timestamp >= totalDuration) return;
+        countBytes(packet.byteLength);
+        const duration = Math.min(packet.duration, totalDuration - packet.timestamp);
+        packets.push({ packet: packet.clone({ duration }), meta });
+      } });
+      audioEncoder.addAudioTrack(fittedAudio);
+      await audioEncoder.start();
+    }
     output.addVideoTrack(videoOutput, { transformationMatrix: first.transformationMatrix });
     if (audioOutput) output.addAudioTrack(audioOutput);
     await output.start();
     let offset = 0;
     for (const segment of segments) {
       await copyTrack(segment.video, segment.start, offset, packet => videoOutput.add(packet, { decoderConfig: segment.videoConfig }));
-      if (audioOutput && segment.audio && segment.audioConfig) {
+      if (fittedAudio) await writeFittedAudio(segment, offset, fittedAudio, signal);
+      else if (audioOutput && segment.audio && segment.audioConfig) {
         const decoderConfig = segment.audioConfig;
         await copyTrack(segment.audio, segment.start, offset, packet => audioOutput.add(packet, { decoderConfig }));
       }
       offset += segment.duration;
     }
     signal?.throwIfAborted();
+    if (audioEncoder && audioOutput) {
+      await audioEncoder.finalize();
+      for (const { packet, meta } of packets) {
+        signal?.throwIfAborted();
+        await audioOutput.add(packet, meta);
+      }
+    }
     await output.finalize();
     signal?.throwIfAborted();
     if (!target.buffer?.byteLength) throw new Error("合成输出为空");
@@ -120,6 +185,7 @@ export async function concatVideo(clips: readonly Blob[], signal?: AbortSignal):
     return new Blob([target.buffer], { type: "video/mp4" });
   } finally {
     inputs.forEach(input => input.dispose());
+    if (audioEncoder?.state === "started") await audioEncoder.cancel();
     if (output.state === "started") await output.cancel();
   }
 }
