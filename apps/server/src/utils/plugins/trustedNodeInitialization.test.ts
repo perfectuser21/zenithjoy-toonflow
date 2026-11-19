@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "@toonflow/file";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { combinationCount, combinationAt, renderBatch, type MashupClip } from "../../../../../packages/nodes/mashupNode/src/mashupBatch";
 import { initializeTrustedNodes, trustedNodeNames } from "./initialize";
 
@@ -110,8 +111,40 @@ test("the four exported MP4s contain the selected pictures and original audio in
   }
 }, 30000);
 
+async function concatInBrowser(sources: Blob[]) {
+  const { launch } = await import("puppeteer-core");
+  const { outputs, success, logs } = await Bun.build({
+    entrypoints: [fileURLToPath(new URL("../../../../../packages/nodeShared/src/concatVideo.ts", import.meta.url))],
+    target: "browser",
+  });
+  if (!success) throw new AggregateError(logs, "拼接模块构建失败");
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
+    const path = new URL(request.url).pathname;
+    if (path === "/") return new Response("<title>音画拼接</title>", { headers: { "Content-Type": "text/html" } });
+    if (path === "/concat.js") return new Response(outputs[0], { headers: { "Content-Type": "text/javascript" } });
+    return new Response(sources[Number(path.slice(1))] ?? null);
+  } });
+  try {
+    const browser = await launch({
+      channel: "chrome", executablePath: process.env.CHROME_BIN, args: ["--no-sandbox"],
+    });
+    try {
+      const page = await browser.newPage();
+      // Exercise the portable encoder on every runner, including machines with a native AAC encoder.
+      await page.evaluateOnNewDocument(() => Object.defineProperty(globalThis, "AudioEncoder", { value: undefined }));
+      await page.goto(server.url.href);
+      const bytes = await page.evaluate(async (count: number) => {
+        const modulePath = "/concat.js";
+        const { concatVideo } = await import(modulePath);
+        const clips = await Promise.all(Array.from({ length: count }, async (_, i) => (await fetch("/" + i)).blob()));
+        return Array.from(new Uint8Array(await (await concatVideo(clips)).arrayBuffer()));
+      }, sources.length);
+      return new Uint8Array(bytes);
+    } finally { await browser.close(); }
+  } finally { await server.stop(true); }
+}
+
 test("short, overlong and delayed AAC each stay inside their own video segment", async () => {
-  const { concatVideo } = await import("../../../../../packages/nodeShared/src/concatVideo");
   const root = await mkdtemp(join(tmpdir(), "toonflowConcatAudio"));
   const ffmpeg = (...args: string[]) => execFileSync("ffmpeg", ["-nostdin", "-loglevel", "error", ...args]);
   try {
@@ -128,7 +161,7 @@ test("short, overlong and delayed AAC each stay inside their own video segment",
       sources.push(new Blob([new Uint8Array(await readFile(path))], { type: "video/mp4" }));
     }
     const path = join(root, "merged.mp4");
-    await writeFile(path, new Uint8Array(await (await concatVideo(sources)).arrayBuffer()));
+    await writeFile(path, await concatInBrowser(sources));
     const duration = Number(execFileSync("ffprobe", ["-v", "error", "-show_entries", "format=duration",
       "-of", "default=nw=1:nk=1", path], { encoding: "utf8" }));
     expect(Math.abs(duration - 3)).toBeLessThan(0.045);

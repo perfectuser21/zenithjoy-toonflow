@@ -1,6 +1,6 @@
 import {
   AdtsOutputFormat, AudioSample, AudioSampleSink, AudioSampleSource, BlobSource, BufferTarget, EncodedAudioPacketSource, EncodedPacketSink, EncodedVideoPacketSource,
-  Input, MP4, Mp4OutputFormat, NullTarget, Output, QTFF, QUALITY_HIGH,
+  canEncodeAudio, Input, MP4, Mp4OutputFormat, NullTarget, Output, QTFF, QUALITY_HIGH,
   type EncodedPacket, type InputTrack,
 } from "mediabunny";
 
@@ -145,7 +145,12 @@ export async function concatVideo(clips: readonly Blob[], signal?: AbortSignal):
     const totalDuration = segments.reduce((sum, segment) => sum + segment.duration, 0);
     const packets: { packet: EncodedPacket; meta?: EncodedAudioChunkMetadata }[] = [];
     let fittedAudio: AudioSampleSource | undefined;
-    if (segments.some(clip => clip.fitAudio)) {
+    if (first.audioConfig && segments.some(clip => clip.fitAudio)) {
+      const { sampleRate, numberOfChannels } = first.audioConfig;
+      if (!await canEncodeAudio("aac", { sampleRate, numberOfChannels, quality: QUALITY_HIGH })) {
+        const { registerAacEncoder } = await import("@mediabunny/aac-encoder");
+        registerAacEncoder();
+      }
       // AAC encoders emit priming and trailing packets; retain priming but end the MP4 track at the final picture.
       audioEncoder = new Output({ format: new AdtsOutputFormat(), target: new NullTarget() });
       fittedAudio = new AudioSampleSource({ codec: "aac", quality: QUALITY_HIGH, onEncodedPacket(packet, meta) {

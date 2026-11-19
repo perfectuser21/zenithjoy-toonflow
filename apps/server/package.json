@@ -65,6 +65,7 @@
   "devDependencies": {
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
-    "@types/morgan": "^1.9.10"
+    "@types/morgan": "^1.9.10",
+    "puppeteer-core": "25.12.0"
   }
 }
