@@ -79,6 +79,7 @@
         "@types/cors": "^2.8.19",
         "@types/express": "^5.0.6",
         "@types/morgan": "^1.9.10",
+        "puppeteer-core": "25.12.0",
       },
     },
     "apps/updateServer": {
@@ -489,6 +490,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@form-create/element-ui": "^3",
+        "@mediabunny/aac-encoder": "1.66.0",
         "@tabler/icons-vue": "^3.46.0",
         "@toonflow/model-icons": "workspace:*",
         "mediabunny": "1.66.0",
@@ -1312,6 +1314,8 @@
     "@markmend/ast": ["@markmend/ast@1.1.0", "https://registry.npmmirror.com/@markmend/ast/-/ast-1.1.0.tgz", { "dependencies": { "@markmend/core": "1.1.0", "@types/mdast": "^4.0.4", "mdast-util-from-markdown": "^2.0.3", "mdast-util-frontmatter": "^2.0.1", "mdast-util-gfm": "^3.1.0", "mdast-util-math": "^3.0.0", "mdast-util-to-markdown": "^2.1.2", "micromark-extension-cjk-friendly": "^2.0.1", "micromark-extension-cjk-friendly-gfm-strikethrough": "^2.0.1", "micromark-extension-frontmatter": "^2.0.0", "micromark-extension-gfm": "^3.0.0", "micromark-extension-math": "^3.1.0", "micromark-util-types": "^2.0.2" } }, "sha512-Ww3klbkzcBnVitnFFr4HqshEvPAYcwNQRmC9RNrl6ke3vy2rEuTgho8E4S05AHpptSr+ZQpcIslfdnNbdCpW1A=="],
 
     "@markmend/core": ["@markmend/core@1.1.0", "https://registry.npmmirror.com/@markmend/core/-/core-1.1.0.tgz", { "dependencies": { "marked": "^18.0.11" } }, "sha512-6aFTpANq7mZzZ+gvBoiE7ujt4970xoscpmzXNAGdSEjI294JU9dXzj0B2hw1CKxFW2mDTPe9UtoVZ1Q3qNg6YQ=="],
+
+    "@mediabunny/aac-encoder": ["@mediabunny/aac-encoder@1.66.0", "", { "peerDependencies": { "mediabunny": "^1.0.0" } }, "sha512-46RM06RQGIqC+HQI30e2HR2JTgk6dzyD/ybD23E6zuc7R22/x1XIQHghJDkfKnHF72ztJBZxNbt/NncH7SrvYQ=="],
 
     "@mermaid-js/parser": ["@mermaid-js/parser@1.2.1", "https://registry.npmmirror.com/@mermaid-js/parser/-/parser-1.2.1.tgz", { "dependencies": { "@chevrotain/types": "~11.1.2" } }, "sha512-n12NohV3mrUyUL2o93IgG/ifeW9FTyeJn3zDxkhwa8MJ9Fxg3HQMlA3RiGmD/3UnJvheztkjjQAjA2T4LmUcpw=="],
 

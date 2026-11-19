@@ -33,6 +33,7 @@
   },
   "dependencies": {
     "@form-create/element-ui": "^3",
+    "@mediabunny/aac-encoder": "1.66.0",
     "@tabler/icons-vue": "^3.46.0",
     "@toonflow/model-icons": "workspace:*",
     "mediabunny": "1.66.0",

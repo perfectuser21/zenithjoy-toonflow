@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "@toonflow/file";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { combinationCount, combinationAt, renderBatch, type MashupClip } from "../../../../../packages/nodes/mashupNode/src/mashupBatch";
 import { initializeTrustedNodes, trustedNodeNames } from "./initialize";
 
@@ -103,6 +104,85 @@ test("the four exported MP4s contain the selected pictures and original audio in
           if (samples.readInt16LE(offset - 2) < 0 && samples.readInt16LE(offset) >= 0) crossings++;
         }
         expect(Math.abs(crossings / 0.25 - tones[input]!)).toBeLessThan(10);
+      }
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 30000);
+
+async function concatInBrowser(sources: Blob[]) {
+  const { launch } = await import("puppeteer-core");
+  const { outputs, success, logs } = await Bun.build({
+    entrypoints: [fileURLToPath(new URL("../../../../../packages/nodeShared/src/concatVideo.ts", import.meta.url))],
+    target: "browser",
+  });
+  if (!success) throw new AggregateError(logs, "拼接模块构建失败");
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
+    const path = new URL(request.url).pathname;
+    if (path === "/") return new Response("<title>音画拼接</title>", { headers: { "Content-Type": "text/html" } });
+    if (path === "/concat.js") return new Response(outputs[0], { headers: { "Content-Type": "text/javascript" } });
+    return new Response(sources[Number(path.slice(1))] ?? null);
+  } });
+  try {
+    const browser = await launch({
+      channel: "chrome", executablePath: process.env.CHROME_BIN, args: ["--no-sandbox"],
+    });
+    try {
+      const page = await browser.newPage();
+      // Exercise the portable encoder on every runner, including machines with a native AAC encoder.
+      await page.evaluateOnNewDocument(() => Object.defineProperty(globalThis, "AudioEncoder", { value: undefined }));
+      await page.goto(server.url.href);
+      const bytes = await page.evaluate(async (count: number) => {
+        const modulePath = "/concat.js";
+        const { concatVideo } = await import(modulePath);
+        const clips = await Promise.all(Array.from({ length: count }, async (_, i) => (await fetch("/" + i)).blob()));
+        return Array.from(new Uint8Array(await (await concatVideo(clips)).arrayBuffer()));
+      }, sources.length);
+      return new Uint8Array(bytes);
+    } finally { await browser.close(); }
+  } finally { await server.stop(true); }
+}
+
+test("short, overlong and delayed AAC each stay inside their own video segment", async () => {
+  const root = await mkdtemp(join(tmpdir(), "toonflowConcatAudio"));
+  const ffmpeg = (...args: string[]) => execFileSync("ffmpeg", ["-nostdin", "-loglevel", "error", ...args]);
+  try {
+    const sources: Blob[] = [];
+    for (const [color, tone, length, delay] of [
+      ["red", "330", "0.45", "0"],
+      ["lime", "550", "1.45", "0"],
+      ["blue", "770", "0.65", "0.35"],
+    ]) {
+      const path = join(root, color + ".mp4");
+      ffmpeg("-f", "lavfi", "-i", `color=${color}:size=64x64:rate=25:duration=1`,
+        "-itsoffset", delay!, "-f", "lavfi", "-i", `sine=frequency=${tone}:sample_rate=48000:duration=${length}`,
+        "-c:v", "libx264", "-c:a", "aac", path);
+      sources.push(new Blob([new Uint8Array(await readFile(path))], { type: "video/mp4" }));
+    }
+    const path = join(root, "merged.mp4");
+    await writeFile(path, await concatInBrowser(sources));
+    const duration = Number(execFileSync("ffprobe", ["-v", "error", "-show_entries", "format=duration",
+      "-of", "default=nw=1:nk=1", path], { encoding: "utf8" }));
+    expect(Math.abs(duration - 3)).toBeLessThan(0.045);
+    // Decode the entire stream once. Seeking each window independently could hide a discontinuity at a seam.
+    const pcm = ffmpeg("-i", path, "-vn", "-af", "aresample=8000:async=1:first_pts=0",
+      "-ac", "1", "-f", "s16le", "pipe:1");
+    for (const [time, hz] of [[0.10, 330], [0.70, 0], [1.10, 550], [1.80, 550], [2.10, 0], [2.65, 770]] as const) {
+      const start = Math.round(time * 8000);
+      const length = 800;
+      expect(pcm.length).toBeGreaterThanOrEqual(2 * (start + length));
+      let peak = 0;
+      let crossings = 0;
+      for (let i = start; i < start + length; i++) {
+        const sample = pcm.readInt16LE(i * 2);
+        peak = Math.max(peak, Math.abs(sample));
+        if (pcm.readInt16LE((i - 1) * 2) < 0 && sample >= 0) crossings++;
+      }
+      if (hz === 0) expect(peak).toBeLessThan(100);
+      else {
+        expect(peak).toBeGreaterThan(1000);
+        expect(Math.abs(crossings * 10 - hz)).toBeLessThanOrEqual(10);
       }
     }
   } finally {
