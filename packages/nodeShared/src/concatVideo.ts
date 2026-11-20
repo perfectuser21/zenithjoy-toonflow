@@ -1,7 +1,7 @@
 import {
-  AdtsOutputFormat, AudioSample, AudioSampleSink, AudioSampleSource, BlobSource, BufferTarget, CanvasSink, CanvasSource,
+  AdtsOutputFormat, AudioSample, AudioSampleSink, AudioSampleSource, BlobSource, BufferTarget, CanvasSink,
   EncodedAudioPacketSource, EncodedPacketSink, EncodedVideoPacketSource,
-  canEncodeAudio, canEncodeVideo, Input, MP4, Mp4OutputFormat, NullTarget, Output, QTFF, QUALITY_HIGH, WavOutputFormat,
+  canEncodeAudio, canEncodeVideo, Input, MP4, Mp4OutputFormat, NullTarget, Output, QTFF, QUALITY_HIGH, VideoSample, VideoSampleSource, WavOutputFormat,
   type EncodedPacket, type InputTrack,
 } from "mediabunny";
 
@@ -153,12 +153,7 @@ async function createVideoRenderer(first: Segment, countBytes: (size: number) =>
   if (!await canEncodeVideo("avc", { width, height, quality: QUALITY_HIGH })) {
     throw new Error("当前浏览器不支持以首段尺寸编码 H.264 视频，请换一个浏览器后重试");
   }
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const context = canvas.getContext("2d", { alpha: false });
-  if (!context) throw new Error("当前浏览器无法绘制混剪画面");
-  const source = new CanvasSource(canvas, {
+  const source = new VideoSampleSource({
     codec: "avc",
     quality: QUALITY_HIGH,
     onEncodedPacket(packet) { countBytes(packet.byteLength); },
@@ -170,8 +165,11 @@ async function createVideoRenderer(first: Segment, countBytes: (size: number) =>
     for await (const frame of sink.canvases(segment.start, segment.start + segment.duration)) {
       signal?.throwIfAborted();
       const elapsed = frame.timestamp - segment.start;
-      context.drawImage(frame.canvas, 0, 0);
-      await source.add(offset + elapsed, Math.min(frame.duration, segment.duration - elapsed), { keyFrame: firstFrame });
+      const sample = new VideoSample(frame.canvas, {
+        timestamp: offset + elapsed,
+        duration: Math.min(frame.duration, segment.duration - elapsed),
+      });
+      try { await source.add(sample, { keyFrame: firstFrame }); } finally { sample.close(); }
       firstFrame = false;
     }
     if (firstFrame) throw new Error("素材轨道没有可拼接的画面");
