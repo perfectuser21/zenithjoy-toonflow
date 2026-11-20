@@ -112,7 +112,7 @@ import { useMediaPreview } from "@toonflow/node-shared/mediaPreview";
 import { getMediaMimeType } from "@toonflow/node-shared/mediaTypes";
 
 type AssetEntry = { name: string; path: string; type: "file" | "directory"; children?: AssetEntry[]; draft?: boolean };
-type AssetOutput = { label: string; output: NodeOutput };
+type AssetOutput = { label: string; output: Exclude<NodeOutput, { dataType: "VIDEO_BATCH" }> };
 
 const props = defineProps<{ directory?: string; expanded?: boolean; canSelect?: (entry: AssetEntry) => boolean; selecting?: boolean }>();
 const emit = defineEmits<{ select: [entry: AssetEntry] }>();
@@ -330,8 +330,10 @@ async function createAssetFolder(parent: string, name: string) {
   return path;
 }
 
-async function openSave(label: string, items: AssetOutput[]) {
-  outputs.value = items;
+async function openSave(label: string, items: { label: string; output: NodeOutput }[]) {
+  outputs.value = items.flatMap<AssetOutput>(({ label, output }) => output.dataType === "VIDEO_BATCH"
+    ? output.value.map(({ name, url, mimeType }) => ({ label: name, output: { dataType: "VIDEO", value: { url, mimeType } } }))
+    : [{ label, output }]);
   selectedOutput.value = 0;
   assetName.value = label.endsWith(extension.value) ? label : `${label}${extension.value}`;
   saveDirectory.value = folder.value;

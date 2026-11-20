@@ -20,6 +20,7 @@ const userRoutes = new Set(["register", "login", "session", "logout", "host"].ma
 const controlRoutes = new Set(["status", "setup", "login", "logout", "state", "enabled", "registration", "hostsession"].map(name => `/api/multitenant/${name}`));
 const userReadRoutes = new Set(["/api/ai/models", "/api/ai/media/models", "/api/multitenant/user/balance", "/api/nodes/get", "/api/nodes/files", "/api/ext/list", "/api/ext/read", "/api/tools/get"]);
 const modelWriteRoutes = new Set(["/api/ai/generate", "/api/ai/media/price", "/api/ai/media/generate", "/api/ai/media/tasks/status", "/api/ai/media/tasks/cancel"]);
+const qianchuanRoutes = new Set(["/api/ai/media/qianchuan/start", "/api/ai/media/qianchuan/status", "/api/ai/media/qianchuan/retry"]);
 const backgroundBetaRoutes = new Set(["/api/ai/media/background/frame", "/api/ai/media/background/plan", "/api/ai/media/background/prepare",
   "/api/ai/media/background/confirm", "/api/ai/media/background/status", "/api/ai/media/background/cancel", "/api/ai/media/background/finish",
   "/api/ai/media/background/cleanup", "/api/ai/media/background/cleanupframe", "/api/ai/media/background/reservations"]);
@@ -203,7 +204,9 @@ export async function multiTenantAccess(req: Request, res: Response, next: NextF
     || path === "/api/multitenant/user/providerkey/unbind" && req.method === "POST";
   const isolatedTrim = canAccessTrimRoute(path, req.method);
   const tenantAgent = process.env.TOONFLOW_TRUSTED_CANVAS_BETA === "1" && tenantAgentRoutes.has(`${req.method} ${path}`);
-  if (fileRoute || settingsRoute || ownProviderKey || isolatedTrim || tenantAgent || backgroundBeta || backgroundProduction || backgroundReadOnly || req.method === "GET" && userReadRoutes.has(path)
+  const ownQianchuan = req.method === "POST" && qianchuanRoutes.has(path)
+    && user.id === process.env.TOONFLOW_QIANCHUAN_OWNER_ID?.trim();
+  if (fileRoute || settingsRoute || ownProviderKey || ownQianchuan || isolatedTrim || tenantAgent || backgroundBeta || backgroundProduction || backgroundReadOnly || req.method === "GET" && userReadRoutes.has(path)
     || req.method === "POST" && modelWriteRoutes.has(path) || communityReads.has(path) && ["GET", "POST"].includes(req.method)) return runWithIdentity(user, next);
   throw Object.assign(new Error("当前账号尚未开放此功能"), { status: 403 });
 }

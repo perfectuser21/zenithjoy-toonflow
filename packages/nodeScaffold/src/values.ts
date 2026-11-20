@@ -1,5 +1,7 @@
 export type NodeMediaValue = { url: string; mimeType: string };
 
+export type NodeVideoBatchItem = NodeMediaValue & { name: string };
+
 export type NodeValueMap = {
   STRING: string;
   INT: number;
@@ -8,6 +10,7 @@ export type NodeValueMap = {
   IMAGE: NodeMediaValue;
   MASK: NodeMediaValue;
   VIDEO: NodeMediaValue;
+  VIDEO_BATCH: NodeVideoBatchItem[];
   AUDIO: NodeMediaValue;
   FILE: NodeMediaValue;
 };
@@ -27,6 +30,9 @@ export function isNodeOutput(output: unknown): output is NodeOutput {
     case "BOOLEAN": return typeof value === "boolean";
     case "INT": return typeof value === "number" && Number.isSafeInteger(value);
     case "FLOAT": return typeof value === "number" && Number.isFinite(value);
+    case "VIDEO_BATCH":
+      return Array.isArray(value) && value.length > 0 && [...value].every(item => item && typeof item === "object"
+        && typeof item.name === "string" && !!item.name.trim() && isNodeOutput({ dataType: "VIDEO", value: item }));
     case "IMAGE":
     case "MASK":
     case "VIDEO":
