@@ -9,6 +9,7 @@ export { getPublicModelId, modelAmountSchema, modelPriceSchema, modelRouteSchema
 export type { ManagedModelProvider, ModelPrice, ModelProvider, ModelRoute, ModelRoutingSnapshot, ProviderConfigurationSnapshot } from "./config";
 export { calculateModelPrice } from "./pricing";
 export { createUserProviderKeys } from "./userProviderKeys";
+export { createModelSecret } from "./secret";
 export type { ModelPriceUsage } from "./pricing";
 
 const configurationSchema = z.strictObject({ routes: modelRoutesSchema, cloudCipher: modelCipherSchema.optional(), providerCipher: modelCipherSchema.optional() });

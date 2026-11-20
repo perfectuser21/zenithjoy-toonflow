@@ -2,7 +2,7 @@ import mysql from "mysql2/promise";
 import { drizzle } from "drizzle-orm/mysql2";
 import { and, asc, count, desc, eq, getTableColumns, sql } from "drizzle-orm";
 import { mysqlSchema, varchar } from "drizzle-orm/mysql-core";
-import { mysqlAdmin, mysqlBackgroundJob, mysqlBillingLedger, mysqlModelRouting, mysqlSettings, mysqlSourceMapping, mysqlUser, mysqlUserProviderGuard, mysqlUserProviderKey, mysqlWallet, mysqlWebSession } from "./schema";
+import { mysqlAdmin, mysqlBackgroundJob, mysqlBillingLedger, mysqlModelRouting, mysqlOrganization, mysqlSettings, mysqlSourceMapping, mysqlUser, mysqlUserProviderGuard, mysqlUserProviderKey, mysqlWallet, mysqlWebSession } from "./schema";
 import type { AdminDatabase, WalletRecord } from "./schema";
 import { backgroundJobKeySchema, backgroundJobCreateSchema, backgroundJobLeaseSchema, backgroundJobRenewSchema, backgroundJobUpdateSchema, backgroundJobReleaseSchema } from "./backgroundJobs";
 import type { DataSource } from "./index";
@@ -291,6 +291,33 @@ export function connectMysql(config: Extract<DataSource, { provider: "mysql" }>[
     },
     async setRegistrationEnabled(enabled) {
       await db.insert(mysqlSettings).values({ id: 1, registrationEnabled: enabled }).onDuplicateKeyUpdate({ set: { registrationEnabled: enabled } });
+    },
+    async initializeOrganizations() {
+      await db.execute(sql`CREATE TABLE IF NOT EXISTS multiTenantOrganization (
+        id VARCHAR(36) CHARACTER SET ascii COLLATE ascii_bin PRIMARY KEY,
+        payload JSON NOT NULL, revision INT NOT NULL
+      ) ENGINE=InnoDB`);
+    },
+    async getOrganization(id) {
+      const [record] = await db.select().from(mysqlOrganization).where(eq(mysqlOrganization.id, id)).limit(1);
+      return record;
+    },
+    async listOrganizations(userId) {
+      return db.select().from(mysqlOrganization).where(sql`JSON_UNQUOTE(JSON_EXTRACT(${mysqlOrganization.payload}, '$.ownerId')) = ${userId}
+        OR JSON_CONTAINS(${mysqlOrganization.payload}, JSON_OBJECT('userId', ${userId}), '$.members')`);
+    },
+    async writeOrganization(id, payload, expectedRevision) {
+      if (expectedRevision === 0) {
+        try { await db.insert(mysqlOrganization).values({ id, payload, revision: 1 }); return true; }
+        catch (error) {
+          const failure = error as { code?: string; cause?: { code?: string } };
+          if ((failure.cause?.code ?? failure.code) === "ER_DUP_ENTRY") return false;
+          throw error;
+        }
+      }
+      const [result] = await db.update(mysqlOrganization).set({ payload, revision: expectedRevision + 1 })
+        .where(and(eq(mysqlOrganization.id, id), eq(mysqlOrganization.revision, expectedRevision)));
+      return result.affectedRows === 1;
     },
     async getSourceMapping() {
       try {

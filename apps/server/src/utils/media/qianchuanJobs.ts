@@ -3,10 +3,16 @@ import { join } from "node:path";
 import { lstat, mkdir, readFile, writeAtomic } from "@toonflow/file";
 import type { AuthIdentity } from "@toonflow/multi-tenant-auth";
 import { z } from "zod";
+import { resolveQianchuanAccount } from "@/utils/multiTenant/qianchuanOrganizations";
 import { isWithin, resolveWorkspacePath } from "@/utils/workspace/files";
 import { uploadQianchuanVideo } from "./qianchuanProvider";
 
-export const qianchuanJobRequest = { directory: z.string().min(1).max(4096), jobId: z.uuid() };
+export const qianchuanJobRequest = {
+  directory: z.string().min(1).max(4096),
+  jobId: z.uuid(),
+  organizationId: z.uuid(),
+  accountId: z.uuid(),
+};
 export const qianchuanAdvertiser = z.string().regex(/^\d{1,20}$/);
 const itemSchema = z.strictObject({
   name: z
@@ -34,6 +40,11 @@ const storedItem = itemSchema.extend({
 const storedJob = z.strictObject({
   jobId: z.uuid(),
   advertiserId: qianchuanAdvertiser,
+  organizationId: z.uuid(),
+  accountId: z.uuid(),
+  teamId: z.uuid().nullable(),
+  userId: z.uuid(),
+  createdAt: z.iso.datetime(),
   items: z.array(storedItem).min(1).max(100),
 });
 const receiptSchema = z.strictObject({
@@ -43,8 +54,16 @@ const receiptSchema = z.strictObject({
 type VideoItem = z.infer<typeof itemSchema>;
 type Job = z.infer<typeof storedJob>;
 type Item = Job["items"][number];
-type Config = { advertiserId: string; token: string; store: string };
-type Scope = { cwd: string; path: string; config: Config };
+type Selection = { organizationId: string; accountId: string };
+type Scope = {
+  cwd: string;
+  path: string;
+  receiptDirectory: string;
+  advertiserId: string;
+  teamId: string | null;
+  userId: string;
+  selection: Selection;
+};
 
 const active = new Set<string>();
 let queue: Promise<void> = Promise.resolve();
@@ -54,24 +73,25 @@ function error(message: string, status: number): never {
   throw Object.assign(new Error(message), { status });
 }
 
-function configuration(actor: AuthIdentity): Config {
-  const ownerId = process.env.TOONFLOW_QIANCHUAN_OWNER_ID?.trim();
-  const token = process.env.TOONFLOW_QIANCHUAN_ACCESS_TOKEN?.trim();
-  const advertiserId = qianchuanAdvertiser.safeParse(process.env.TOONFLOW_QIANCHUAN_ADVERTISER_ID?.trim());
-  const directory = process.env.TOONFLOW_DATA_DIR;
-  if (!ownerId || !token || !advertiserId.success || !directory) error("服务器尚未配置千川上传账户", 503);
-  if (actor.id !== ownerId) error("该用户没有配置此千川账户的上传权限", 403);
-  return { advertiserId: advertiserId.data, token, store: join(directory, "qianchuanUploads") };
-}
-
-async function scopeFor(cwd: string, jobId: string, actor: AuthIdentity): Promise<Scope> {
-  const config = configuration(actor);
+async function scopeFor(cwd: string, jobId: string, actor: AuthIdentity, selection: Selection): Promise<Scope> {
+  const root = process.env.TOONFLOW_DATA_DIR;
+  if (!root) error("服务器尚未配置任务存储", 503);
+  const { advertiserId, teamId } = await resolveQianchuanAccount(actor.id, selection.organizationId, selection.accountId);
+  const store = join(root, "qianchuanUploads");
   const key = createHash("sha256")
-    .update(JSON.stringify([cwd, actor.id]))
+    .update(JSON.stringify([cwd, actor.id, selection.organizationId, selection.accountId]))
     .digest("hex");
-  const directory = join(config.store, "jobs", key);
+  const directory = join(store, "jobs", key);
   await mkdir(directory, { recursive: true });
-  return { cwd, config, path: join(directory, `${jobId}.json`) };
+  return {
+    cwd,
+    userId: actor.id,
+    selection,
+    advertiserId,
+    teamId,
+    path: join(directory, `${jobId}.json`),
+    receiptDirectory: join(store, "receipts", selection.organizationId, advertiserId),
+  };
 }
 
 async function readOptional(path: string) {
@@ -87,7 +107,7 @@ async function getJob(scope: Scope) {
   const raw = await readOptional(scope.path);
   if (!raw) error("千川上传任务不存在", 404);
   const job = storedJob.parse(raw);
-  if (job.advertiserId !== scope.config.advertiserId) error("此任务的千川账户配置已变更", 409);
+  if (job.advertiserId !== scope.advertiserId) error("此任务的千川账户配置已变更", 409);
   return job;
 }
 
@@ -116,16 +136,16 @@ async function getVideo(scope: Scope, item: Item) {
 }
 
 function visible(job: Job) {
-  return { ...job, items: job.items.map(({ revision: _revision, signature: _signature, retryApproved: _retryApproved, ...item }) => item) };
+  const { jobId, advertiserId, items } = job;
+  return { jobId, advertiserId, items: items.map(({ revision: _revision, signature: _signature, retryApproved: _retryApproved, ...item }) => item) };
 }
 
 function receiptPath(scope: Scope, signature: string) {
-  return join(scope.config.store, "receipts", scope.config.advertiserId, `${signature}.json`);
+  return join(scope.receiptDirectory, `${signature}.json`);
 }
 
-async function uploadOne(scope: Scope, item: Item, video: Awaited<ReturnType<typeof getVideo>>) {
-  const directory = join(scope.config.store, "receipts", scope.config.advertiserId);
-  await mkdir(directory, { recursive: true });
+async function uploadOne(scope: Scope, token: string, item: Item, video: Awaited<ReturnType<typeof getVideo>>) {
+  await mkdir(scope.receiptDirectory, { recursive: true });
   const path = receiptPath(scope, video.signature);
   const previous = await readOptional(path);
   if (previous) {
@@ -139,7 +159,7 @@ async function uploadOne(scope: Scope, item: Item, video: Awaited<ReturnType<typ
     if ((cause as NodeJS.ErrnoException).code !== "EEXIST") throw cause;
     return { state: "unknown" as const, error: "相同素材正在上传，请先核对千川素材库" };
   }
-  const result = await uploadQianchuanVideo({ token: scope.config.token, advertiserId: scope.config.advertiserId, name: item.name, ...video });
+  const result = await uploadQianchuanVideo({ token, advertiserId: scope.advertiserId, name: item.name, ...video });
   await save(path, result);
   return result;
 }
@@ -150,7 +170,7 @@ async function run(scope: Scope) {
     if (item.state === "uploading") {
       const raw = item.signature ? await readOptional(receiptPath(scope, item.signature)) : undefined;
       const receipt = raw ? receiptSchema.parse(raw) : undefined;
-      if (receipt?.state === "succeeded") Object.assign(item, receipt);
+      if (receipt && receipt.state !== "uploading") Object.assign(item, receipt);
       else Object.assign(item, { state: "unknown", error: "服务中断前已开始上传，请先核对千川素材库" });
       await save(scope.path, job);
       continue;
@@ -168,11 +188,22 @@ async function run(scope: Scope) {
       await save(scope.path, job);
       continue;
     }
+    let authorization: Awaited<ReturnType<typeof resolveQianchuanAccount>>;
+    try {
+      authorization = await resolveQianchuanAccount(scope.userId, scope.selection.organizationId, scope.selection.accountId);
+      if (authorization.advertiserId !== scope.advertiserId) error("千川账户已变更", 409);
+    } catch (cause) {
+      const status = cause && typeof cause === "object" && "status" in cause ? cause.status : undefined;
+      if (status !== 403 && status !== 404 && status !== 409) throw cause;
+      Object.assign(item, { state: "failed", error: "上传授权已撤销或账户已变更" });
+      await save(scope.path, job);
+      continue;
+    }
     item.state = "uploading";
     item.signature = video.signature;
     await save(scope.path, job);
     try {
-      Object.assign(item, await uploadOne(scope, item, video));
+      Object.assign(item, await uploadOne(scope, authorization.token, item, video));
     } catch {
       Object.assign(item, { state: "unknown", error: "上传结果未确认，请先核对千川素材库" });
     }
@@ -194,9 +225,8 @@ function enqueue(scope: Scope, job: Job) {
     });
 }
 
-export async function startQianchuanJob(cwd: string, actor: AuthIdentity, jobId: string, advertiserId: string, items: VideoItem[]) {
-  const scope = await scopeFor(cwd, jobId, actor);
-  if (advertiserId !== scope.config.advertiserId) error("所选账户和服务器配置的千川账户不一致", 403);
+export async function startQianchuanJob(cwd: string, actor: AuthIdentity, jobId: string, selection: Selection, items: VideoItem[]) {
+  const scope = await scopeFor(cwd, jobId, actor, selection);
   if (new Set(items.map((x) => x.url)).size !== items.length) error("成片清单中有重复路径", 400);
   async function reopen() {
     const existing = await getJob(scope);
@@ -211,7 +241,15 @@ export async function startQianchuanJob(cwd: string, actor: AuthIdentity, jobId:
     const location = await locateVideo(scope, item).catch(() => undefined);
     snapshot.push({ ...item, revision: location?.revision ?? null, state: "pending" });
   }
-  const job: Job = { jobId, advertiserId, items: snapshot };
+  const job: Job = {
+    jobId,
+    advertiserId: scope.advertiserId,
+    ...selection,
+    teamId: scope.teamId,
+    userId: actor.id,
+    createdAt: new Date().toISOString(),
+    items: snapshot,
+  };
   try {
     await save(scope.path, job, true);
   } catch (cause) {
@@ -222,15 +260,15 @@ export async function startQianchuanJob(cwd: string, actor: AuthIdentity, jobId:
   return visible(job);
 }
 
-export async function readQianchuanJob(cwd: string, actor: AuthIdentity, jobId: string) {
-  const scope = await scopeFor(cwd, jobId, actor);
+export async function readQianchuanJob(cwd: string, actor: AuthIdentity, jobId: string, selection: Selection) {
+  const scope = await scopeFor(cwd, jobId, actor, selection);
   const job = await getJob(scope);
   enqueue(scope, job);
   return visible(job);
 }
 
-export async function retryQianchuanJob(cwd: string, actor: AuthIdentity, jobId: string) {
-  const scope = await scopeFor(cwd, jobId, actor);
+export async function retryQianchuanJob(cwd: string, actor: AuthIdentity, jobId: string, selection: Selection) {
+  const scope = await scopeFor(cwd, jobId, actor, selection);
   if (active.has(scope.path)) error("上传任务仍在进行", 409);
   active.add(scope.path);
   let job: Job;

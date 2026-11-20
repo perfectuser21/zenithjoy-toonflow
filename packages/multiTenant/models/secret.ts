@@ -9,7 +9,7 @@ const maxPayloadBytes = 8 * 1024 * 1024;
 export const maxModelCipherLength = 12 * 1024 * 1024;
 export const modelCipherSchema = z.string().max(maxModelCipherLength)
   .regex(/^v1\.[A-Za-z0-9+/]{16}\.[A-Za-z0-9+/]{22}==\.[A-Za-z0-9+/]+={0,2}$/);
-type SecretPurpose = "cloud" | "execution" | "providers" | "userProvider" | "userProviderGuard";
+type SecretPurpose = "cloud" | "execution" | "providers" | "userProvider" | "userProviderGuard" | "qianchuanAuthorization";
 
 function invalid(message: string): never { throw Object.assign(new Error(message), { status: 503 }); }
 
@@ -131,7 +131,7 @@ export function createModelSecret(dataDirectory: string) {
       } catch { return invalid("客户凭据无法解密，请检查原始记录与密钥"); }
     },
     async seal(payload: Record<string, unknown>, purpose: SecretPurpose, binding?: string) {
-      if ((purpose === "userProvider") !== !!binding) throw new Error("客户凭据加密绑定无效");
+      if ((purpose === "userProvider" || purpose === "qianchuanAuthorization") !== !!binding) throw new Error("客户凭据加密绑定无效");
       const data = JSON.stringify(jsonRecordSchema.parse(payload));
       if (Buffer.byteLength(data, "utf8") > maxPayloadBytes) throw Object.assign(new Error("模型执行配置不能超过 8 MB"), { status: 400 });
       const iv = randomBytes(12);
@@ -141,7 +141,7 @@ export function createModelSecret(dataDirectory: string) {
       return ["v1", iv.toString("base64"), cipher.getAuthTag().toString("base64"), encrypted.toString("base64")].join(".");
     },
     async open(value: string, purpose: SecretPurpose, binding?: string): Promise<Record<string, unknown>> {
-      if ((purpose === "userProvider") !== !!binding) throw new Error("客户凭据加密绑定无效");
+      if ((purpose === "userProvider" || purpose === "qianchuanAuthorization") !== !!binding) throw new Error("客户凭据加密绑定无效");
       const parsed = modelCipherSchema.safeParse(value);
       if (!parsed.success) invalid("模型加密配置无效，请检查原始记录与密钥");
       const [, ivValue, tagValue, encryptedValue] = parsed.data.split(".");
