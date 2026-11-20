@@ -78,7 +78,7 @@
       <div class="panelActions">
         <el-button v-if="processing && action === 'trim' && !cancelling" @click="visible = false">后台继续</el-button>
         <el-button v-if="accountMode === 'customer' && (pendingTrim?.recoverOnly || (pendingTrim && interruptedOperation === pendingTrim.operationId)) && !processing" @click="clearRecoverySelection">{{ pendingTrim && interruptedOperation === pendingTrim.operationId ? '释放空间并结束' : '放弃查看此记录' }}</el-button>
-        <el-button :disabled="cancelling" @click="processing ? cancel() : visible = false">{{ processing ? '取消处理' : '取消' }}</el-button>
+        <el-button :disabled="cancelling" @click="processing ? cancel() : visible = false">{{ processing ? cancelLabel : '取消' }}</el-button>
         <el-button type="primary" :loading="processing" :disabled="disabled || !file || (action === 'trim' && (accountMode === 'loading' || accountMode === 'error' || (!pendingTrim && !validRange)))" @click="run">{{ action === 'trim' && pendingTrim ? '检查并恢复' : actionLabels[action] }}</el-button>
       </div>
     </div>
@@ -125,7 +125,8 @@ const processing = ref(false);
 const trimQueued = ref(false);
 const creatingAnalysis = ref(false);
 const cancelling = ref(false);
-const progressLabel = computed(() => cancelling.value ? "正在取消处理…" : trimQueued.value ? "已排队，等待截取…" : "正在处理视频…");
+const cancelLabel = computed(() => action.value === "trim" && accountMode.value === "customer" ? "停止等待" : "取消处理");
+const progressLabel = computed(() => cancelling.value ? `正在${cancelLabel.value}…` : trimQueued.value ? "已排队，等待截取…" : "正在处理视频…");
 const backgroundProgress = computed(() => !visible.value && processing.value && action.value === "trim" ? progressLabel.value : "");
 const preview = ref<HTMLVideoElement>();
 const duration = ref(0);
