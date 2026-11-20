@@ -1,6 +1,7 @@
 import {
-  AdtsOutputFormat, AudioSample, AudioSampleSink, AudioSampleSource, BlobSource, BufferTarget, EncodedAudioPacketSource, EncodedPacketSink, EncodedVideoPacketSource,
-  canEncodeAudio, Input, MP4, Mp4OutputFormat, NullTarget, Output, QTFF, QUALITY_HIGH,
+  AdtsOutputFormat, AudioSample, AudioSampleSink, AudioSampleSource, BlobSource, BufferTarget, CanvasSink, CanvasSource,
+  EncodedAudioPacketSource, EncodedPacketSink, EncodedVideoPacketSource,
+  canEncodeAudio, canEncodeVideo, Input, MP4, Mp4OutputFormat, NullTarget, Output, QTFF, QUALITY_HIGH, WavOutputFormat,
   type EncodedPacket, type InputTrack,
 } from "mediabunny";
 
@@ -47,23 +48,37 @@ async function inspectClip(input: Input, position: number) {
 
   const transformationMatrix = await video.getTransformationMatrix();
   const aspect = await video.getPixelAspectRatio();
-  const fingerprint = JSON.stringify({ videoConfig, audioConfig, transformationMatrix, aspect }, (key, value) => {
+  return {
+    video, audio, videoConfig, audioConfig, transformationMatrix, start, duration, audioEnd, fitAudio,
+    videoFingerprint: codecFingerprint({ videoConfig, transformationMatrix, aspect }),
+    audioFingerprint: codecFingerprint(audioConfig),
+  };
+}
+
+function codecFingerprint(config: unknown) {
+  return JSON.stringify(config, (key, value) => {
     if (key !== "description" || !value) return value;
     const bytes = ArrayBuffer.isView(value)
       ? new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
       : new Uint8Array(value);
     return Array.from(bytes);
   });
-  return { video, audio, videoConfig, audioConfig, transformationMatrix, start, duration, audioEnd, fingerprint, fitAudio };
 }
 
-async function writeFittedAudio(segment: Awaited<ReturnType<typeof inspectClip>>, offset: number, output: AudioSampleSource, signal?: AbortSignal) {
-  const { audio, audioConfig, start, duration } = segment;
-  if (!audio || !audioConfig) return;
-  const { sampleRate, numberOfChannels } = audioConfig;
+type Segment = Awaited<ReturnType<typeof inspectClip>>;
+type AudioFormat = Pick<AudioDecoderConfig, "sampleRate" | "numberOfChannels">;
+
+async function writeFittedAudio(
+  segment: Segment,
+  offset: number,
+  output: AudioSampleSource,
+  { sampleRate, numberOfChannels }: AudioFormat,
+  signal?: AbortSignal,
+) {
+  const { audio, audioConfig, start, duration, audioEnd } = segment;
   let cursor = Math.round(offset * sampleRate);
   const end = Math.round((offset + duration) * sampleRate);
-  const soundEnd = Math.min(end, Math.round((offset + segment.audioEnd - start) * sampleRate));
+  const soundEnd = Math.min(end, Math.round((offset + audioEnd - start) * sampleRate));
 
   async function padTo(frame: number) {
     while (cursor < frame) {
@@ -75,23 +90,92 @@ async function writeFittedAudio(segment: Awaited<ReturnType<typeof inspectClip>>
     }
   }
 
-  for await (const sample of new AudioSampleSink(audio).samples(undefined, Math.min(segment.audioEnd, start + duration))) {
+  async function writeSample(sample: AudioSample) {
+    signal?.throwIfAborted();
+    const frame = Math.round((offset + sample.timestamp - start) * sampleRate);
+    await padTo(Math.min(end, frame));
+    const from = Math.max(0, cursor - frame);
+    const to = Math.min(sample.numberOfFrames, soundEnd - frame);
+    if (to <= from) return;
+    const slice = sample.trim(from, to);
     try {
-      signal?.throwIfAborted();
-      const frame = Math.round((offset + sample.timestamp - start) * sampleRate);
-      await padTo(Math.min(end, frame));
-      const from = Math.max(0, cursor - frame);
-      const to = Math.min(sample.numberOfFrames, soundEnd - frame);
-      if (to <= from) continue;
-      const slice = sample.trim(from, to);
-      try {
-        slice.setTimestamp(cursor / sampleRate);
-        await output.add(slice);
-      } finally { slice.close(); }
-      cursor += to - from;
-    } finally { sample.close(); }
+      slice.setTimestamp(cursor / sampleRate);
+      await output.add(slice);
+    } finally { slice.close(); }
+    cursor += to - from;
+  }
+
+  if (audio && audioConfig) {
+    const samples = new AudioSampleSink(audio).samples(undefined, Math.min(audioEnd, start + duration));
+    if (audioConfig.sampleRate === sampleRate && audioConfig.numberOfChannels === numberOfChannels) {
+      for await (const sample of samples) {
+        try { await writeSample(sample); } finally { sample.close(); }
+      }
+    } else {
+      await resampleAudio(samples, { sampleRate, numberOfChannels }, writeSample, signal);
+    }
   }
   await padTo(end);
+}
+
+async function resampleAudio(
+  samples: AsyncIterable<AudioSample>,
+  format: AudioFormat,
+  writeSample: (sample: AudioSample) => Promise<void>,
+  signal?: AbortSignal,
+) {
+  const converter = new Output({ format: new WavOutputFormat(), target: new NullTarget() });
+  const source = new AudioSampleSource({
+    codec: "pcm-f32",
+    transform: { ...format, async process(sample) {
+      await writeSample(sample);
+      return null;
+    } },
+  });
+  converter.addAudioTrack(source, { decoderConfig: { codec: "pcm-f32", ...format } });
+  try {
+    await converter.start();
+    for await (const sample of samples) {
+      try {
+        signal?.throwIfAborted();
+        await source.add(sample);
+      } finally { sample.close(); }
+    }
+    await converter.finalize();
+  } finally {
+    if (converter.state === "started") await converter.cancel();
+  }
+}
+
+async function createVideoRenderer(first: Segment, countBytes: (size: number) => void) {
+  const width = Math.ceil(await first.video.getDisplayWidth() / 2) * 2;
+  const height = Math.ceil(await first.video.getDisplayHeight() / 2) * 2;
+  if (!await canEncodeVideo("avc", { width, height, quality: QUALITY_HIGH })) {
+    throw new Error("当前浏览器不支持以首段尺寸编码 H.264 视频，请换一个浏览器后重试");
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d", { alpha: false });
+  if (!context) throw new Error("当前浏览器无法绘制混剪画面");
+  const source = new CanvasSource(canvas, {
+    codec: "avc",
+    quality: QUALITY_HIGH,
+    onEncodedPacket(packet) { countBytes(packet.byteLength); },
+  });
+
+  return { source, async write(segment: Segment, offset: number, signal?: AbortSignal) {
+    const sink = new CanvasSink(segment.video, { width, height, fit: "contain", poolSize: 2 });
+    let firstFrame = true;
+    for await (const frame of sink.canvases(segment.start, segment.start + segment.duration)) {
+      signal?.throwIfAborted();
+      const elapsed = frame.timestamp - segment.start;
+      context.drawImage(frame.canvas, 0, 0);
+      await source.add(offset + elapsed, Math.min(frame.duration, segment.duration - elapsed), { keyFrame: firstFrame });
+      firstFrame = false;
+    }
+    if (firstFrame) throw new Error("素材轨道没有可拼接的画面");
+  } };
 }
 
 export async function concatVideo(clips: readonly Blob[], signal?: AbortSignal): Promise<Blob> {
@@ -136,17 +220,18 @@ export async function concatVideo(clips: readonly Blob[], signal?: AbortSignal):
       segments.push(await inspectClip(input, index + 1));
     }
     const first = segments[0]!;
-    const incompatible = segments.findIndex(clip => clip.fingerprint !== first.fingerprint);
-    if (incompatible !== -1) {
-      throw new Error(`第 ${incompatible + 1} 段的编码参数不同，请统一分辨率、方向、H.264 编码设置和 AAC 音轨后重试`);
-    }
-    const videoOutput = new EncodedVideoPacketSource("avc");
-    const audioOutput = first.audio ? new EncodedAudioPacketSource("aac") : null;
+    const renderer = segments.some(clip => clip.videoFingerprint !== first.videoFingerprint)
+      ? await createVideoRenderer(first, countBytes)
+      : undefined;
+    const videoOutput = renderer ? null : new EncodedVideoPacketSource("avc");
+    const firstWithAudio = segments.find(clip => clip.audioConfig);
+    const audioConfig = firstWithAudio?.audioConfig;
+    const audioOutput = audioConfig ? new EncodedAudioPacketSource("aac") : null;
     const totalDuration = segments.reduce((sum, segment) => sum + segment.duration, 0);
     const packets: { packet: EncodedPacket; meta?: EncodedAudioChunkMetadata }[] = [];
     let fittedAudio: AudioSampleSource | undefined;
-    if (first.audioConfig && segments.some(clip => clip.fitAudio)) {
-      const { sampleRate, numberOfChannels } = first.audioConfig;
+    if (audioConfig && segments.some(clip => clip.fitAudio || clip.audioFingerprint !== firstWithAudio?.audioFingerprint)) {
+      const { sampleRate, numberOfChannels } = audioConfig;
       if (!await canEncodeAudio("aac", { sampleRate, numberOfChannels, quality: QUALITY_HIGH })) {
         const { registerAacEncoder } = await import("@mediabunny/aac-encoder");
         registerAacEncoder();
@@ -162,13 +247,17 @@ export async function concatVideo(clips: readonly Blob[], signal?: AbortSignal):
       audioEncoder.addAudioTrack(fittedAudio);
       await audioEncoder.start();
     }
-    output.addVideoTrack(videoOutput, { transformationMatrix: first.transformationMatrix });
+    if (renderer) output.addVideoTrack(renderer.source);
+    else if (videoOutput) output.addVideoTrack(videoOutput, { transformationMatrix: first.transformationMatrix });
     if (audioOutput) output.addAudioTrack(audioOutput);
     await output.start();
     let offset = 0;
     for (const segment of segments) {
-      await copyTrack(segment.video, segment.start, offset, packet => videoOutput.add(packet, { decoderConfig: segment.videoConfig }));
-      if (fittedAudio) await writeFittedAudio(segment, offset, fittedAudio, signal);
+      if (renderer) await renderer.write(segment, offset, signal);
+      else if (videoOutput) {
+        await copyTrack(segment.video, segment.start, offset, packet => videoOutput.add(packet, { decoderConfig: segment.videoConfig }));
+      }
+      if (fittedAudio && audioConfig) await writeFittedAudio(segment, offset, fittedAudio, audioConfig, signal);
       else if (audioOutput && segment.audio && segment.audioConfig) {
         const decoderConfig = segment.audioConfig;
         await copyTrack(segment.audio, segment.start, offset, packet => audioOutput.add(packet, { decoderConfig }));
