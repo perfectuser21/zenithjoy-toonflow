@@ -1,7 +1,7 @@
 <template>
   <nodeSkeleton v-bind="nodeProps" class="mashupNode" :topVisible="node.selected" :fullscreenVisible="false" :downloadUrl="preview" :downloadName="selected?.name">
     <div class="mashupContent nodrag nopan nowheel" @pointerdown.stop @dblclick.stop @keydown.stop>
-      <p class="hint">按组顺序拼接。请使用同一导出预设的 H.264 MP4 或 MOV，所有片段须同为 AAC 音轨或同为无声。</p>
+      <p class="hint">按组顺序拼接 H.264 MP4 或 MOV。格式不同时，画面以每条成片的第一段尺寸为准，保留各段比例。支持 AAC 原声和无声片段混用。</p>
       <fieldset :disabled="busy">
         <section v-for="(group, slot) in state.groups" :key="slot" class="mediaGroup" @dragover.prevent.stop @drop.prevent.stop="addFiles(slot, $event.dataTransfer?.files)">
           <div><strong>{{ group.name }}</strong><span>{{ groups[slot].length }} 个片段</span>
