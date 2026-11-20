@@ -459,7 +459,9 @@ export async function releaseInterruptedTrim(db: AdminDatabase, ownerId: string,
     generation = row.leaseGeneration;
     const payload = payloadSchema.parse(row.payload);
     const item = payload.reservations.find(entry => entry.kind === "trim" && entry.state === "interrupted" && entry.ownerId === ownerId && entry.workspaceHash === workspaceHash && entry.operationId === operationId);
-    if (!item || !item.trimIntent || !await confirmSealed()) return false;
+    if (!item) return false;
+    if (item.bytes === 0) return true;
+    if (!item.trimIntent || !await confirmSealed()) return false;
     if (!await db.renewBackgroundJobLease({ ...budgetKey, leaseOwner, generation, ttlMs: 120000 })) return false;
     item.bytes = 0;
     return await db.updateBackgroundJob({ ...budgetKey, leaseOwner, generation, expectedRevision: row.revision, payload });

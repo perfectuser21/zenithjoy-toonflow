@@ -32,11 +32,11 @@ export default Router().get("/capabilities", async (req, res) => {
   if (!trimMode().create) return res.status(503).set("Cache-Control", "no-store").json({ code: 503, message: "裁剪暂处于只读模式", data: { notSubmitted: true, operationId: value.operationId } });
   const cwd = await resolveWorkspace(req, value.directory);
   if (req.aborted || res.destroyed) return;
-  const controller = new AbortController();
+  const queueController = new AbortController();
   const stream = req.accepts(["json", "text/event-stream"]) === "text/event-stream";
   const send = (data: unknown) => { if (!res.destroyed) res.write(`data: ${JSON.stringify(data)}\n\n`); };
   let heartbeat: ReturnType<typeof setInterval> | undefined;
-  const close = () => { clearInterval(heartbeat); controller.abort(); };
+  const close = () => { clearInterval(heartbeat); queueController.abort(); };
   res.once("close", close);
   req.once("aborted", close);
   req.socket.once("close", close);
@@ -50,9 +50,9 @@ export default Router().get("/capabilities", async (req, res) => {
       res.set({ "Content-Type": "text/event-stream", "Cache-Control": "no-store, no-transform", "X-Accel-Buffering": "no" }).flushHeaders();
       heartbeat = setInterval(() => { if (!res.destroyed && !res.writableEnded && !res.writableNeedDrain) res.write(": waiting\n\n"); }, 10000);
     }
-    const result = await jobs.run({ ...value, cwd, ownerId: actor.id }, controller.signal, async () => {
+    const result = await jobs.run({ ...value, cwd, ownerId: actor.id }, queueController.signal, async () => {
       if (!trimMode().create) throw Object.assign(new Error("裁剪暂处于只读模式"), { status: 503 });
-      return trimVideo(cwd, value.source, value.start, value.end, AbortSignal.any([controller.signal, AbortSignal.timeout(185000)]), actor.id, authorize, value.operationId);
+      return trimVideo(cwd, value.source, value.start, value.end, AbortSignal.timeout(185000), actor.id, authorize, value.operationId);
     }, phase => { if (stream) send({ phase }); });
     if (stream) send({ result: success(result) });
     else if (!res.destroyed) res.set("Cache-Control", "no-store").json(success(result));
