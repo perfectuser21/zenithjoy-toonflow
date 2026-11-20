@@ -50,7 +50,7 @@
               <ul v-if="organization.members?.length" class="records">
                 <li v-for="member in organization.members" :key="`${member.userId}:${member.teamId}`">
                   <span>{{ member.userName || member.userId }} · {{ teamLabel(member.teamId) }}</span>
-                  <button type="button" @click="manage('revokeMembership', { memberId: member.userId, teamId: member.teamId }, '已移除团队成员')">移出团队</button>
+                  <button v-if="!member.owner" type="button" @click="manage('revokeMembership', { memberId: member.userId, teamId: member.teamId }, '已移除团队成员')">移出团队</button>
                 </li>
               </ul>
             </details>

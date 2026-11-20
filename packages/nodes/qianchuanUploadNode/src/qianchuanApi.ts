@@ -16,7 +16,7 @@ const organizationSchema = z.object({
   teams: z.array(teamSchema),
   accounts: z.array(accountSchema),
   authorizations: z.array(z.object({ id: z.uuid(), name: z.string() })).optional(),
-  members: z.array(z.object({ userId: z.string(), userName: z.string().optional(), teamId: z.uuid() })).optional(),
+  members: z.array(z.object({ userId: z.string(), userName: z.string().optional(), teamId: z.uuid(), owner: z.boolean().optional() })).optional(),
 });
 export const organizationSnapshotSchema = z.object({ organizations: z.array(organizationSchema) });
 const responseSchema = z.object({ code: z.number().optional(), message: z.string().optional(), data: z.unknown().optional() });
