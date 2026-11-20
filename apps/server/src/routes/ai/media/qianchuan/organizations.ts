@@ -1,8 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
 import { success } from "@/lib/responseFormat";
-import { assertAppRequest } from "@/utils/mcp/control";
-import { requestIdentity } from "@/utils/multiTenant/runtime";
 import {
   addQianchuanAuthorization,
   createInvitation,
@@ -10,6 +8,8 @@ import {
   createTeam,
   joinOrganization,
   organizationSnapshot,
+  qianchuanUserIdSchema,
+  requireQianchuanActor,
   replaceQianchuanAccessToken,
   revokeMembership,
   revokeQianchuanAuthorization,
@@ -24,7 +24,7 @@ const request = z.discriminatedUnion("action", [
   z.strictObject({ action: z.literal("createTeam"), organizationId, name }),
   z.strictObject({ action: z.literal("createInvitation"), organizationId, teamId }),
   z.strictObject({ action: z.literal("joinOrganization"), code: z.string().trim().min(1).max(128) }),
-  z.strictObject({ action: z.literal("revokeMembership"), organizationId, memberId: z.uuid(), teamId }),
+  z.strictObject({ action: z.literal("revokeMembership"), organizationId, memberId: qianchuanUserIdSchema, teamId }),
   z.strictObject({
     action: z.literal("addAuthorization"),
     organizationId,
@@ -45,9 +45,7 @@ const request = z.discriminatedUnion("action", [
 ]);
 
 export default Router().post("/", async (req, res) => {
-  assertAppRequest(req);
-  const actor = requestIdentity(req);
-  if (actor?.role !== "user") throw Object.assign(new Error("请使用 Toonflow 创作账号登录"), { status: 401 });
+  const actor = requireQianchuanActor(req);
   const input = request.safeParse(req.body);
   if (!input.success) throw Object.assign(new Error("组织或千川配置参数无效"), { status: 400 });
   const data = input.data;

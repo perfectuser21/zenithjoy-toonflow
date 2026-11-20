@@ -3,23 +3,27 @@ import { dirname } from "node:path";
 import { openDatabase } from "@toonflow/multi-tenant-db";
 import type { AdminDatabase } from "@toonflow/multi-tenant-db";
 import { createModelSecret } from "@toonflow/multi-tenant-models";
+import type { Request } from "express";
 import { z } from "zod";
 import conf from "@/utils/conf";
+import { assertAppRequest } from "@/utils/mcp/control";
+import { requestIdentity } from "./runtime";
 
+export const qianchuanUserIdSchema = z.union([z.uuid(), z.literal("admin")]);
 const nameSchema = z.string().trim().min(1).max(80);
 const accountSchema = z.strictObject({ name: nameSchema, advertiserId: z.string().regex(/^\d{1,20}$/), teamId: z.uuid().nullable() });
 const accessTokenSchema = z.string().trim().min(1).max(4096).regex(/^[\x21-\x7e]+$/);
 const teamSchema = z.strictObject({ id: z.uuid(), name: nameSchema });
-const memberSchema = z.strictObject({ userId: z.uuid(), teamId: z.uuid(), revokedAt: z.number().optional() });
+const memberSchema = z.strictObject({ userId: qianchuanUserIdSchema, teamId: z.uuid(), revokedAt: z.number().optional() });
 const invitationSchema = z.strictObject({
-  digest: z.string().regex(/^[a-f0-9]{64}$/), teamId: z.uuid(), expiresAt: z.number(), acceptedBy: z.uuid().optional(),
+  digest: z.string().regex(/^[a-f0-9]{64}$/), teamId: z.uuid(), expiresAt: z.number(), acceptedBy: qianchuanUserIdSchema.optional(),
 });
 const authorizationSchema = z.strictObject({
   id: z.uuid(), name: nameSchema, cipher: z.string(), revokedAt: z.number().optional(),
   accounts: z.array(accountSchema.extend({ id: z.uuid() })),
 });
 const organizationSchema = z.strictObject({
-  id: z.uuid(), name: nameSchema, code: z.string().regex(/^[A-F0-9]{32}$/), ownerId: z.uuid(), teams: z.array(teamSchema),
+  id: z.uuid(), name: nameSchema, code: z.string().regex(/^[A-F0-9]{32}$/), ownerId: qianchuanUserIdSchema, teams: z.array(teamSchema),
   members: z.array(memberSchema), invitations: z.array(invitationSchema), authorizations: z.array(authorizationSchema),
 });
 const newAuthorizationSchema = z.strictObject({ name: nameSchema, accessToken: accessTokenSchema, accounts: z.array(accountSchema).min(1).max(100) });
@@ -32,13 +36,26 @@ function fail(message: string, status: number): never {
   throw Object.assign(new Error(message), { status });
 }
 
+export function requireQianchuanActor(req: Request) {
+  assertAppRequest(req);
+  const actor = requestIdentity(req);
+  if (req.res?.locals.multiTenantWeb !== true || !actor || (actor.id === "admin") !== (actor.role === "admin")) {
+    fail("请使用 Toonflow 创作账号登录", 401);
+  }
+  return actor;
+}
+
 async function withDatabase<T>(userId: string, run: (db: AdminDatabase) => Promise<T>) {
-  if (!z.uuid().safeParse(userId).success) fail("当前账号无法参与组织", 403);
+  if (!qianchuanUserIdSchema.safeParse(userId).success) fail("当前账号无法参与组织", 403);
   const db = await openDatabase(dirname(conf.path));
   if (!db) fail("组织功能需要启用多租户", 503);
   try {
-    const user = await db.getUserById(userId);
-    if (!user || user.disabled) fail("当前账号已停用或不存在", 403);
+    if (userId === "admin") {
+      if (!await db.getAdmin()) fail("当前账号不存在", 403);
+    } else {
+      const user = await db.getUserById(userId);
+      if (!user || user.disabled) fail("当前账号已停用或不存在", 403);
+    }
     await db.initializeOrganizations();
     return await run(db);
   } finally {
@@ -108,7 +125,8 @@ export function organizationSnapshot(userId: string) {
         ...(owner ? {
           authorizations: authorizations.map(({ id, name }) => ({ id, name })),
           members: await Promise.all(organization.members.filter(member => member.revokedAt === undefined).map(async ({ userId, teamId }) => ({
-            userId, teamId, userName: (await db.getUserById(userId))?.userName,
+            userId, teamId, owner: organization.ownerId === userId,
+            userName: (await (userId === "admin" ? db.getAdmin() : db.getUserById(userId)))?.userName,
           }))),
         } : {}),
       });

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { lstat, mkdir, readFile, writeAtomic } from "@toonflow/file";
 import type { AuthIdentity } from "@toonflow/multi-tenant-auth";
 import { z } from "zod";
-import { resolveQianchuanAccount } from "@/utils/multiTenant/qianchuanOrganizations";
+import { qianchuanUserIdSchema, resolveQianchuanAccount } from "@/utils/multiTenant/qianchuanOrganizations";
 import { isWithin, resolveWorkspacePath } from "@/utils/workspace/files";
 import { uploadQianchuanVideo } from "./qianchuanProvider";
 
@@ -43,7 +43,7 @@ const storedJob = z.strictObject({
   organizationId: z.uuid(),
   accountId: z.uuid(),
   teamId: z.uuid().nullable(),
-  userId: z.uuid(),
+  userId: qianchuanUserIdSchema,
   createdAt: z.iso.datetime(),
   items: z.array(storedItem).min(1).max(100),
 });
