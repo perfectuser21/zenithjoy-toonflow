@@ -65,6 +65,7 @@
         "@toonflow/tool-canvas": "workspace:*",
         "@toonflow/tool-sandbox": "workspace:*",
         "@toonflow/tools-scaffold": "workspace:*",
+        "client-zip": "2.5.1",
         "conf": "^15.1.0",
         "cors": "^2.8.6",
         "express": "^5.2.1",

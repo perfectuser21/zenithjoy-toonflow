@@ -65,6 +65,30 @@ export default function useWorkspaceFiles(directory?: MaybeRefOrGetter<string | 
     return data;
   }
 
+  async function downloadMashupZip(items: { name: string; path: string }[]) {
+    if (actualPlatform.isDesktop || actualPlatform.isMobile || items.length > 1000) return false;
+    const directory = getDirectory();
+    let ticket: string;
+    try {
+      const { data } = await client.post<{ data: { ticket: string } }>("/prepareMashupZip", { directory, items });
+      ticket = data.data.ticket;
+    } catch (error) {
+      if (axios.isAxiosError<{ message?: string }>(error)) {
+        if (error.response?.status === 501) return false;
+        if (typeof error.response?.data?.message === "string") throw new Error(error.response.data.message);
+      }
+      throw error;
+    }
+    const link = document.createElement("a");
+    link.href = `/api/workspaces/files/mashupZip?${new URLSearchParams({ ticket })}`;
+    link.download = "混剪成片.zip";
+    link.referrerPolicy = "same-origin";
+    document.body.append(link);
+    link.click();
+    link.remove();
+    return true;
+  }
+
   function acquireUrl(path: string, mimeType?: string) {
     const directory = getDirectory();
     const key = JSON.stringify([directory, path, mimeType]);
@@ -175,5 +199,5 @@ export default function useWorkspaceFiles(directory?: MaybeRefOrGetter<string | 
   }
 
   // ACT: 当前目录逐次读取；跨 await 或防抖的操作传入目录字符串，固定本次目标。
-  return { list, read, importImage, cloneProject, exportZip, acquireUrl, readText, readJson, readTextSnapshot, writeTextSnapshot, write, writeJson, rename, copy, reveal, remove, mkdir };
+  return { list, read, downloadMashupZip, importImage, cloneProject, exportZip, acquireUrl, readText, readJson, readTextSnapshot, writeTextSnapshot, write, writeJson, rename, copy, reveal, remove, mkdir };
 }

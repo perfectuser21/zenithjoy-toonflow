@@ -45,14 +45,14 @@ const request = z.discriminatedUnion("action", [
 ]);
 
 export default Router().post("/", async (req, res) => {
-  const actor = requireQianchuanActor(req);
+  const actor = await requireQianchuanActor(req);
   const input = request.safeParse(req.body);
   if (!input.success) throw Object.assign(new Error("组织或千川配置参数无效"), { status: 400 });
   const data = input.data;
   res.set("Cache-Control", "no-store");
   switch (data.action) {
     case "createOrganization":
-      await createOrganization(actor.id, data.name);
+      await createOrganization(actor.id, data.name, actor.userName);
       break;
     case "createTeam":
       await createTeam(actor.id, data.organizationId, data.name);
@@ -62,7 +62,7 @@ export default Router().post("/", async (req, res) => {
       return res.json(success(invitation));
     }
     case "joinOrganization":
-      await joinOrganization(actor.id, data.code);
+      await joinOrganization(actor.id, data.code, actor.userName);
       break;
     case "revokeMembership":
       await revokeMembership(actor.id, data.organizationId, data.memberId, data.teamId);

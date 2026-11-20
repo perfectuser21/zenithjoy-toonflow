@@ -2,7 +2,7 @@
   <nodeSkeleton v-bind="nodeProps" class="qianchuanUploadNode" :fullscreenVisible="false">
     <div class="uploadContent nodrag nopan nowheel" @pointerdown.stop @dblclick.stop @keydown.stop>
       <label class="accountInput">所属组织
-        <select v-model="state.organizationId" :disabled="busy || active">
+        <select v-model="state.organizationId" :disabled="busy || active || !organizations?.length">
           <option value="" disabled>请选择组织</option>
           <option v-for="item in organizations" :key="item.id" :value="item.id">{{ item.name }}</option>
         </select>
@@ -16,9 +16,17 @@
         </select>
       </label>
       <div class="uploadActions">
-        <organizationAccess :organizations="organizations" :activeOrganizationId="state.organizationId" :refresh="refreshOrganizations" />
+        <organizationAccess
+          :organizations="organizations"
+          :activeOrganizationId="state.organizationId"
+          :loadError="organizationError"
+          :refresh="refreshOrganizations"
+          :updateOrganizations="updateOrganizations" />
       </div>
-      <p v-if="organization && !organization.accounts.length">当前组织没有你可用的千川账户。</p>
+      <p v-if="organizationError" class="error" role="alert">{{ organizationError }}</p>
+      <p v-else-if="!organizations" role="status">正在读取组织与千川账户…</p>
+      <p v-else-if="!organizations.length">当前账号尚未加入组织。已有团队的成员可以通过邀请码加入。</p>
+      <p v-else-if="organization && !organization.accounts.length">当前组织没有你可用的千川账户。</p>
       <p v-if="!clips.length">连接「批量混剪」的「整批成片」端口。</p>
       <p v-else>已连接 {{ clips.length }} 条成片<span v-if="clips.length > batchLimit">，单批最多 {{ batchLimit }} 条</span>。</p>
       <div class="uploadActions">
@@ -84,13 +92,14 @@ const busy = ref(false);
 const needsSubmit = ref(false);
 const error = ref("");
 const result = ref<z.infer<typeof resultSchema>>();
-const organizations = ref<Organization[]>([]);
-const organization = computed(() => organizations.value.find(item => item.id === state.organizationId));
+const organizations = ref<Organization[]>();
+const organizationError = ref("");
+const organization = computed(() => organizations.value?.find(item => item.id === state.organizationId));
 const selectedAccount = computed(() => organization.value?.accounts.find(account => account.id === state.accountId));
 const canResubmit = computed(() => {
   const job = state.job;
   if (!job) return false;
-  const target = organizations.value.find(item => item.id === job.organizationId);
+  const target = organizations.value?.find(item => item.id === job.organizationId);
   return target?.accounts.some(account => account.id === job.accountId) ?? false;
 });
 const statusUnavailable = ref(false);
@@ -118,12 +127,32 @@ const lifetime = new AbortController();
 let timer: ReturnType<typeof setTimeout> | undefined;
 let snapshotSequence = 0;
 
+function updateOrganizations(available: Organization[]) {
+  snapshotSequence++;
+  organizationError.value = "";
+  const withAccounts = available.filter(item => item.accounts.length);
+  const savedOrganization = available.find(item => item.id === state.organizationId);
+  const onlyConfiguredOrganization = withAccounts.length === 1 ? withAccounts[0] : undefined;
+  const onlyOrganization = available.length === 1 ? available[0] : undefined;
+  const target = (savedOrganization?.accounts.length ? savedOrganization : onlyConfiguredOrganization)
+    ?? savedOrganization ?? onlyOrganization;
+  organizations.value = available;
+  state.organizationId = target?.id ?? "";
+  if (!target?.accounts.some(account => account.id === state.accountId)) {
+    state.accountId = target?.accounts.length === 1 ? target.accounts[0].id : "";
+  }
+}
+
 async function refreshOrganizations() {
   const snapshotId = ++snapshotSequence;
-  const data = organizationSnapshotSchema.parse(await requestQianchuan("organizations", { action: "snapshot" }, lifetime.signal));
-  if (snapshotId !== snapshotSequence) return;
-  organizations.value = data.organizations;
-  if (!state.organizationId && organizations.value.length === 1) state.organizationId = organizations.value[0].id;
+  try {
+    const data = organizationSnapshotSchema.parse(await requestQianchuan("organizations", { action: "snapshot" }, lifetime.signal));
+    if (snapshotId === snapshotSequence) updateOrganizations(data.organizations);
+  } catch (reason) {
+    if (snapshotId !== snapshotSequence || lifetime.signal.aborted) return;
+    organizations.value = undefined;
+    organizationError.value = reason instanceof Error ? reason.message : "无法读取组织和千川账户";
+  }
 }
 
 function startUpload() {
@@ -178,10 +207,11 @@ async function submit(operation: Operation) {
     if (active.value && !lifetime.signal.aborted) timer = setTimeout(() => void submit("status"), 2000);
   }
 }
-watch(() => state.organizationId, () => { state.accountId = ""; }, { flush: "sync" });
-void refreshOrganizations().catch(reason => {
-  if (!lifetime.signal.aborted) error.value = reason instanceof Error ? reason.message : "无法读取组织和千川账户";
-});
+watch(() => state.organizationId, next => {
+  const accounts = organizations.value?.find(item => item.id === next)?.accounts;
+  state.accountId = accounts?.length === 1 ? accounts[0].id : "";
+}, { flush: "sync" });
+void refreshOrganizations();
 watch(() => getPersistence?.()?.canvasPath, () => { if (state.job) void submit("status"); }, { immediate: true });
 onScopeDispose(() => { clearTimeout(timer); lifetime.abort(); });
 </script>

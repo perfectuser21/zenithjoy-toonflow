@@ -9,7 +9,7 @@ import { requireQianchuanActor } from "@/utils/multiTenant/qianchuanOrganization
 const request = z.strictObject(qianchuanJobRequest);
 
 export default Router().post("/", validateFields({ ...qianchuanJobRequest }), async (req, res) => {
-  const actor = requireQianchuanActor(req);
+  const actor = await requireQianchuanActor(req);
   const { directory, jobId, organizationId, accountId } = request.parse(req.body);
   const cwd = await u.workspace.resolveWorkspace(req, directory);
   const result = await readQianchuanJob(cwd, actor, jobId, { organizationId, accountId });

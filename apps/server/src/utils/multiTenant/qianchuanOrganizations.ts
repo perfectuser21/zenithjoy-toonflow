@@ -6,15 +6,18 @@ import { createModelSecret } from "@toonflow/multi-tenant-models";
 import type { Request } from "express";
 import { z } from "zod";
 import conf from "@/utils/conf";
-import { assertAppRequest } from "@/utils/mcp/control";
+import { assertAppRequest, getAppOrigin } from "@/utils/mcp/control";
 import { requestIdentity } from "./runtime";
+import { isStaffAccessConfigured, readStaffAccessIdentity, staffUserIdSchema } from "./staffAccess";
 
-export const qianchuanUserIdSchema = z.union([z.uuid(), z.literal("admin")]);
+export const qianchuanUserIdSchema = z.union([z.uuid(), z.literal("admin"), staffUserIdSchema]);
 const nameSchema = z.string().trim().min(1).max(80);
 const accountSchema = z.strictObject({ name: nameSchema, advertiserId: z.string().regex(/^\d{1,20}$/), teamId: z.uuid().nullable() });
 const accessTokenSchema = z.string().trim().min(1).max(4096).regex(/^[\x21-\x7e]+$/);
 const teamSchema = z.strictObject({ id: z.uuid(), name: nameSchema });
-const memberSchema = z.strictObject({ userId: qianchuanUserIdSchema, teamId: z.uuid(), revokedAt: z.number().optional() });
+const memberSchema = z.strictObject({
+  userId: qianchuanUserIdSchema, teamId: z.uuid(), revokedAt: z.number().optional(), staffName: z.email().max(254).optional(),
+});
 const invitationSchema = z.strictObject({
   digest: z.string().regex(/^[a-f0-9]{64}$/), teamId: z.uuid(), expiresAt: z.number(), acceptedBy: qianchuanUserIdSchema.optional(),
 });
@@ -36,23 +39,28 @@ function fail(message: string, status: number): never {
   throw Object.assign(new Error(message), { status });
 }
 
-export function requireQianchuanActor(req: Request) {
+export async function requireQianchuanActor(req: Request) {
   assertAppRequest(req);
   const actor = requestIdentity(req);
-  if (req.res?.locals.multiTenantWeb !== true || !actor || (actor.id === "admin") !== (actor.role === "admin")) {
-    fail("请使用 Toonflow 创作账号登录", 401);
+  if (req.res?.locals.multiTenantWeb === true) {
+    if (!actor || (actor.id === "admin") !== (actor.role === "admin")) fail("请使用 Toonflow 创作账号登录", 401);
+    return actor;
   }
-  return actor;
+  const staff = getAppOrigin(req) === process.env.TOONFLOW_STAFF_ACCESS_ORIGIN ? await readStaffAccessIdentity(req) : undefined;
+  if (!staff) fail("请使用 Toonflow 创作账号登录", 401);
+  return staff;
 }
 
 async function withDatabase<T>(userId: string, run: (db: AdminDatabase) => Promise<T>) {
   if (!qianchuanUserIdSchema.safeParse(userId).success) fail("当前账号无法参与组织", 403);
-  const db = await openDatabase(dirname(conf.path));
-  if (!db) fail("组织功能需要启用多租户", 503);
+  const staff = staffUserIdSchema.safeParse(userId).success;
+  if (staff && !isStaffAccessConfigured()) fail("当前账号无法参与组织", 403);
+  const db = await openDatabase(dirname(conf.path), staff);
+  if (!db) fail("组织存储尚未配置", 503);
   try {
     if (userId === "admin") {
       if (!await db.getAdmin()) fail("当前账号不存在", 403);
-    } else {
+    } else if (!staff) {
       const user = await db.getUserById(userId);
       if (!user || user.disabled) fail("当前账号已停用或不存在", 403);
     }
@@ -85,6 +93,10 @@ function assertTeam(organization: Organization, teamId: string) {
 
 function activeTeams(organization: Organization, userId: string) {
   return new Set(organization.members.filter(member => member.userId === userId && member.revokedAt === undefined).map(member => member.teamId));
+}
+
+function staffMemberName(userId: string, userName?: string) {
+  return staffUserIdSchema.safeParse(userId).success ? memberSchema.shape.staffName.parse(userName) : undefined;
 }
 
 function digest(value: string) {
@@ -124,9 +136,9 @@ export function organizationSnapshot(userId: string) {
           .map(account => ({ ...account, authorizationId: authorization.id }))),
         ...(owner ? {
           authorizations: authorizations.map(({ id, name }) => ({ id, name })),
-          members: await Promise.all(organization.members.filter(member => member.revokedAt === undefined).map(async ({ userId, teamId }) => ({
+          members: await Promise.all(organization.members.filter(member => member.revokedAt === undefined).map(async ({ userId, teamId, staffName }) => ({
             userId, teamId, owner: organization.ownerId === userId,
-            userName: (await (userId === "admin" ? db.getAdmin() : db.getUserById(userId)))?.userName,
+            userName: staffName ?? (await (userId === "admin" ? db.getAdmin() : db.getUserById(userId)))?.userName,
           }))),
         } : {}),
       });
@@ -135,13 +147,13 @@ export function organizationSnapshot(userId: string) {
   });
 }
 
-export function createOrganization(userId: string, name: string) {
+export function createOrganization(userId: string, name: string, userName?: string) {
   const id = randomUUID();
   const teamId = randomUUID();
   const code = id.replaceAll("-", "").toUpperCase();
   const organization: Organization = {
     id, code, name: nameSchema.parse(name), ownerId: userId, teams: [{ id: teamId, name: "默认团队" }],
-    members: [{ userId, teamId }], invitations: [], authorizations: [],
+    members: [{ userId, teamId, staffName: staffMemberName(userId, userName) }], invitations: [], authorizations: [],
   };
   return withDatabase(userId, async db => {
     if (!await db.writeOrganization(id, organization, 0)) fail("组织编码冲突，请重试", 409);
@@ -170,7 +182,7 @@ export function createInvitation(userId: string, organizationId: string, teamId:
   });
 }
 
-export function joinOrganization(userId: string, code: string) {
+export function joinOrganization(userId: string, code: string, userName?: string) {
   const [organizationId, randomPart, extra] = code.split(".");
   if (!organizationId || !z.uuid().safeParse(organizationId).success || !randomPart || !/^[A-Za-z0-9_-]{43}$/.test(randomPart) || extra !== undefined) {
     fail("邀请码无效或已失效", 400);
@@ -181,7 +193,7 @@ export function joinOrganization(userId: string, code: string) {
     if (!invitation || invitation.expiresAt <= Date.now() || invitation.acceptedBy) fail("邀请码无效或已失效", 400);
     if (organization.ownerId === userId || activeTeams(organization, userId).has(invitation.teamId)) fail("当前账号已加入该团队", 409);
     invitation.acceptedBy = userId;
-    organization.members.push({ userId, teamId: invitation.teamId });
+    organization.members.push({ userId, teamId: invitation.teamId, staffName: staffMemberName(userId, userName) });
     return { organizationId, teamId: invitation.teamId };
   });
 }

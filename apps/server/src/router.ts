@@ -225,14 +225,16 @@ import route222 from "./routes/workspaces/files/copy";
 import route223 from "./routes/workspaces/files/export";
 import route224 from "./routes/workspaces/files/importImage";
 import route225 from "./routes/workspaces/files/list";
-import route226 from "./routes/workspaces/files/mkdir";
-import route227 from "./routes/workspaces/files/read";
-import route228 from "./routes/workspaces/files/remove";
-import route229 from "./routes/workspaces/files/rename";
-import route230 from "./routes/workspaces/files/reveal";
-import route231 from "./routes/workspaces/files/write";
-import route232 from "./routes/workspaces/list";
-import route233 from "./routes/workspaces/selectDirectory";
+import route226 from "./routes/workspaces/files/mashupZip";
+import route227 from "./routes/workspaces/files/mkdir";
+import route228 from "./routes/workspaces/files/prepareMashupZip";
+import route229 from "./routes/workspaces/files/read";
+import route230 from "./routes/workspaces/files/remove";
+import route231 from "./routes/workspaces/files/rename";
+import route232 from "./routes/workspaces/files/reveal";
+import route233 from "./routes/workspaces/files/write";
+import route234 from "./routes/workspaces/list";
+import route235 from "./routes/workspaces/selectDirectory";
 
 export default (app: Express) => {
   app.use("/api/agent", route1);
@@ -460,12 +462,14 @@ export default (app: Express) => {
   app.use("/api/workspaces/files/export", route223);
   app.use("/api/workspaces/files/importImage", route224);
   app.use("/api/workspaces/files/list", route225);
-  app.use("/api/workspaces/files/mkdir", route226);
-  app.use("/api/workspaces/files/read", route227);
-  app.use("/api/workspaces/files/remove", route228);
-  app.use("/api/workspaces/files/rename", route229);
-  app.use("/api/workspaces/files/reveal", route230);
-  app.use("/api/workspaces/files/write", route231);
-  app.use("/api/workspaces/list", route232);
-  app.use("/api/workspaces/selectDirectory", route233);
+  app.use("/api/workspaces/files/mashupZip", route226);
+  app.use("/api/workspaces/files/mkdir", route227);
+  app.use("/api/workspaces/files/prepareMashupZip", route228);
+  app.use("/api/workspaces/files/read", route229);
+  app.use("/api/workspaces/files/remove", route230);
+  app.use("/api/workspaces/files/rename", route231);
+  app.use("/api/workspaces/files/reveal", route232);
+  app.use("/api/workspaces/files/write", route233);
+  app.use("/api/workspaces/list", route234);
+  app.use("/api/workspaces/selectDirectory", route235);
 }

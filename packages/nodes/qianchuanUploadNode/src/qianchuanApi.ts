@@ -37,7 +37,10 @@ export async function requestQianchuan(operation: "organizations" | "start" | "s
   });
   const parsed = responseSchema.safeParse(await response.json().catch(() => undefined));
   if (!response.ok || !parsed.success || parsed.data.code !== 200) {
-    throw new QianchuanRequestError(parsed.success && parsed.data.message ? parsed.data.message : "千川请求失败", response.status);
+    const fallback = response.status === 401 ? "登录已失效，请重新登录 Toonflow"
+      : response.status === 403 ? "当前账号没有访问千川功能的权限"
+        : "千川请求失败";
+    throw new QianchuanRequestError(parsed.success && parsed.data.message ? parsed.data.message : fallback, response.status);
   }
   return parsed.data.data;
 }
