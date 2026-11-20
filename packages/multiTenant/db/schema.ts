@@ -181,6 +181,13 @@ export type ManagedUser = Pick<UserRecord, "id" | "userName" | "disabled" | "cre
 export type ListUserOptions = { search: string; page: number; pageSize: number; status: "all" | "enabled" | "disabled" };
 export type SourceMappingRecord = { mappings: unknown; revision: number };
 export type ModelRoutingRecord = { configuration: unknown; revision: number };
+export type OrganizationRecord = { id: string; payload: unknown; revision: number };
+export const sqliteOrganization = sqliteTable("multiTenantOrganization", {
+  id: text("id").primaryKey(), payload: text("payload", { mode: "json" }).$type<Record<string, unknown>>().notNull(), revision: integer("revision").notNull(),
+});
+export const mysqlOrganization = mysqlTable("multiTenantOrganization", {
+  id: varchar("id", { length: 36 }).primaryKey(), payload: json("payload").$type<Record<string, unknown>>().notNull(), revision: int("revision").notNull(),
+});
 export type WalletRecord = typeof sqliteWallet.$inferSelect;
 export type BillingRecord = typeof sqliteBillingLedger.$inferSelect;
 export type AdminDatabase = {
@@ -195,6 +202,10 @@ export type AdminDatabase = {
   getModelRouting(): Promise<ModelRoutingRecord | undefined>;
   initializeModelRouting(): Promise<void>;
   writeModelRouting(configuration: Record<string, unknown>, expectedRevision: number): Promise<boolean>;
+  initializeOrganizations(): Promise<void>;
+  getOrganization(id: string): Promise<OrganizationRecord | undefined>;
+  listOrganizations(userId: string): Promise<OrganizationRecord[]>;
+  writeOrganization(id: string, payload: Record<string, unknown>, expectedRevision: number): Promise<boolean>;
   initializeUserProviderGuard(): Promise<void>;
   getUserProviderGuard(): Promise<string | undefined>;
   insertUserProviderGuard(cipher: string): Promise<boolean>;

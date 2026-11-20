@@ -53,9 +53,10 @@ defineOptions({
     { id: "group0", type: "target", dataType: "VIDEO", label: "A" },
     { id: "group1", type: "target", dataType: "VIDEO", label: "B" },
     { id: "video", type: "source", dataType: "VIDEO", label: "当前成片" },
+    { id: "videos", type: "source", dataType: "VIDEO_BATCH", label: "整批成片" },
   ] satisfies NodeHandle[],
 });
-type Batch = { key: string; target: number; results: MashupClip[] };
+type Batch = { key: string; target: number; results: MashupClip[]; previewOnly?: boolean };
 type MashupState = { groups: MashupGroup[]; limit: number | ""; selectedIndex?: number; batch?: Batch };
 const { id, node, nodeProps, files, outputs, handles, nodeEvent } = useNode({ label: "批量混剪" });
 const persisted = node.data as typeof node.data & { mashup?: MashupState };
@@ -76,7 +77,10 @@ const selected = computed(() => results.value[selectedIndex.value]);
 const preview = files.useFileUrl(selected, showError);
 watchEffect(() => {
   const inputs: NodeHandle[] = state.groups.map((group, slot) => ({ id: "group" + slot, type: "target", dataType: "VIDEO", label: group.name }));
-  handles.value = [...inputs, { id: "video", type: "source", dataType: "VIDEO", label: "当前成片" }];
+  handles.value = [...inputs,
+    { id: "video", type: "source", dataType: "VIDEO", label: "当前成片" },
+    { id: "videos", type: "source", dataType: "VIDEO_BATCH", label: "整批成片" },
+  ];
 });
 watchEffect(() => {
   outputs.value.video = selected.value ? { dataType: "VIDEO", value: { url: selected.value.url, mimeType: selected.value.mimeType } } : undefined;
@@ -95,6 +99,12 @@ const limit = computed(() => state.limit === "" ? count.value : state.limit);
 const canRun = computed(() => Number.isSafeInteger(limit.value) && limit.value > 0 && limit.value <= count.value);
 const batchKey = computed(() => JSON.stringify(groups.value.map(clips => clips.map(clip => clip.url))));
 const unfinished = computed(() => state.batch?.key === batchKey.value && results.value.length > 0 && results.value.length < limit.value);
+watchEffect(() => {
+  const batch = state.batch;
+  outputs.value.videos = !running.value && batch && !batch.previewOnly && batch.key === batchKey.value
+    && batch.target === limit.value && results.value.length === batch.target
+    ? { dataType: "VIDEO_BATCH", value: results.value } : undefined;
+});
 function showError(reason: unknown) { error.value = reason instanceof Error ? reason.message : String(reason); }
 function addGroup() { state.groups.push({ name: groupNames[state.groups.length], clips: [] }); }
 function pickFiles(slot: number, event: Event) {
@@ -140,11 +150,14 @@ async function run(first: boolean) {
     const snapshot = groups.value.map(clips => clips.map(clip => ({ ...clip })));
     const target = first ? 1 : limit.value;
     if (state.batch?.key !== batchKey.value) {
-      state.batch = { key: batchKey.value, target, results: [] };
+      state.batch = { key: batchKey.value, target, results: [], previewOnly: first };
       selectedIndex.value = 0;
     }
     const batch = state.batch!;
-    if (!first) batch.target = target;
+    if (!first) {
+      batch.target = target;
+      batch.previewOnly = false;
+    }
     if (first || selectedIndex.value >= target) selectedIndex.value = 0;
     await saved.save(signal);
     const lastClip: { url: string; blob: Blob }[] = [];

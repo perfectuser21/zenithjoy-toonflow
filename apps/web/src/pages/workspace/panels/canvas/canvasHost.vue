@@ -248,7 +248,13 @@ function checkNodeResources(path: string) {
       const data = node.data as { textPath?: unknown; outputs?: Record<string, { value?: unknown } | undefined> } | undefined;
       const references: unknown[] = [`assets/${node.id}`, data?.textPath];
       for (const output of Object.values(data?.outputs ?? {})) {
-        if (output?.value && typeof output.value === "object" && "url" in output.value) references.push(output.value.url);
+        if (Array.isArray(output?.value)) {
+          for (const item of output.value) {
+            if (item && typeof item === "object" && "url" in item) references.push(item.url);
+          }
+        } else if (output?.value && typeof output.value === "object" && "url" in output.value) {
+          references.push(output.value.url);
+        }
       }
       for (const reference of references) {
         if (typeof reference !== "string" || !reference || /^(?:[a-z][a-z\d+.-]*:|[\\/])/i.test(reference)) continue;

@@ -9,6 +9,7 @@ export const trustedNodeNames: Readonly<Record<string, string>> = {
   imageNode: "图片",
   imageGenerationNode: "图片生成",
   mashupNode: "批量混剪",
+  qianchuanUploadNode: "千川素材上传",
   videoConcatNode: "合成成片",
 };
 

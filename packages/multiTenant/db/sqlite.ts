@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { and, asc, count, desc, eq, getTableColumns, sql } from "drizzle-orm";
-import { sqliteAdmin, sqliteBackgroundJob, sqliteBillingLedger, sqliteModelRouting, sqliteSettings, sqliteSourceMapping, sqliteUser, sqliteUserProviderGuard, sqliteUserProviderKey, sqliteWallet, sqliteWebSession } from "./schema";
+import { sqliteAdmin, sqliteBackgroundJob, sqliteBillingLedger, sqliteModelRouting, sqliteOrganization, sqliteSettings, sqliteSourceMapping, sqliteUser, sqliteUserProviderGuard, sqliteUserProviderKey, sqliteWallet, sqliteWebSession } from "./schema";
 import type { AdminDatabase } from "./schema";
 import { backgroundJobKeySchema, backgroundJobCreateSchema, backgroundJobLeaseSchema, backgroundJobRenewSchema, backgroundJobUpdateSchema, backgroundJobReleaseSchema } from "./backgroundJobs";
 import { maxWalletMicros, validateWalletAmount, walletBalanceOverflow, walletSettlementExceeded, walletStateConflict } from "./billing";
@@ -92,6 +92,28 @@ export function connectSqlite(file: string): AdminDatabase {
     async setRegistrationEnabled(enabled) {
       db.insert(sqliteSettings).values({ id: 1, registrationEnabled: enabled })
         .onConflictDoUpdate({ target: sqliteSettings.id, set: { registrationEnabled: enabled } }).run();
+    },
+    async initializeOrganizations() {
+      db.run(sql`CREATE TABLE IF NOT EXISTS "multiTenantOrganization" (
+        "id" TEXT PRIMARY KEY NOT NULL, "payload" TEXT NOT NULL, "revision" INTEGER NOT NULL
+      )`);
+    },
+    async getOrganization(id) {
+      return db.select().from(sqliteOrganization).where(eq(sqliteOrganization.id, id)).get();
+    },
+    async listOrganizations(userId) {
+      return db.select().from(sqliteOrganization).where(sql`json_extract(${sqliteOrganization.payload}, '$.ownerId') = ${userId}
+        OR EXISTS (SELECT 1 FROM json_each(${sqliteOrganization.payload}, '$.members')
+          WHERE json_extract(value, '$.userId') = ${userId} AND json_extract(value, '$.revokedAt') IS NULL)`);
+    },
+    async writeOrganization(id, payload, expectedRevision) {
+      if (expectedRevision === 0) {
+        return db.insert(sqliteOrganization).values({ id, payload, revision: 1 })
+          .onConflictDoNothing({ target: sqliteOrganization.id }).returning({ id: sqliteOrganization.id }).get() !== undefined;
+      }
+      return db.update(sqliteOrganization).set({ payload, revision: expectedRevision + 1 })
+        .where(and(eq(sqliteOrganization.id, id), eq(sqliteOrganization.revision, expectedRevision)))
+        .returning({ id: sqliteOrganization.id }).get() !== undefined;
     },
     async getSourceMapping() {
       try {

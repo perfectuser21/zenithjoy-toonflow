@@ -45,7 +45,7 @@ export async function copyNodesToClipboard(nodes: Node[], edges: Edge[], directo
   const snapshot = JSON.parse(JSON.stringify({
     nodes: nodes.map(node => {
       const { computedPosition, handleBounds, selected, dimensions, isParent, resizing, dragging, events, initialized, ...saved } = node as GraphNode & { initialized?: boolean };
-      const { mediaTask, ...data } = saved.data ?? {};
+      const { mediaTask, qianchuanUpload, ...data } = saved.data ?? {};
       return { ...saved, data };
     }),
     edges: edges.filter(edge => ids.has(edge.source) && ids.has(edge.target)).map(edge => {
@@ -90,8 +90,12 @@ export async function readClipboardNodes(command: string, directory: string) {
     }
     path.forEach(id => checked.add(id));
   }
-  const hasWorkspaceFile = nodes.some(node => Object.values(node.data.outputs ?? {}).some(output => isNodeOutput(output)
-    && typeof output.value === "object" && !/^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(output.value.url)));
+  const relativeUrl = (url: string) => !/^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(url);
+  const hasWorkspaceFile = nodes.some(node => Object.values(node.data.outputs ?? {}).some(output => {
+    if (!isNodeOutput(output)) return false;
+    return output.dataType === "VIDEO_BATCH" ? output.value.some(clip => relativeUrl(clip.url))
+      : typeof output.value === "object" && relativeUrl(output.value.url);
+  }));
   if (hasWorkspaceFile && entry.directory !== directory) {
     throw new Error(entry.directory ? "此节点引用工作区文件，不能跨项目粘贴" : "节点剪贴数据缺少工作目录，请重新复制");
   }
