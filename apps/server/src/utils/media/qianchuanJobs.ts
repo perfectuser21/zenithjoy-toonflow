@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { lstat, mkdir, readFile, writeAtomic } from "@toonflow/file";
-import type { AuthIdentity } from "@toonflow/multi-tenant-auth";
 import { z } from "zod";
 import { qianchuanUserIdSchema, resolveQianchuanAccount } from "@/utils/multiTenant/qianchuanOrganizations";
 import { isWithin, resolveWorkspacePath } from "@/utils/workspace/files";
@@ -54,6 +53,7 @@ const receiptSchema = z.strictObject({
 type VideoItem = z.infer<typeof itemSchema>;
 type Job = z.infer<typeof storedJob>;
 type Item = Job["items"][number];
+type Actor = { id: string };
 type Selection = { organizationId: string; accountId: string };
 type Scope = {
   cwd: string;
@@ -73,7 +73,7 @@ function error(message: string, status: number): never {
   throw Object.assign(new Error(message), { status });
 }
 
-async function scopeFor(cwd: string, jobId: string, actor: AuthIdentity, selection: Selection): Promise<Scope> {
+async function scopeFor(cwd: string, jobId: string, actor: Actor, selection: Selection): Promise<Scope> {
   const root = process.env.TOONFLOW_DATA_DIR;
   if (!root) error("服务器尚未配置任务存储", 503);
   const { advertiserId, teamId } = await resolveQianchuanAccount(actor.id, selection.organizationId, selection.accountId);
@@ -225,7 +225,7 @@ function enqueue(scope: Scope, job: Job) {
     });
 }
 
-export async function startQianchuanJob(cwd: string, actor: AuthIdentity, jobId: string, selection: Selection, items: VideoItem[]) {
+export async function startQianchuanJob(cwd: string, actor: Actor, jobId: string, selection: Selection, items: VideoItem[]) {
   const scope = await scopeFor(cwd, jobId, actor, selection);
   if (new Set(items.map((x) => x.url)).size !== items.length) error("成片清单中有重复路径", 400);
   async function reopen() {
@@ -260,14 +260,14 @@ export async function startQianchuanJob(cwd: string, actor: AuthIdentity, jobId:
   return visible(job);
 }
 
-export async function readQianchuanJob(cwd: string, actor: AuthIdentity, jobId: string, selection: Selection) {
+export async function readQianchuanJob(cwd: string, actor: Actor, jobId: string, selection: Selection) {
   const scope = await scopeFor(cwd, jobId, actor, selection);
   const job = await getJob(scope);
   enqueue(scope, job);
   return visible(job);
 }
 
-export async function retryQianchuanJob(cwd: string, actor: AuthIdentity, jobId: string, selection: Selection) {
+export async function retryQianchuanJob(cwd: string, actor: Actor, jobId: string, selection: Selection) {
   const scope = await scopeFor(cwd, jobId, actor, selection);
   if (active.has(scope.path)) error("上传任务仍在进行", 409);
   active.add(scope.path);

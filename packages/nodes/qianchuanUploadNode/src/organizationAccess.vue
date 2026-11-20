@@ -6,26 +6,23 @@
         <h2 :id="dialogTitleId">组织与千川授权</h2>
         <button type="button" @click="dialog?.close()">关闭</button>
       </header>
-      <p v-if="error" class="error" role="alert">{{ error }}</p>
+      <p v-if="error || loadError" class="error" role="alert">{{ error || loadError }}</p>
       <p v-if="notice" role="status">{{ notice }}</p>
       <fieldset :disabled="busy">
-        <div class="organizationForms">
-          <form @submit.prevent="createOrganization">
-            <label>新组织名称<input v-model.trim="organizationName" required maxlength="80" /></label>
-            <button type="submit">创建组织</button>
-          </form>
-          <form @submit.prevent="joinOrganization">
-            <label>团队邀请码<input v-model.trim="invitationInput" required maxlength="128" autocomplete="off" /></label>
-            <button type="submit">加入团队</button>
-          </form>
-        </div>
-        <label v-if="organizations.length">管理组织
-          <select v-model="managedOrganizationId">
+        <label v-if="organizations?.length">管理组织
+          <select :value="organization?.id" @change="selectManagedOrganization">
             <option v-for="item in organizations" :key="item.id" :value="item.id">{{ item.name }}</option>
           </select>
         </label>
         <section v-if="organization" class="organizationDetails" :key="organization.id">
           <p>组织编码 <code>{{ organization.code }}</code> · {{ organization.role === 'owner' ? '组织管理员' : '成员' }}</p>
+          <h3>可用千川账户</h3>
+          <ul v-if="organization.accounts.length" class="records">
+            <li v-for="account in organization.accounts" :key="account.id">
+              <span>{{ account.name }} · {{ account.advertiserId }}</span><span>{{ teamLabel(account.teamId) }}</span>
+            </li>
+          </ul>
+          <p v-else>当前没有可用千川账户。</p>
           <template v-if="organization.role === 'owner'">
             <details open>
               <summary>团队与成员</summary>
@@ -92,14 +89,21 @@
               </form>
             </details>
           </template>
-          <h3>可用千川账户</h3>
-          <ul v-if="organization.accounts.length" class="records">
-            <li v-for="account in organization.accounts" :key="account.id">
-              <span>{{ account.name }} · {{ account.advertiserId }}</span><span>{{ teamLabel(account.teamId) }}</span>
-            </li>
-          </ul>
-          <p v-else>当前没有可用千川账户。</p>
         </section>
+        <p v-if="organizations?.length === 0">当前账号尚未加入组织。</p>
+        <button v-if="organizations?.length" type="button" :aria-expanded="showOrganizationSetup" @click="showOrganizationSetup = !showOrganizationSetup">
+          {{ showOrganizationSetup ? '收起' : '添加或加入其他组织' }}
+        </button>
+        <div v-if="organizations && (!organizations.length || showOrganizationSetup)" class="organizationForms">
+          <form @submit.prevent="joinOrganization">
+            <label>团队邀请码<input v-model.trim="invitationInput" required maxlength="128" autocomplete="off" /></label>
+            <button type="submit">加入团队</button>
+          </form>
+          <form @submit.prevent="createOrganization">
+            <label>新组织名称<input v-model.trim="organizationName" required maxlength="80" /></label>
+            <button type="submit">创建组织</button>
+          </form>
+        </div>
       </fieldset>
     </dialog>
   </Teleport>
@@ -108,13 +112,22 @@
 <script setup lang="ts">
 import { computed, onScopeDispose, ref, useId, watch } from "vue";
 import { z } from "zod";
-import { requestQianchuan, type Organization } from "./qianchuanApi";
+import { organizationSnapshotSchema, requestQianchuan, type Organization } from "./qianchuanApi";
 
-const props = defineProps<{ organizations: Organization[]; activeOrganizationId: string; refresh: () => Promise<void> }>();
+const props = defineProps<{
+  organizations: Organization[] | undefined;
+  activeOrganizationId: string;
+  loadError: string;
+  refresh: () => Promise<void>;
+  updateOrganizations: (organizations: Organization[]) => void;
+}>();
 const dialog = ref<HTMLDialogElement>();
 const dialogTitleId = useId();
 const managedOrganizationId = ref("");
-const organization = computed(() => props.organizations.find(item => item.id === managedOrganizationId.value) ?? props.organizations[0]);
+const organization = computed(() => props.organizations?.find(item => item.id === managedOrganizationId.value)
+  ?? props.organizations?.find(item => item.id === props.activeOrganizationId)
+  ?? props.organizations?.[0]);
+const showOrganizationSetup = ref(false);
 const organizationName = ref("");
 const invitationInput = ref("");
 const teamName = ref("");
@@ -132,12 +145,14 @@ const notice = ref("");
 const lifetime = new AbortController();
 
 function open() {
-  managedOrganizationId.value = props.activeOrganizationId || props.organizations[0]?.id || "";
+  managedOrganizationId.value = props.activeOrganizationId;
+  showOrganizationSetup.value = false;
   dialog.value?.showModal();
-  void run(async () => {
-    await props.refresh();
-    if (!managedOrganizationId.value) managedOrganizationId.value = props.organizations[0]?.id ?? "";
-  });
+  void run(props.refresh);
+}
+
+function selectManagedOrganization(event: Event) {
+  if (event.target instanceof HTMLSelectElement) managedOrganizationId.value = event.target.value;
 }
 
 function clearSecrets() {
@@ -177,19 +192,19 @@ async function run(work: () => Promise<void>) {
 async function manage(action: string, fields: object, success: string, after?: () => void) {
   const target = action === "createOrganization" || action === "joinOrganization" ? {} : { organizationId: organization.value?.id };
   await run(async () => {
-    await requestQianchuan("organizations", { action, ...target, ...fields }, lifetime.signal);
+    const snapshot = organizationSnapshotSchema.parse(await requestQianchuan("organizations", { action, ...target, ...fields }, lifetime.signal));
+    props.updateOrganizations(snapshot.organizations);
     after?.();
-    await props.refresh();
     notice.value = success;
   });
 }
 
 function createOrganization() {
-  return manage("createOrganization", { name: organizationName.value }, "已创建组织", () => { organizationName.value = ""; });
+  return manage("createOrganization", { name: organizationName.value }, "已创建组织", () => { organizationName.value = ""; showOrganizationSetup.value = false; });
 }
 
 function joinOrganization() {
-  return manage("joinOrganization", { code: invitationInput.value }, "已加入团队", () => { invitationInput.value = ""; });
+  return manage("joinOrganization", { code: invitationInput.value }, "已加入团队", () => { invitationInput.value = ""; showOrganizationSetup.value = false; });
 }
 
 function createTeam() {
@@ -241,7 +256,7 @@ watch(() => organization.value?.id, () => {
   accountDrafts.value = [];
   addAccountDraft();
   clearSecrets();
-});
+}, { immediate: true });
 onScopeDispose(() => lifetime.abort());
 </script>
 
