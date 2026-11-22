@@ -1,6 +1,15 @@
 import { z } from "@toonflow/nodes-scaffold/nodeTools";
 
 export const maxBackgroundReviewShots = 200;
+export const backgroundGroupEvidenceLimit = 20;
+const shotSchema = z.number().int().positive().max(maxBackgroundReviewShots);
+const compactGroupsSchema = z.strictObject({
+  groups: z.array(z.strictObject({
+    shots: z.array(shotSchema).min(1).max(maxBackgroundReviewShots),
+    evidence: z.string().trim().min(1).max(backgroundGroupEvidenceLimit),
+  })).max(maxBackgroundReviewShots),
+  uncertain: z.array(shotSchema).max(maxBackgroundReviewShots),
+});
 const assignmentSchema = z.strictObject({
   shot: z.number().int().positive(),
   referenceShot: z.number().int().positive().nullable(),
@@ -13,6 +22,23 @@ const reviewSchema = z.strictObject({
   assignments: z.array(assignmentSchema).min(1).max(maxBackgroundReviewShots),
 });
 export type BackgroundReview = z.infer<typeof reviewSchema>;
+
+export function expandBackgroundGroups(input: unknown, shotCount: number): BackgroundReview["assignments"] {
+  const parsed = compactGroupsSchema.safeParse(input);
+  if (!parsed.success) throw new Error("模型返回的背景分组格式有误");
+  const rows = new Map<number, BackgroundReview["assignments"][number]>();
+  function add(shot: number, referenceShot: number | null, evidence: string) {
+    if (shot > shotCount || rows.has(shot)) throw new Error("背景分组的镜头编号重复或超出清单范围");
+    rows.set(shot, { shot, referenceShot, evidence });
+  }
+  for (const group of parsed.data.groups) {
+    const referenceShot = Math.min(...group.shots);
+    for (const shot of group.shots) add(shot, referenceShot, group.evidence);
+  }
+  for (const shot of parsed.data.uncertain) add(shot, null, "可见信息不足");
+  if (rows.size !== shotCount) throw new Error("背景分组遗漏了镜头");
+  return [...rows.values()].sort((first, second) => first.shot - second.shot);
+}
 
 export function readBackgroundReview(input: unknown, scenes: readonly { index: number }[]): BackgroundReview {
   const parsed = reviewSchema.safeParse(input);

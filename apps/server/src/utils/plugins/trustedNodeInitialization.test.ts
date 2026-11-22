@@ -112,6 +112,29 @@ test("background review keeps original scenes and discards invalid saved assignm
   }
 });
 
+test("compact background groups expand to exactly one ordered assignment per original shot", async () => {
+  const { expandBackgroundGroups } = await import("../../../../../packages/nodes/frameAnalysisNode/src/backgroundAssignments");
+  const group = { shots: [3, 1], evidence: "红色墙面" };
+  expect(expandBackgroundGroups({ groups: [group], uncertain: [2] }, 3)).toEqual([
+    { shot: 1, referenceShot: 1, evidence: "红色墙面" },
+    { shot: 2, referenceShot: null, evidence: "可见信息不足" },
+    { shot: 3, referenceShot: 1, evidence: "红色墙面" },
+  ]);
+  expect(expandBackgroundGroups({ groups: [], uncertain: [2, 1] }, 2).map(row => row.referenceShot)).toEqual([null, null]);
+  for (const invalid of [
+    { groups: [group], uncertain: [] },
+    { groups: [{ ...group, shots: [3, 1, 1] }], uncertain: [2] },
+    { groups: [group, { ...group, shots: [1] }], uncertain: [2] },
+    { groups: [group], uncertain: [2, 3] },
+    { groups: [group], uncertain: [2, 2] },
+    { groups: [group], uncertain: [4] },
+    { groups: [{ ...group, shots: [0, 1] }], uncertain: [2] },
+    { groups: [{ ...group, shots: [1.5, 1] }], uncertain: [2] },
+    { groups: [{ ...group, shots: [] }], uncertain: [1, 2, 3] },
+    { groups: [{ ...group, evidence: "长".repeat(21) }], uncertain: [2] },
+  ]) expect(() => expandBackgroundGroups(invalid, 3)).toThrow();
+});
+
 test("the four exported MP4s contain the selected pictures and original audio in playback order", async () => {
   const { concatVideo } = await import("../../../../../packages/nodeShared/src/concatVideo");
   const root = await mkdtemp(join(tmpdir(), "toonflowMashupMedia"));
@@ -287,9 +310,16 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     const prepareResponses: number[] = [];
     const nativeDownloads: number[] = [];
     const backgroundAssignments = [
-      { shot: 1, referenceShot: 1, evidence: "红色画面" },
+      { shot: 1, referenceShot: 1, evidence: "同一红色墙面" },
       { shot: 2, referenceShot: null, evidence: "可见信息不足" },
-      { shot: 3, referenceShot: 1, evidence: "再次出现红色画面" },
+      { shot: 3, referenceShot: 1, evidence: "同一红色墙面" },
+    ];
+    const group = { shots: [3, 1], evidence: "同一红色墙面" };
+    const backgroundReplies = [
+      { groups: [{ ...group, shots: [] }], uncertain: [1, 2, 3] },
+      { groups: [group], uncertain: [] },
+      { groups: [group], uncertain: [2, 3] },
+      { groups: [group], uncertain: [2] },
     ];
     let backgroundRequests = 0;
     gateway.use((req, res, next) => {
@@ -316,10 +346,10 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       }
       const image = await readFile(join(directory, references[0].value.url));
       if (image[0] !== 0xff || image[1] !== 0xd8 || image.length < 1024) throw new Error("未生成可读缩略图");
-      const assignments = backgroundRequests++ === 0
-        ? [{ ...backgroundAssignments[0], referenceShot: 3 }, ...backgroundAssignments.slice(1)] : backgroundAssignments;
+      const reply = backgroundReplies[backgroundRequests++];
+      if (!reply) throw new Error("背景复核不能自动重试");
       response.type("text/event-stream").end(`data: ${JSON.stringify({ type: "done", message: {
-        role: "assistant", content: [{ type: "text", text: JSON.stringify({ assignments }) }], api: "openai-completions",
+        role: "assistant", content: [{ type: "text", text: JSON.stringify(reply) }], api: "openai-completions",
         provider: "backgroundFixture", model: "fixture", stopReason: "stop", timestamp: Date.now(),
       } })}\n\n`);
     });
@@ -533,10 +563,13 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       "-of", "csv=p=0", join(project.directory, manifest.audio)], { encoding: "utf8" }).trim()).toBe("audio");
     await generating.page.locator('.el-switch:has([aria-label="AI 辅助拉片"])').click();
     const review = generating.page.locator('xpath=//button[normalize-space(.)="复核背景" and not(@disabled)]');
-    await review.click();
-    const invalid = await generating.page.waitForSelector(`${shotNode} .errorMessage`, { visible: true, timeout: 12000 });
-    expect(await invalid?.evaluate(element => element.textContent)).toContain("引用了无效的背景镜头");
-    expect((await savedNodeData("analysis")).frameAnalysis.lastResult.manifest).toBe(manifestPath);
+    for (const [index, message] of ["背景分组格式有误", "背景分组遗漏了镜头", "镜头编号重复"].entries()) {
+      await review.click();
+      const invalid = await generating.page.waitForSelector(`${shotNode} .errorMessage`, { visible: true, timeout: 12000 });
+      expect(await invalid?.evaluate(element => element.textContent)).toContain(message);
+      expect((await savedNodeData("analysis")).frameAnalysis.lastResult.manifest).toBe(manifestPath);
+      expect(backgroundRequests).toBe(index + 1);
+    }
     await review.click();
     await generating.page.waitForSelector(".backgroundTable tbody tr", { visible: true, timeout: 12000 });
     const reviewedPath = await waitForSaved<string>(async () => {
@@ -548,7 +581,7 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     expect(reviewed.scenes).toEqual(manifest.scenes);
     expect(reviewed.audio).toBe(manifest.audio);
     expect(reviewed.backgroundReview.assignments).toEqual(backgroundAssignments);
-    expect(backgroundRequests).toBe(2);
+    expect(backgroundRequests).toBe(backgroundReplies.length);
     await generating.context.close();
 
     const reopened = await openCanvas();
