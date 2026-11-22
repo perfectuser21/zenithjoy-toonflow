@@ -55,6 +55,7 @@ const contextSchema: z.ZodType<Context> = z.object({
 const inputSchema = z.object({
   providerId: z.string().min(1), modelId: z.string().min(1),
   requestId: z.uuid().optional(),
+  reasoningBudget: z.number().int().min(1).max(4096).optional(),
   context: contextSchema,
   directory: z.string().min(1).max(4096).optional(),
   references: z.array(u.ai.aiReferenceSchema).max(32).optional(),
@@ -98,7 +99,7 @@ export default Router().post("/", validateFields(inputSchema.shape), async (req,
     res.set({ "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no" });
     res.flushHeaders();
     controller.signal.throwIfAborted();
-    stream = u.ai.streamAi(configured, input.context, controller.signal, references);
+    stream = u.ai.streamAi(configured, input.context, controller.signal, references, { reasoningBudget: input.reasoningBudget });
     heartbeat = setInterval(() => {
       if (!res.writableNeedDrain) write(": keepalive\n\n");
     }, 20000);

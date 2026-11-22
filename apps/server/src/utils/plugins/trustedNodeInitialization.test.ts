@@ -278,7 +278,19 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       ],
       viewport: { x: 0, y: 0, zoom: 0.8 },
     }));
+    const dashScopeHost = "dashscope.aliyuncs.com";
+    const reviewModel = "qwen3.7-plus";
+    const alternateModel = "qwen3.7-max";
+    const budgetProviders = [
+      { id: "backgroundFixture", apiUrl: `https://${dashScopeHost}/compatible-mode/v1`, models: [reviewModel, alternateModel] },
+      { id: "proxyFixture", apiUrl: `https://${dashScopeHost}.example.test/v1`, models: [reviewModel] },
+      { id: "insecureFixture", apiUrl: `http://${dashScopeHost}/compatible-mode/v1`, models: [reviewModel] },
+    ];
     await writeFile(join(root, "settings.json"), JSON.stringify({ settings: {
+      customProviders: budgetProviders.map(provider => ({
+        ...provider, label: provider.id, apiKey: "offline-fixture", protocol: "openai-completions",
+        models: provider.models.map(id => ({ id, label: id })),
+      })),
       multiTenantEnabled: false, helloCompleted: true, ui: { language: "zh-CN", startupAnimation: false },
       privacy: { dataCollectionEnabled: false }, stores: { "toonflow.projectList": { project, projectList: [project] } },
     } }));
@@ -336,26 +348,35 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       next();
     });
     gateway.get("/api/ai/models", (_request, response) => response.json({ code: 200, data: [{
-      providerId: "backgroundFixture", providerLabel: "验收", label: "背景模型", modelId: "fixture", protocol: "openai-completions",
+      providerId: "backgroundFixture", providerLabel: "验收", label: "背景模型", modelId: reviewModel, protocol: "openai-completions",
     }] }));
-    gateway.post("/api/ai/generate", express.json(), async (request, response) => {
-      const { providerId, references, directory } = request.body;
-      if (providerId !== "backgroundFixture" || directory !== project.directory || references?.length !== 1 || references[0].dataType !== "IMAGE"
-        || !/^assets\/analysis\/analysis[a-zA-Z0-9]+\/backgroundBoards[a-zA-Z0-9]+\/board1\.jpg$/.test(references[0].value.url)) {
-        throw new Error("背景复核只应提交缩略图联系表");
-      }
-      const image = await readFile(join(directory, references[0].value.url));
-      if (image[0] !== 0xff || image[1] !== 0xd8 || image.length < 1024) throw new Error("未生成可读缩略图");
-      const reply = backgroundReplies[backgroundRequests++];
-      if (!reply) throw new Error("背景复核不能自动重试");
-      response.type("text/event-stream").end(`data: ${JSON.stringify({ type: "done", message: {
-        role: "assistant", content: [{ type: "text", text: JSON.stringify(reply) }], api: "openai-completions",
-        provider: "backgroundFixture", model: "fixture", stopReason: "stop", timestamp: Date.now(),
-      } })}\n\n`);
-    });
+    const sentReasoningBudgets: unknown[] = [];
     const { createApp } = await import("../../app");
     gateway.use(await createApp({ webRoot: join(build, "web"), nodesRoot: join(build, "nodes"), dataDirectory: root }));
     globalThis.fetch = Object.assign(async (input: string | URL | Request, init?: RequestInit) => {
+      if (budgetProviders.some(provider => String(input) === `${provider.apiUrl}/chat/completions`)) {
+        if (typeof init?.body !== "string") throw Error("模型请求缺少 JSON 请求体");
+        const payload = JSON.parse(init.body);
+        sentReasoningBudgets.push(payload.thinking_budget);
+        let reply = backgroundReplies.at(-1);
+        const images = payload.messages.flatMap((message: { content: unknown }) => Array.isArray(message.content)
+          ? message.content.filter(part => part.type === "image_url") : []);
+        if (images.length) {
+          expect(images).toHaveLength(1);
+          expect(images[0].image_url.url).toStartWith("data:image/jpeg;base64,");
+          const image = Buffer.from(images[0].image_url.url.slice("data:image/jpeg;base64,".length), "base64");
+          if (image[0] !== 0xff || image[1] !== 0xd8 || image.length < 1024) throw Error("未收到可读缩略图");
+          reply = backgroundReplies[backgroundRequests++];
+          if (!reply) throw Error("背景复核不能自动重试");
+        }
+        const chunk = { id: "budget-fixture", object: "chat.completion.chunk", created: 1, model: payload.model };
+        return new Response([
+          `data: ${JSON.stringify({ ...chunk, choices: [{ index: 0, delta: { role: "assistant", content: JSON.stringify(reply) }, finish_reason: null }] })}`,
+          `data: ${JSON.stringify({ ...chunk, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}`,
+          "data: [DONE]",
+          "",
+        ].join("\n\n"), { headers: { "content-type": "text/event-stream" } });
+      }
       if (String(input) === "https://api.oceanengine.com/open_api/2/file/video/ad/") {
         if (!(init?.body instanceof FormData) || init.method !== "POST" || new Headers(init.headers).get("Access-Token") !== ownerToken
           || init.body.get("advertiser_id") !== advertiserId || init.body.get("upload_type") !== "UPLOAD_BY_FILE") {
@@ -582,6 +603,29 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     expect(reviewed.audio).toBe(manifest.audio);
     expect(reviewed.backgroundReview.assignments).toEqual(backgroundAssignments);
     expect(backgroundRequests).toBe(backgroundReplies.length);
+    expect(sentReasoningBudgets).toEqual([2048, 2048, 2048, 2048]);
+    const probeStatuses = await generating.page.evaluate(async (qwen, alternate) => {
+      const cases = [
+        { providerId: "backgroundFixture", modelId: qwen },
+        { providerId: "backgroundFixture", modelId: alternate, reasoningBudget: 2048 },
+        { providerId: "proxyFixture", modelId: qwen, reasoningBudget: 2048 },
+        { providerId: "insecureFixture", modelId: qwen, reasoningBudget: 2048 },
+        { providerId: "backgroundFixture", modelId: qwen, reasoningBudget: 0 },
+        { providerId: "backgroundFixture", modelId: qwen, reasoningBudget: 4097 },
+      ];
+      const statuses: number[] = [];
+      for (const request of cases) {
+        const response = await fetch("/api/ai/generate", {
+          method: "POST", headers: { "content-type": "application/json", "x-toonflow-workspace": "1" },
+          body: JSON.stringify({ ...request, context: { messages: [{ role: "user", content: "验收", timestamp: Date.now() }] } }),
+        });
+        statuses.push(response.status);
+        await response.text();
+      }
+      return statuses;
+    }, reviewModel, alternateModel);
+    expect(probeStatuses).toEqual([200, 200, 200, 200, 400, 400]);
+    expect(sentReasoningBudgets.slice(backgroundReplies.length)).toEqual([undefined, undefined, undefined, undefined]);
     await generating.context.close();
 
     const reopened = await openCanvas();
