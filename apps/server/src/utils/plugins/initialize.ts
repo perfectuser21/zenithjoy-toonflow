@@ -15,12 +15,20 @@ export const trustedNodeNames: Readonly<Record<string, string>> = {
 
 export async function initializeTrustedNodes(targetDirectory: string, sourceDirectory: string) {
   const files = Object.keys(trustedNodeNames).map(name => `${name}.umd.js`);
+  await syncBundledNodes(targetDirectory, sourceDirectory, files, "trustedNodesRevision");
+}
+
+export async function initializeHostedSharedCanvasNodes(targetDirectory: string, sourceDirectory: string) {
+  await syncBundledNodes(targetDirectory, sourceDirectory, ["frameAnalysisNode.umd.js"], "hostedSharedNodesRevision");
+}
+
+async function syncBundledNodes(targetDirectory: string, sourceDirectory: string, files: readonly string[], marker: string) {
   const revision = createHash("sha256");
   for (const file of files) {
     const bytes = await readFile(resolve(sourceDirectory, file));
     revision.update(file).update("\0").update(createHash("sha256").update(bytes).digest());
   }
-  await initializePlugins(targetDirectory, sourceDirectory, files, revision.digest("hex"), "trustedNodesRevision");
+  await initializePlugins(targetDirectory, sourceDirectory, files, revision.digest("hex"), marker);
 }
 
 export default async function initializePlugins(
