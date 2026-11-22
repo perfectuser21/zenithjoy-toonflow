@@ -1,5 +1,6 @@
 import type { BrowserFfmpegCommand, BrowserFfmpegFactory, FfprobeData, WorkspaceFiles } from "@toonflow/nodes-scaffold/runtime";
 import { createSceneDetector } from "./sceneDetector";
+import type { BackgroundReview } from "./backgroundAssignments";
 
 export type AnalysisScene = {
   index: number;
@@ -34,6 +35,7 @@ export type AnalysisResult = {
     focusResponse: string;
   };
   ai?: { providerId: string; modelId: string; analyzedAt: string; focus?: string; overviewError?: string };
+  backgroundReview?: BackgroundReview;
 };
 
 export type AnalysisOptions = {

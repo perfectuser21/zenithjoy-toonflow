@@ -77,6 +77,7 @@
             <el-button v-if="processing" :icon="IconPlayerStop" :disabled="cancelling" @click="cancel">{{ cancelling ? '正在取消' : '取消' }}</el-button>
             <template v-else>
               <el-button v-if="settings.aiEnabled && lastResultMatches" :icon="IconSparkles" text :disabled="busy || !selectedModel || settings.focus.length > 2000" @click="runAi">{{ retryOverview ? '重试归纳' : lastResult?.ai ? '重新分析' : '补充分析' }}</el-button>
+              <el-button v-if="settings.aiEnabled && lastResultMatches" text :disabled="busy || !selectedModel" @click="runBackgroundReview">复核背景</el-button>
               <el-button class="sendButton" :icon="IconArrowUp" :disabled="busy || !source || !hasDimensions || (settings.aiEnabled && (!selectedModel || settings.focus.length > 2000))" @click="run">{{ lastResultMatches ? '重新拉片' : '开始拉片' }}</el-button>
             </template>
           </div>
@@ -99,6 +100,8 @@ import {
 import { analyzeVideo, type AnalysisResult } from "./videoAnalysis";
 import { useResultNodes } from "./resultNodes";
 import { analyzeSceneDescriptions } from "./aiAnalysis";
+import { restoreBackgroundReview } from "./backgroundAssignments";
+import { reviewBackgrounds } from "./backgroundReview";
 import analysisReport from "./analysisReport.vue";
 import videoPlayer from "@toonflow/node-video/videoPlayer";
 import promptInput from "@toonflow/node-shared/promptInput";
@@ -146,7 +149,7 @@ const settings = reactive<AnalysisSettings>({
 });
 const focusModel = ref<PromptModel>([[{ type: "Write", text: settings.focus }]]);
 const uploadedSource = shallowRef<NodeMediaValue | undefined>(isNodeOutput({ dataType: "VIDEO", value: saved?.source }) ? saved?.source : undefined);
-const lastResult = shallowRef<AnalysisResult | undefined>(saved?.lastResult && Array.isArray(saved.lastResult.scenes) ? saved.lastResult : undefined);
+const lastResult = shallowRef<AnalysisResult | undefined>(saved?.lastResult && Array.isArray(saved.lastResult.scenes) ? restoreBackgroundReview(saved.lastResult) : undefined);
 const resultSource = ref(typeof saved?.resultSource === "string" ? saved.resultSource : "");
 const inputs = useNodeInputs();
 const incoming = computed(() => inputs.getTargetValues(id, "in"));
@@ -328,6 +331,60 @@ function run() {
 function runAi() {
   if (busy.value || disposed || !source.value || !lastResultMatches.value || !selectedModel.value) return;
   job = processAi();
+}
+
+function runBackgroundReview() {
+  const video = source.value;
+  const result = lastResult.value;
+  const model = selectedModel.value;
+  if (busy.value || disposed || !video || !result || !lastResultMatches.value || !model) return;
+  job = processBackgroundReview(video.url, result, model);
+}
+
+async function processBackgroundReview(video: string, result: AnalysisResult, model: NodeAiModel) {
+  const current = controller = new AbortController();
+  processing.value = true;
+  cancelling.value = false;
+  progress.value = 0;
+  progressLabel.value = "准备背景复核";
+  errorMessage.value = "";
+  try {
+    const workspace = files.getWorkspaceFiles();
+    const ffmpeg = await loadFfmpeg(current.signal);
+    const reviewed = await reviewBackgrounds({
+      ai, model, ffmpeg, workspace, source: video, result, signal: current.signal,
+      onProgress: (value, label) => {
+        if (current.signal.aborted) return;
+        progress.value = Math.round(value);
+        progressLabel.value = label;
+      },
+    });
+    let applied = false;
+    try {
+      current.signal.throwIfAborted();
+      await batchHistory(async () => {
+        current.signal.throwIfAborted();
+        if (lastResult.value !== result || source.value?.url !== video) throw new Error("拉片结果已变化，请重新复核");
+        resultNodes.annotate(reviewed, result.manifest);
+        lastResult.value = reviewed;
+        persist();
+        applied = true;
+      });
+    } finally {
+      if (!applied) await workspace.remove(reviewed.manifest);
+    }
+    progress.value = 100;
+    reportVisible.value = true;
+    ElMessage.success("背景复核已保存");
+  } catch (error) {
+    if (!current.signal.aborted) errorMessage.value = `原拉片结果已保留；${readError(error, "背景复核失败")}`;
+  } finally {
+    processing.value = false;
+    cancelling.value = false;
+    controller = undefined;
+    await nextTick();
+    updateNodeInternals();
+  }
 }
 
 async function enhanceResult(result: AnalysisResult, workspace: WorkspaceFiles, ffmpeg: BrowserFfmpegFactory, signal: AbortSignal, model: NodeAiModel, focus: string) {
@@ -540,7 +597,7 @@ async function processVideo() {
     }
     .localLabel { display: inline-flex; align-items: center; gap: 6px; color: var(--el-text-color-secondary); font-size: 12px; }
     .promptActions {
-      display: flex; align-items: center; gap: 12px;
+      display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 12px;
       .el-button { margin: 0; }
       .sendButton {
         height: 32px; padding: 0 12px;

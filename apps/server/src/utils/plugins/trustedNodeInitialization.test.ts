@@ -91,6 +91,27 @@ test("scene detection keeps both edges of a distinct single-frame shot in zero-m
   expect(cuts(quickCut, 0)).toEqual([2, 3]);
 });
 
+test("background review keeps original scenes and discards invalid saved assignments", async () => {
+  const { restoreBackgroundReview } = await import("../../../../../packages/nodes/frameAnalysisNode/src/backgroundAssignments");
+  const scenes = Array.from({ length: 3 }, (_, index) => ({ index: index + 1, start: index, end: index + 1 }));
+  const anchors = [1, null, 1].map((referenceShot, index) => ({ shot: index + 1, referenceShot, evidence: "验收背景" }));
+  const backgroundReview = { providerId: "fixture", modelId: "offline", reviewedAt: "2026-11-23T00:00:00.000Z", assignments: anchors };
+  const original = { duration: 3, width: 64, height: 64, scenes, manifest: "assets/scenes.json", backgroundReview };
+  expect(restoreBackgroundReview(original)).toEqual(original);
+  for (const assignments of [
+    anchors.slice(1),
+    [anchors[0]!, anchors[0]!, anchors[2]!],
+    [...anchors.slice(0, 2), { ...anchors[2]!, shot: 4 }],
+    [{ ...anchors[0]!, referenceShot: 3 }, ...anchors.slice(1)],
+    [...anchors.slice(0, 2), { ...anchors[2]!, referenceShot: 2 }],
+    [anchors[0]!, { ...anchors[1]!, referenceShot: 1 }, { ...anchors[2]!, referenceShot: 2 }],
+  ]) {
+    const restored = restoreBackgroundReview({ ...original, backgroundReview: { ...backgroundReview, assignments } });
+    expect(restored.backgroundReview).toBeUndefined();
+    expect(restored.scenes).toBe(scenes);
+  }
+});
+
 test("the four exported MP4s contain the selected pictures and original audio in playback order", async () => {
   const { concatVideo } = await import("../../../../../packages/nodeShared/src/concatVideo");
   const root = await mkdtemp(join(tmpdir(), "toonflowMashupMedia"));
@@ -174,7 +195,7 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     });
     await mkdir(join(project.directory, "assets"));
     const sceneSource = "assets/threeShots.mp4";
-    ffmpeg(...["red", "lime", "blue"].flatMap(color => ["-f", "lavfi", "-i", `color=${color}:size=64x64:rate=12:duration=1`]),
+    ffmpeg(...["red", "lime", "red"].flatMap(color => ["-f", "lavfi", "-i", `color=${color}:size=64x64:rate=12:duration=1`]),
       "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=3", "-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0[v]",
       "-map", "[v]", "-map", "3:a", "-c:a", "aac", "-c:v", "libx264", "-bf", "0", join(project.directory, sceneSource));
     const png = ffmpeg("-f", "lavfi", "-i", "color=red:size=64x64", "-frames:v", "1", "-c:v", "png", "-threads", "1", "-f", "image2pipe", "pipe:1");
@@ -265,6 +286,12 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     const advertiserId = "1234567890123456789";
     const prepareResponses: number[] = [];
     const nativeDownloads: number[] = [];
+    const backgroundAssignments = [
+      { shot: 1, referenceShot: 1, evidence: "红色画面" },
+      { shot: 2, referenceShot: null, evidence: "可见信息不足" },
+      { shot: 3, referenceShot: 1, evidence: "再次出现红色画面" },
+    ];
+    let backgroundRequests = 0;
     gateway.use((req, res, next) => {
       for (const { cookie, assertion } of staff.values()) {
         if (req.get("cookie")?.split("; ").includes(`fixtureAccess=${cookie}`)) req.headers["cf-access-jwt-assertion"] = assertion;
@@ -277,6 +304,24 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
         res.once("finish", () => { nativeDownloads[index] = res.statusCode; });
       }
       next();
+    });
+    gateway.get("/api/ai/models", (_request, response) => response.json({ code: 200, data: [{
+      providerId: "backgroundFixture", providerLabel: "验收", label: "背景模型", modelId: "fixture", protocol: "openai-completions",
+    }] }));
+    gateway.post("/api/ai/generate", express.json(), async (request, response) => {
+      const { providerId, references, directory } = request.body;
+      if (providerId !== "backgroundFixture" || directory !== project.directory || references?.length !== 1 || references[0].dataType !== "IMAGE"
+        || !/^assets\/analysis\/analysis[a-zA-Z0-9]+\/backgroundBoards[a-zA-Z0-9]+\/board1\.jpg$/.test(references[0].value.url)) {
+        throw new Error("背景复核只应提交缩略图联系表");
+      }
+      const image = await readFile(join(directory, references[0].value.url));
+      if (image[0] !== 0xff || image[1] !== 0xd8 || image.length < 1024) throw new Error("未生成可读缩略图");
+      const assignments = backgroundRequests++ === 0
+        ? [{ ...backgroundAssignments[0], referenceShot: 3 }, ...backgroundAssignments.slice(1)] : backgroundAssignments;
+      response.type("text/event-stream").end(`data: ${JSON.stringify({ type: "done", message: {
+        role: "assistant", content: [{ type: "text", text: JSON.stringify({ assignments }) }], api: "openai-completions",
+        provider: "backgroundFixture", model: "fixture", stopReason: "stop", timestamp: Date.now(),
+      } })}\n\n`);
     });
     const { createApp } = await import("../../app");
     gateway.use(await createApp({ webRoot: join(build, "web"), nodesRoot: join(build, "nodes"), dataDirectory: root }));
@@ -486,7 +531,32 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     }
     expect(execFileSync("ffprobe", ["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_type",
       "-of", "csv=p=0", join(project.directory, manifest.audio)], { encoding: "utf8" }).trim()).toBe("audio");
+    await generating.page.locator('.el-switch:has([aria-label="AI 辅助拉片"])').click();
+    const review = generating.page.locator('xpath=//button[normalize-space(.)="复核背景" and not(@disabled)]');
+    await review.click();
+    const invalid = await generating.page.waitForSelector(`${shotNode} .errorMessage`, { visible: true, timeout: 12000 });
+    expect(await invalid?.evaluate(element => element.textContent)).toContain("引用了无效的背景镜头");
+    expect((await savedNodeData("analysis")).frameAnalysis.lastResult.manifest).toBe(manifestPath);
+    await review.click();
+    await generating.page.waitForSelector(".backgroundTable tbody tr", { visible: true, timeout: 12000 });
+    const reviewedPath = await waitForSaved<string>(async () => {
+      const result = (await savedNodeData("analysis"))?.frameAnalysis?.lastResult;
+      return result?.backgroundReview ? result.manifest : undefined;
+    });
+    const reviewed = JSON.parse(await readFile(join(project.directory, reviewedPath), "utf8"));
+    expect(reviewed.previousManifest).toBe(manifestPath);
+    expect(reviewed.scenes).toEqual(manifest.scenes);
+    expect(reviewed.audio).toBe(manifest.audio);
+    expect(reviewed.backgroundReview.assignments).toEqual(backgroundAssignments);
+    expect(backgroundRequests).toBe(2);
     await generating.context.close();
+
+    const reopened = await openCanvas();
+    await reopened.page.locator(`${shotNode} .titleBar`).click();
+    await reopened.page.locator('xpath=//button[normalize-space(.)="查看结果" and not(@disabled)]').click();
+    await reopened.page.waitForSelector(".backgroundTable tbody tr", { visible: true });
+    expect(await reopened.page.$$eval(".backgroundTable tbody tr td:first-of-type", cells => cells.map(cell => cell.textContent))).toEqual(["S01", "不确定", "S01"]);
+    await reopened.context.close();
 
     const { page } = await openCanvas(downloads);
     expect(await page.$$eval(`${resultSelector} option`, options => options.map(option => option.textContent))).toEqual(names);

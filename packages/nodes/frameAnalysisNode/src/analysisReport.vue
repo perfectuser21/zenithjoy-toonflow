@@ -12,7 +12,7 @@
       </div>
       <el-alert v-if="manifestError" :title="manifestError" type="error" :closable="false" showIcon />
       <el-alert v-if="result.ai?.overviewError" :title="`整段归纳未完成：${result.ai.overviewError}`" type="warning" :closable="false" showIcon />
-      <el-tabs v-model="activeTab" class="reportTabs" :class="{ singleView: !result.overview }">
+      <el-tabs v-model="activeTab" class="reportTabs" :class="{ singleView: !result.overview && !result.backgroundReview }">
         <el-tab-pane label="镜头明细" name="scenes">
           <div class="sceneLayout">
             <el-scrollbar class="sceneNavigation" height="var(--sceneListHeight, min(56vh, 540px))">
@@ -61,6 +61,20 @@
               </div>
             </el-scrollbar>
           </div>
+        </el-tab-pane>
+        <el-tab-pane v-if="result.backgroundReview" label="背景复核" name="backgrounds">
+          <el-scrollbar height="min(56vh, 540px)">
+            <table class="backgroundTable">
+              <thead><tr><th scope="col">镜头</th><th scope="col">背景组</th><th scope="col">判断依据</th></tr></thead>
+              <tbody>
+                <tr v-for="row in result.backgroundReview.assignments" :key="row.shot">
+                  <th scope="row">S{{ String(row.shot).padStart(2, '0') }}</th>
+                  <td>{{ row.referenceShot === null ? '不确定' : `S${String(row.referenceShot).padStart(2, '0')}` }}</td>
+                  <td>{{ row.evidence }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </el-scrollbar>
         </el-tab-pane>
         <el-tab-pane v-if="result.overview" label="整段分析" name="overview">
           <el-scrollbar height="min(56vh, 540px)">
@@ -129,11 +143,14 @@ watch(visible, open => {
   if (!open) return;
   selectedIndex.value = props.result.scenes[0]?.index ?? 0;
   previewKind.value = "image";
-  activeTab.value = props.result.overview ? "overview" : "scenes";
+  activeTab.value = props.result.backgroundReview ? "backgrounds" : props.result.overview ? "overview" : "scenes";
   manifestError.value = "";
 });
 watch(() => props.result.overview, overview => {
   if (!overview && activeTab.value === "overview") activeTab.value = "scenes";
+});
+watch(() => props.result.backgroundReview, review => {
+  if (!review && activeTab.value === "backgrounds") activeTab.value = "scenes";
 });
 </script>
 
@@ -171,6 +188,12 @@ watch(() => props.result.overview, overview => {
     :deep(.el-tabs__header) { margin-bottom: 16px; }
     :deep(.el-tabs__nav-wrap::after) { height: 1px; background: var(--el-border-color-lighter); }
     &.singleView :deep(.el-tabs__header) { display: none; }
+  }
+
+  .backgroundTable {
+    width: 100%; border-collapse: collapse; text-align: left; font-size: 13px;
+    th, td { padding: 10px 12px; border-bottom: 1px solid var(--el-border-color-lighter); }
+    th { white-space: nowrap; }
   }
 
   .sceneLayout {
