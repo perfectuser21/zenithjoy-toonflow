@@ -3,8 +3,8 @@
     <div class="authContent">
       <header class="authHeader">
         <div class="brand">
-          <img v-if="logoUrl" class="brandLogo" :src="logoUrl" alt="Toonflow" />
-          <span class="brandName">Toonflow</span>
+          <img class="brandLogo" :src="brand.logoUrl" alt="" />
+          <span class="brandName">{{ brand.name }}</span>
         </div>
       </header>
       <main class="authMain">
@@ -34,8 +34,8 @@
     <aside v-if="$slots.art" class="artPanel" aria-hidden="true">
       <slot name="art" />
       <div class="artBrand">
-        <img v-if="logoUrl" class="artLogo" :src="logoUrl" alt="" />
-        <span>Toonflow</span>
+        <img class="artLogo" :src="brand.logoUrl" alt="" />
+        <span>{{ brand.name }}</span>
       </div>
     </aside>
   </div>
@@ -52,7 +52,7 @@ import "element-plus/es/components/form/style/css";
 import "element-plus/es/components/form-item/style/css";
 import "element-plus/es/components/input/style/css";
 
-const props = defineProps<{ request: UserRequest; logoUrl?: string; registrationEnabled: boolean }>();
+const props = defineProps<{ request: UserRequest; brand: { name: string; logoUrl: string }; registrationEnabled: boolean }>();
 const emit = defineEmits<{ authenticated: [user: UserIdentity] }>();
 const mode = ref<"login" | "register">("login");
 const userName = ref("");
@@ -160,7 +160,7 @@ onBeforeUnmount(() => {
         align-items: center;
         gap: 10px;
 
-        .brandLogo { width: 30px; height: 30px; object-fit: contain; .dark & { filter: invert(1); } }
+        .brandLogo { width: 30px; height: 30px; object-fit: contain; }
         .brandName { font-size: 20px; font-weight: 600; line-height: 1.4; letter-spacing: -0.5px; }
       }
     }

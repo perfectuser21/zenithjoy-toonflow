@@ -43,11 +43,11 @@ export async function requireQianchuanActor(req: Request) {
   assertAppRequest(req);
   const actor = requestIdentity(req);
   if (req.res?.locals.multiTenantWeb === true) {
-    if (!actor || (actor.id === "admin") !== (actor.role === "admin")) fail("请使用 Toonflow 创作账号登录", 401);
+    if (!actor || (actor.id === "admin") !== (actor.role === "admin")) fail("请先登录创作账号", 401);
     return actor;
   }
   const staff = getAppOrigin(req) === process.env.TOONFLOW_STAFF_ACCESS_ORIGIN ? await readStaffAccessIdentity(req) : undefined;
-  if (!staff) fail("请使用 Toonflow 创作账号登录", 401);
+  if (!staff) fail("请先登录创作账号", 401);
   return staff;
 }
 

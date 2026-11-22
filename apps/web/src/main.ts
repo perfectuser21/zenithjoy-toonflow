@@ -10,9 +10,14 @@ import "element-plus/theme-chalk/dark/css-vars.css";
 import { initializeMultiTenant } from "@/bootstrap/multiTenant";
 import { createCreationApp } from "@/bootstrap/creation";
 import { actualPlatform } from "@/lib/platform";
+import { appBrand } from "@/lib/branding";
 import { getMissingBrowserFeatures } from "@/lib/browserCapabilities";
 import { publicWeb } from "@/stores/multiTenant";
 import { detectLocale, locale, setLocale, translate } from "@toonflow/i18n/vue";
+
+document.title = appBrand.name;
+const appIcon = document.querySelector<HTMLLinkElement>("#appIcon");
+if (appIcon) appIcon.href = appBrand.logoUrl;
 
 document.documentElement.classList.toggle("dark", window.matchMedia("(prefers-color-scheme: dark)").matches);
 let app: App<Element> | undefined;
