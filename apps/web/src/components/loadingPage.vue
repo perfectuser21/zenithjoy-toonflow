@@ -1,7 +1,8 @@
 <template>
   <teleport to="body">
     <div v-if="visible" class="loadingPage" role="status" aria-label="正在加载项目">
-      <div class="logoWrap" :class="{ drawn, filling }" aria-hidden="true">
+      <img v-if="isBrowserWeb" class="logoWrap webLogo" :src="appBrand.logoUrl" alt="" />
+      <div v-else class="logoWrap" :class="{ drawn, filling }" aria-hidden="true">
         <div class="logoOutline" @animationend="finishDrawing">
           <div ref="logoElement" class="logoPulse" v-html="logoSvg" />
         </div>
@@ -15,6 +16,7 @@
 import { onBeforeUnmount, ref, watch } from "vue";
 import logoRaw from "@toonflow/assets/logo.svg?raw";
 import logoUrl from "@toonflow/assets/logo.svg";
+import { appBrand, isBrowserWeb } from "@/lib/branding";
 
 const props = defineProps<{ active: boolean }>();
 const visible = defineModel<boolean>("visible", { default: false });
@@ -51,7 +53,7 @@ watch([() => props.active, reducedMotion], ([active, reducedMotion]) => {
     }
     filling.value = false;
   }
-  if (reducedMotion) {
+  if (isBrowserWeb || reducedMotion) {
     drawn.value = true;
     if (!active) visible.value = false;
   } else if (!active && drawn.value && visible.value) {
@@ -85,7 +87,7 @@ function finishFilling() {
     aspect-ratio: 1;
     transform: translate(-50%, -50%);
 
-    .dark & { filter: invert(1); }
+    &:not(.webLogo) { .dark & { filter: invert(1); } }
 
     .logoOutline {
       width: 100%;
