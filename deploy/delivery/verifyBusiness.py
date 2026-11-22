@@ -8,7 +8,8 @@ businessConfig，指向 root:root 0600 JSON：
   trim（source/start/end，source 为首账号工作区已有的专用视频）
 businessMode 必填tenant或shared；shared仅staging，改配sharedWorkspace
 （directory/canvasPath），专用已有seed画布必须有deliveryAcceptance=true。
-shared不登录普通账号、不声称跨账号隔离，按旧原生FFmpeg协议截取。
+shared不登录普通账号、不声称跨账号隔离，按旧原生FFmpeg协议截取，
+并在验收前后校验已启用的公网逐帧拉片节点与候选容器构建包 SHA-256 一致。
 accessCredentialFile 可指向root:root 0600 JSON（clientId/clientSecret），
 仅向固定HTTPS publicOrigin附加CF Access服务凭据，回环请求不附加。
 credentialFile 为 root:root 0600 JSON，只有 userName/password；仅可使用专用账号。
@@ -240,16 +241,36 @@ def snapshot(client, account):
     return result, canvas
 
 
-def verifyMashupNode(client):
+def verifyNode(client, name, displayName):
     nodes = client.request('GET', '/api/nodes/get')
     require(isinstance(nodes, list) and any(
-        isinstance(node, dict) and node.get('name') == 'mashupNode'
+        isinstance(node, dict) and node.get('name') == name
         and node.get('enabled') is True and not node.get('loadError')
-        for node in nodes), '当前工作区无法添加批量混剪节点')
-    bundle = client.request('GET', '/api/nodes/files', {'name': 'mashupNode'}, raw=True)
+        for node in nodes), '当前工作区无法添加节点 ' + displayName)
+    bundle = client.request('GET', '/api/nodes/files', {'name': name}, raw=True)
     header = re.match(rb'/\*! toonflowNode:([^\r\n]+) \*/\r?\n', bundle)
-    require(header and json.loads(header[1]).get('displayName') == '批量混剪'
-            and len(bundle) > header.end(), '公网未返回批量混剪节点脚本')
+    try:
+        manifest = json.loads(header[1]) if header else None
+    except ValueError:
+        raise RuntimeError('公网节点脚本清单无效 ' + displayName) from None
+    require(isinstance(manifest, dict) and manifest.get('displayName') == displayName
+            and len(bundle) > header.end(), '公网未返回节点脚本 ' + displayName)
+    return bundle
+
+
+def verifySharedFrameNode(client, containerId):
+    bundle = verifyNode(client, 'frameAnalysisNode', '逐帧拉片')
+    path = '/app/build/nodes/frameAnalysisNode.umd.js'
+    try:
+        checksum = run(['docker', 'exec', containerId, 'sha256sum', path])
+    except (RuntimeError, subprocess.TimeoutExpired, OSError) as error:
+        raise RuntimeError('无法读取候选容器中的逐帧拉片构建包') from error
+    match = re.fullmatch(rb'([a-f0-9]{64})  ' + re.escape(path.encode()) + rb'\n', checksum)
+    require(match, '候选容器中的逐帧拉片构建包 SHA-256 格式错误')
+    digest = hashlib.sha256(bundle).hexdigest()
+    require(digest.encode() == match[1],
+            '公网逐帧拉片节点 SHA-256 与候选容器构建包不一致')
+    return digest
 
 
 def saveCanvas(client, fresh, workspace, request, required, dedicated=False):
@@ -287,6 +308,7 @@ def verifyContainer(config, request, localOrigin):
                 and binding.get('HostIp') in ('127.0.0.1', '::1', '0.0.0.0', '::')
                 for items in bindings.values() for binding in items or []),
             '本机验收端口未绑定当前候选容器')
+    return current['Id']
 
 
 def verifyPublicCandidate(client, local, request, expectedBoot=None):
@@ -362,7 +384,7 @@ def verifyShared(client, config, request, required):
     # shared由root配置固定；不调用只适用于普通账号或MCP的登录/session接口。
     snapshot(client, workspace)
     fresh = newPublicClient(config)
-    verifyMashupNode(fresh)
+    verifyNode(fresh, 'mashupNode', '批量混剪')
     saveCanvas(client, fresh, workspace, request, required, dedicated=True)
     status = client.request('GET', '/api/ffmpeg/status')
     require(all(status.get('tools', {}).get(name, {}).get('path')
@@ -426,24 +448,27 @@ def main():
     workspaces = validateBusinessConfig(config)
     mode = config['businessMode']
     accounts = workspaces if mode == 'tenant' else []
-    verifyContainer(release, request, config['localOrigin'])
+    containerId = verifyContainer(release, request, config['localOrigin'])
     local = publicClient(config['localOrigin'].rstrip('/'))
     client = newPublicClient(config)
     bootId = verifyPublicCandidate(client, local, request)
     if mode == 'shared':
+        frameNodeDigest = verifySharedFrameNode(client, containerId)
         fresh = verifyShared(client, config, request, required)
         verifyGeneration(config, request, config['publicOrigin'])
-        verifyContainer(release, request, config['localOrigin'])
+        require(verifyContainer(release, request, config['localOrigin']) == containerId, '共享验收期间候选容器变化')
         verifyPublicCandidate(fresh, local, request, bootId)
+        require(verifySharedFrameNode(fresh, containerId) == frameNodeDigest, '共享验收期间逐帧拉片构建包变化')
         print(json.dumps({**{key: request[key] for key in required}, 'publicOrigin': config['publicOrigin'],
                           'result': 'passed', 'businessVerified': True, 'runningImage': request['image'],
                           'businessMode': mode, 'generationVerified': True, 'bootId': bootId,
+                          'frameAnalysisNodeSha256': frameNodeDigest,
                           'crossAccountIsolationVerified': False}))
         return
     clients = [newPublicClient(config) for _ in accounts]
     for client, account in zip(clients, accounts):
         client.login(account)
-        verifyMashupNode(client)
+        verifyNode(client, 'mashupNode', '批量混剪')
         _, seed = snapshot(client, account)
         require(seed.get('deliveryAcceptance') is True, '账号画布未明确标记为专用验收seed，禁止写入')
     denyCrossAccount(clients[0], accounts[1])
