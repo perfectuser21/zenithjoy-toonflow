@@ -271,7 +271,13 @@ def verifyArchive(path, request, maximum):
 
 def exportCommand(image):
     require(re.fullmatch(imagePattern, image) is not None, '镜像引用不合法')
-    return ctrCommand() + ['images', 'export', '--all-platforms', '--skip-manifest-json', '-', image]
+    command = ctrCommand() + ['images', 'export']
+    options = subprocess.run(command + ['--help'], check=True, capture_output=True, text=True,
+                             env=processEnvironment, timeout=10).stdout
+    # containerd 2.x 的 transfer API 可能成功退出但截断归档；老版本默认在本地导出。
+    if re.search(r'(?m)^\s+--local\s', options):
+        command.append('--local')
+    return command + ['--all-platforms', '--skip-manifest-json', '-', image]
 
 
 def validateCosIdentity(config, request, transfer):
