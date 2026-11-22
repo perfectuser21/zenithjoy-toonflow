@@ -2,26 +2,11 @@ name: Server build
 on:
   workflow_call:
   pull_request:
-    paths:
-      - "apps/**"
-      - "packages/**"
-      - "patches/**"
-      - "package.json"
-      - "appVersion.ts"
-      - "electrobun.config.ts"
-      - "tsconfig.base.json"
-      - "bun.lock"
-      - "Dockerfile"
-      - ".dockerignore"
-      - "deploy/quota/**"
-      - ".github/workflows/serverBuild.yml"
-      - ".github/workflows/candidateImage.yml"
-      - ".github/workflows/canvasDelivery.yml"
-      - "deploy/delivery/**"
 permissions:
   contents: read
 jobs:
   build:
+    name: Toonflow PR regression
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -32,14 +17,13 @@ jobs:
         with:
           bun-version-file: package.json
       - run: bun install --frozen-lockfile
-      - name: Install FFmpeg for media regression
+      - name: Ensure FFmpeg for media regression
+        timeout-minutes: 5
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ffmpeg
-      - name: Test trusted canvas nodes and ordered video exports
-        run: bun test apps/server/src/utils/plugins/trustedNodeInitialization.test.ts
-      - name: Test simultaneous clip previews
-        run: bun test apps/server/src/utils/media/trimReadQueue.test.ts
+          if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then
+            sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=25 -o Acquire::https::Timeout=25 update
+            sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=25 -o Acquire::https::Timeout=25 install -y --no-install-recommends ffmpeg
+          fi
       - name: Typecheck server
         run: bun run --cwd apps/server typecheck
       - name: Typecheck canvas web
@@ -47,3 +31,7 @@ jobs:
       - name: Typecheck mashup node
         run: bun run --cwd packages/nodes/mashupNode typecheck
       - run: bun run build:server
+      - name: Test canvas browser journeys and video exports
+        run: bun test apps/server/src/utils/plugins/trustedNodeInitialization.test.ts
+      - name: Test simultaneous clip previews
+        run: bun test apps/server/src/utils/media/trimReadQueue.test.ts
