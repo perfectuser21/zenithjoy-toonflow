@@ -9,6 +9,7 @@ import { once } from "node:events";
 import { createServer } from "node:https";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createSceneDetector } from "../../../../../packages/nodes/frameAnalysisNode/src/sceneDetector";
 import { combinationCount, combinationAt, renderBatch, type MashupClip } from "../../../../../packages/nodes/mashupNode/src/mashupBatch";
 import { initializeTrustedNodes, trustedNodeNames } from "./initialize";
 
@@ -72,6 +73,23 @@ test("resumes after the last persisted result, and refuses empty groups or an in
   await expect(renderBatch(groups, 5, 0, record)).rejects.toThrow();
 });
 
+test("scene detection keeps both edges of a distinct single-frame shot in zero-minimum mode", () => {
+  const cuts = (colors: number[][], minSceneSeconds: number) => {
+    const detector = createSceneDetector({ method: "content", threshold: 22, minSceneSeconds });
+    const boundaries = colors.flatMap((color, index) =>
+      detector.processFrame(new Uint8Array(color), index / 30));
+    return [...boundaries, ...detector.finish()].map(seconds => Math.round(seconds * 30));
+  };
+  const red = [255, 0, 0];
+  const blue = [0, 0, 255];
+  const green = [0, 255, 0];
+  const quickCut = [red, red, blue, green, green, green];
+  const dark = [30, 30, 30];
+  const bright = [230, 230, 230];
+  expect(cuts([dark, dark, bright, dark, dark, dark], 0)).toEqual([]);
+  expect(cuts(quickCut, 0.06)).toEqual([2]);
+  expect(cuts(quickCut, 0)).toEqual([2, 3]);
+});
 
 test("the four exported MP4s contain the selected pictures and original audio in playback order", async () => {
   const { concatVideo } = await import("../../../../../packages/nodeShared/src/concatVideo");
