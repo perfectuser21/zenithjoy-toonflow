@@ -193,6 +193,7 @@ const frameTime = ref(0);
 const invalidDuration = computed(() => !duration.value || duration.value < 1);
 let controller: AbortController | undefined;
 let taskController: AbortController | undefined;
+let capturedFrame: Blob | undefined;
 let framePreparation: Promise<void> | undefined;
 const lifetime = new AbortController();
 let automaticHandled = false;
@@ -318,16 +319,26 @@ async function ensureBackgroundFrame(context: NodePersistenceContext, source: st
   if (state.value?.source === source && state.value.frame) return;
   if (framePreparation) return framePreparation;
   const request = (async () => {
-    const response = await fetch("/api/ai/media/background/frame", { method: "POST", headers: { "Content-Type": "application/json", "x-toonflow-workspace": "1" }, body: JSON.stringify({ directory: context.directory, videoPath: source, timeSeconds: frameTime.value }), signal: lifetime.signal });
-    const body = await response.json();
+    const frame = tooLong.value ? await requestLongVideoFrame(context, source) : await saveCapturedFrame();
     lifetime.signal.throwIfAborted();
-    if (!response.ok || body.code !== 200 || typeof body.data?.path !== "string") throw new Error(body.message || "提取画面失败");
     if (state.value?.source !== source || props.file?.url !== source || getPersistence?.()?.directory !== context.directory || getPersistence?.()?.canvasPath !== context.canvasPath) throw new Error("画布或视频已变化，请重新操作");
-    state.value.frame = body.data.path;
+    state.value.frame = frame;
     await saveState();
   })();
   framePreparation = request;
   try { await request; } finally { if (framePreparation === request) framePreparation = undefined; }
+}
+
+async function requestLongVideoFrame(context: NodePersistenceContext, source: string) {
+  const response = await fetch("/api/ai/media/background/frame", { method: "POST", headers: { "Content-Type": "application/json", "x-toonflow-workspace": "1" }, body: JSON.stringify({ directory: context.directory, videoPath: source, timeSeconds: frameTime.value }), signal: lifetime.signal });
+  const body = await response.json();
+  if (!response.ok || body.code !== 200 || typeof body.data?.path !== "string") throw new Error(body.message || "提取画面失败");
+  return body.data.path as string;
+}
+
+async function saveCapturedFrame() {
+  if (!capturedFrame) throw new Error("请先提取视频画面");
+  return files.uploadFile(id, new File([capturedFrame], "backgroundFrame.png", { type: "image/png" }));
 }
 
 async function cleanupBatch() {
@@ -593,6 +604,7 @@ function clearFrame() {
   controller = undefined;
   if (frameUrl.value) URL.revokeObjectURL(frameUrl.value);
   frameUrl.value = "";
+  capturedFrame = undefined;
 }
 
 async function extractFrame() {
@@ -643,6 +655,7 @@ async function extractFrame() {
     context.drawImage(video, 0, 0);
     const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new Error("提取视频画面失败，请重试")), "image/png"));
     request.signal.throwIfAborted();
+    capturedFrame = blob;
     frameUrl.value = URL.createObjectURL(blob);
   } catch (error) {
     if (!request.signal.aborted) frameError.value = error instanceof Error ? error.message : "提取视频画面失败，请重试";

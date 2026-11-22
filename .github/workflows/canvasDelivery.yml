@@ -15,9 +15,9 @@ on:
       - 'Dockerfile'
       - '.dockerignore'
       - 'deploy/**'
-      - '.github/workflows/canvasDelivery.yml'
       - '.github/workflows/candidateImage.yml'
-      - '.github/workflows/serverBuild.yml'
+      - '!apps/**/*.test.ts'
+      - '!packages/**/*.test.ts'
   workflow_dispatch:
     inputs:
       staging_run:
