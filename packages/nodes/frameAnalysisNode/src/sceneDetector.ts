@@ -67,8 +67,10 @@ export function createSceneDetector(options: SceneDetectorOptions) {
 
   const recentScores: { time: number; score: number }[] = [];
   const flashWindowSeconds = 0.12;
+  const hardCutMargin = 20;
   let previousFrame: Frame | undefined;
   let previousTransition: Transition | undefined;
+  let singleFrameStart: Transition | undefined;
   let pendingBoundary: Boundary | undefined;
   let lastBoundaryTime = 0;
   let finished = false;
@@ -109,6 +111,14 @@ export function createSceneDetector(options: SceneDetectorOptions) {
       emitBoundary(pendingBoundary, result);
       pendingBoundary = undefined;
     }
+  }
+
+  function couldBeSingleFrameShot(first: Transition, second: Transition) {
+    const weakerScore = Math.min(first.score, second.score);
+    return minSceneSeconds === 0 && !first.ignored && !second.ignored
+      && first.score >= first.requiredScore && second.score >= second.requiredScore
+      && weakerScore >= 30 && first.leftScore <= weakerScore - hardCutMargin
+      && frameDistance(first.before, second.after) >= weakerScore;
   }
 
   return {
@@ -156,7 +166,18 @@ export function createSceneDetector(options: SceneDetectorOptions) {
         previousTransition.ignored = true;
         transition.ignored = true;
       }
-      if (previousTransition) considerTransition(previousTransition, score, result);
+      if (previousTransition) {
+        const first = singleFrameStart;
+        singleFrameStart = undefined;
+        if (first && !previousTransition.ignored && score <= Math.min(first.score, previousTransition.score) - hardCutMargin) {
+          result.push(first.after.time, previousTransition.after.time);
+          lastBoundaryTime = previousTransition.after.time;
+        } else {
+          if (first) considerTransition(first, previousTransition.score, result);
+          if (couldBeSingleFrameShot(previousTransition, transition)) singleFrameStart = previousTransition;
+          else considerTransition(previousTransition, score, result);
+        }
+      }
       flushBoundary(time, result);
 
       recentScores.push({ time, score });
@@ -170,11 +191,13 @@ export function createSceneDetector(options: SceneDetectorOptions) {
       finished = true;
       const result: number[] = [];
       // 末帧没有右邻帧；只在允许零时长镜头时考虑该边界。
+      if (singleFrameStart && previousTransition) considerTransition(singleFrameStart, previousTransition.score, result);
       if (previousTransition && minSceneSeconds === 0) considerTransition(previousTransition, 0, result);
       if (previousFrame) flushBoundary(previousFrame.time, result);
       // 不足最小时长的尾段并入前一镜头，不制造尾部边界。
       pendingBoundary = undefined;
       previousTransition = undefined;
+      singleFrameStart = undefined;
       previousFrame = undefined;
       recentScores.length = 0;
       return result;
