@@ -4,7 +4,7 @@
 
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
-import logoUrl from "@toonflow/assets/logo.svg";
+import { appBrand } from "@/lib/branding";
 
 type FogPoint = { x: number; y: number; nx: number; ny: number; ink: number; halo: number; variation: number; pixelIndex: number };
 type LogoMask = { pixels: Uint8ClampedArray; halo: Uint8ClampedArray };
@@ -214,7 +214,7 @@ onMounted(() => {
     logo = sampleLogo();
     resize();
   };
-  image.src = logoUrl;
+  image.src = appBrand.logoUrl;
   resizeObserver = new ResizeObserver(resize);
   resizeObserver.observe(canvas);
   themeObserver = new MutationObserver(updateColor);
