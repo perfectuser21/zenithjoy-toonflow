@@ -9,6 +9,7 @@ import { once } from "node:events";
 import { createServer } from "node:https";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createSceneDetector } from "../../../../../packages/nodes/frameAnalysisNode/src/sceneDetector";
 import { combinationCount, combinationAt, renderBatch, type MashupClip } from "../../../../../packages/nodes/mashupNode/src/mashupBatch";
 import { initializeTrustedNodes, trustedNodeNames } from "./initialize";
 
@@ -72,6 +73,67 @@ test("resumes after the last persisted result, and refuses empty groups or an in
   await expect(renderBatch(groups, 5, 0, record)).rejects.toThrow();
 });
 
+test("scene detection keeps both edges of a distinct single-frame shot in zero-minimum mode", () => {
+  const cuts = (colors: number[][], minSceneSeconds: number) => {
+    const detector = createSceneDetector({ method: "content", threshold: 22, minSceneSeconds });
+    const boundaries = colors.flatMap((color, index) =>
+      detector.processFrame(new Uint8Array(color), index / 30));
+    return [...boundaries, ...detector.finish()].map(seconds => Math.round(seconds * 30));
+  };
+  const red = [255, 0, 0];
+  const blue = [0, 0, 255];
+  const green = [0, 255, 0];
+  const quickCut = [red, red, blue, green, green, green];
+  const dark = [30, 30, 30];
+  const bright = [230, 230, 230];
+  expect(cuts([dark, dark, bright, dark, dark, dark], 0)).toEqual([]);
+  expect(cuts(quickCut, 0.06)).toEqual([2]);
+  expect(cuts(quickCut, 0)).toEqual([2, 3]);
+});
+
+test("background review keeps original scenes and discards invalid saved assignments", async () => {
+  const { restoreBackgroundReview } = await import("../../../../../packages/nodes/frameAnalysisNode/src/backgroundAssignments");
+  const scenes = Array.from({ length: 3 }, (_, index) => ({ index: index + 1, start: index, end: index + 1 }));
+  const anchors = [1, null, 1].map((referenceShot, index) => ({ shot: index + 1, referenceShot, evidence: "验收背景" }));
+  const backgroundReview = { providerId: "fixture", modelId: "offline", reviewedAt: "2026-11-23T00:00:00.000Z", assignments: anchors };
+  const original = { duration: 3, width: 64, height: 64, scenes, manifest: "assets/scenes.json", backgroundReview };
+  expect(restoreBackgroundReview(original)).toEqual(original);
+  for (const assignments of [
+    anchors.slice(1),
+    [anchors[0]!, anchors[0]!, anchors[2]!],
+    [...anchors.slice(0, 2), { ...anchors[2]!, shot: 4 }],
+    [{ ...anchors[0]!, referenceShot: 3 }, ...anchors.slice(1)],
+    [...anchors.slice(0, 2), { ...anchors[2]!, referenceShot: 2 }],
+    [anchors[0]!, { ...anchors[1]!, referenceShot: 1 }, { ...anchors[2]!, referenceShot: 2 }],
+  ]) {
+    const restored = restoreBackgroundReview({ ...original, backgroundReview: { ...backgroundReview, assignments } });
+    expect(restored.backgroundReview).toBeUndefined();
+    expect(restored.scenes).toBe(scenes);
+  }
+});
+
+test("compact background groups expand to exactly one ordered assignment per original shot", async () => {
+  const { expandBackgroundGroups } = await import("../../../../../packages/nodes/frameAnalysisNode/src/backgroundAssignments");
+  const group = { shots: [3, 1], evidence: "红色墙面" };
+  expect(expandBackgroundGroups({ groups: [group], uncertain: [2] }, 3)).toEqual([
+    { shot: 1, referenceShot: 1, evidence: "红色墙面" },
+    { shot: 2, referenceShot: null, evidence: "可见信息不足" },
+    { shot: 3, referenceShot: 1, evidence: "红色墙面" },
+  ]);
+  expect(expandBackgroundGroups({ groups: [], uncertain: [2, 1] }, 2).map(row => row.referenceShot)).toEqual([null, null]);
+  for (const invalid of [
+    { groups: [group], uncertain: [] },
+    { groups: [{ ...group, shots: [3, 1, 1] }], uncertain: [2] },
+    { groups: [group, { ...group, shots: [1] }], uncertain: [2] },
+    { groups: [group], uncertain: [2, 3] },
+    { groups: [group], uncertain: [2, 2] },
+    { groups: [group], uncertain: [4] },
+    { groups: [{ ...group, shots: [0, 1] }], uncertain: [2] },
+    { groups: [{ ...group, shots: [1.5, 1] }], uncertain: [2] },
+    { groups: [{ ...group, shots: [] }], uncertain: [1, 2, 3] },
+    { groups: [{ ...group, evidence: "长".repeat(21) }], uncertain: [2] },
+  ]) expect(() => expandBackgroundGroups(invalid, 3)).toThrow();
+});
 
 test("the four exported MP4s contain the selected pictures and original audio in playback order", async () => {
   const { concatVideo } = await import("../../../../../packages/nodeShared/src/concatVideo");
@@ -156,7 +218,7 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     });
     await mkdir(join(project.directory, "assets"));
     const sceneSource = "assets/threeShots.mp4";
-    ffmpeg(...["red", "lime", "blue"].flatMap(color => ["-f", "lavfi", "-i", `color=${color}:size=64x64:rate=12:duration=1`]),
+    ffmpeg(...["red", "lime", "red"].flatMap(color => ["-f", "lavfi", "-i", `color=${color}:size=64x64:rate=12:duration=1`]),
       "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=3", "-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0[v]",
       "-map", "[v]", "-map", "3:a", "-c:a", "aac", "-c:v", "libx264", "-bf", "0", join(project.directory, sceneSource));
     const png = ffmpeg("-f", "lavfi", "-i", "color=red:size=64x64", "-frames:v", "1", "-c:v", "png", "-threads", "1", "-f", "image2pipe", "pipe:1");
@@ -216,7 +278,19 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       ],
       viewport: { x: 0, y: 0, zoom: 0.8 },
     }));
+    const dashScopeHost = "dashscope.aliyuncs.com";
+    const reviewModel = "qwen3.7-plus";
+    const alternateModel = "qwen3.7-max";
+    const budgetProviders = [
+      { id: "backgroundFixture", apiUrl: `https://${dashScopeHost}/compatible-mode/v1`, models: [reviewModel, alternateModel] },
+      { id: "proxyFixture", apiUrl: `https://${dashScopeHost}.example.test/v1`, models: [reviewModel] },
+      { id: "insecureFixture", apiUrl: `http://${dashScopeHost}/compatible-mode/v1`, models: [reviewModel] },
+    ];
     await writeFile(join(root, "settings.json"), JSON.stringify({ settings: {
+      customProviders: budgetProviders.map(provider => ({
+        ...provider, label: provider.id, apiKey: "offline-fixture", protocol: "openai-completions",
+        models: provider.models.map(id => ({ id, label: id })),
+      })),
       multiTenantEnabled: false, helloCompleted: true, ui: { language: "zh-CN", startupAnimation: false },
       privacy: { dataCollectionEnabled: false }, stores: { "toonflow.projectList": { project, projectList: [project] } },
     } }));
@@ -247,6 +321,19 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     const advertiserId = "1234567890123456789";
     const prepareResponses: number[] = [];
     const nativeDownloads: number[] = [];
+    const backgroundAssignments = [
+      { shot: 1, referenceShot: 1, evidence: "同一红色墙面" },
+      { shot: 2, referenceShot: null, evidence: "可见信息不足" },
+      { shot: 3, referenceShot: 1, evidence: "同一红色墙面" },
+    ];
+    const group = { shots: [3, 1], evidence: "同一红色墙面" };
+    const backgroundReplies = [
+      { groups: [{ ...group, shots: [] }], uncertain: [1, 2, 3] },
+      { groups: [group], uncertain: [] },
+      { groups: [group], uncertain: [2, 3] },
+      { groups: [group], uncertain: [2] },
+    ];
+    let backgroundRequests = 0;
     gateway.use((req, res, next) => {
       for (const { cookie, assertion } of staff.values()) {
         if (req.get("cookie")?.split("; ").includes(`fixtureAccess=${cookie}`)) req.headers["cf-access-jwt-assertion"] = assertion;
@@ -260,9 +347,36 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       }
       next();
     });
+    gateway.get("/api/ai/models", (_request, response) => response.json({ code: 200, data: [{
+      providerId: "backgroundFixture", providerLabel: "验收", label: "背景模型", modelId: reviewModel, protocol: "openai-completions",
+    }] }));
+    const sentReasoningBudgets: unknown[] = [];
     const { createApp } = await import("../../app");
     gateway.use(await createApp({ webRoot: join(build, "web"), nodesRoot: join(build, "nodes"), dataDirectory: root }));
     globalThis.fetch = Object.assign(async (input: string | URL | Request, init?: RequestInit) => {
+      if (budgetProviders.some(provider => String(input) === `${provider.apiUrl}/chat/completions`)) {
+        if (typeof init?.body !== "string") throw Error("模型请求缺少 JSON 请求体");
+        const payload = JSON.parse(init.body);
+        sentReasoningBudgets.push(payload.thinking_budget);
+        let reply = backgroundReplies.at(-1);
+        const images = payload.messages.flatMap((message: { content: unknown }) => Array.isArray(message.content)
+          ? message.content.filter(part => part.type === "image_url") : []);
+        if (images.length) {
+          expect(images).toHaveLength(1);
+          expect(images[0].image_url.url).toStartWith("data:image/jpeg;base64,");
+          const image = Buffer.from(images[0].image_url.url.slice("data:image/jpeg;base64,".length), "base64");
+          if (image[0] !== 0xff || image[1] !== 0xd8 || image.length < 1024) throw Error("未收到可读缩略图");
+          reply = backgroundReplies[backgroundRequests++];
+          if (!reply) throw Error("背景复核不能自动重试");
+        }
+        const chunk = { id: "budget-fixture", object: "chat.completion.chunk", created: 1, model: payload.model };
+        return new Response([
+          `data: ${JSON.stringify({ ...chunk, choices: [{ index: 0, delta: { role: "assistant", content: JSON.stringify(reply) }, finish_reason: null }] })}`,
+          `data: ${JSON.stringify({ ...chunk, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}`,
+          "data: [DONE]",
+          "",
+        ].join("\n\n"), { headers: { "content-type": "text/event-stream" } });
+      }
       if (String(input) === "https://api.oceanengine.com/open_api/2/file/video/ad/") {
         if (!(init?.body instanceof FormData) || init.method !== "POST" || new Headers(init.headers).get("Access-Token") !== ownerToken
           || init.body.get("advertiser_id") !== advertiserId || init.body.get("upload_type") !== "UPLOAD_BY_FILE") {
@@ -468,7 +582,58 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     }
     expect(execFileSync("ffprobe", ["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_type",
       "-of", "csv=p=0", join(project.directory, manifest.audio)], { encoding: "utf8" }).trim()).toBe("audio");
+    await generating.page.locator('.el-switch:has([aria-label="AI 辅助拉片"])').click();
+    const review = generating.page.locator('xpath=//button[normalize-space(.)="复核背景" and not(@disabled)]');
+    for (const [index, message] of ["背景分组格式有误", "背景分组遗漏了镜头", "镜头编号重复"].entries()) {
+      await review.click();
+      const invalid = await generating.page.waitForSelector(`${shotNode} .errorMessage`, { visible: true, timeout: 12000 });
+      expect(await invalid?.evaluate(element => element.textContent)).toContain(message);
+      expect((await savedNodeData("analysis")).frameAnalysis.lastResult.manifest).toBe(manifestPath);
+      expect(backgroundRequests).toBe(index + 1);
+    }
+    await review.click();
+    await generating.page.waitForSelector(".backgroundTable tbody tr", { visible: true, timeout: 12000 });
+    const reviewedPath = await waitForSaved<string>(async () => {
+      const result = (await savedNodeData("analysis"))?.frameAnalysis?.lastResult;
+      return result?.backgroundReview ? result.manifest : undefined;
+    });
+    const reviewed = JSON.parse(await readFile(join(project.directory, reviewedPath), "utf8"));
+    expect(reviewed.previousManifest).toBe(manifestPath);
+    expect(reviewed.scenes).toEqual(manifest.scenes);
+    expect(reviewed.audio).toBe(manifest.audio);
+    expect(reviewed.backgroundReview.assignments).toEqual(backgroundAssignments);
+    expect(backgroundRequests).toBe(backgroundReplies.length);
+    expect(sentReasoningBudgets).toEqual([2048, 2048, 2048, 2048]);
+    const probeStatuses = await generating.page.evaluate(async (qwen, alternate) => {
+      const cases = [
+        { providerId: "backgroundFixture", modelId: qwen },
+        { providerId: "backgroundFixture", modelId: alternate, reasoningBudget: 2048 },
+        { providerId: "proxyFixture", modelId: qwen, reasoningBudget: 2048 },
+        { providerId: "insecureFixture", modelId: qwen, reasoningBudget: 2048 },
+        { providerId: "backgroundFixture", modelId: qwen, reasoningBudget: 0 },
+        { providerId: "backgroundFixture", modelId: qwen, reasoningBudget: 4097 },
+      ];
+      const statuses: number[] = [];
+      for (const request of cases) {
+        const response = await fetch("/api/ai/generate", {
+          method: "POST", headers: { "content-type": "application/json", "x-toonflow-workspace": "1" },
+          body: JSON.stringify({ ...request, context: { messages: [{ role: "user", content: "验收", timestamp: Date.now() }] } }),
+        });
+        statuses.push(response.status);
+        await response.text();
+      }
+      return statuses;
+    }, reviewModel, alternateModel);
+    expect(probeStatuses).toEqual([200, 200, 200, 200, 400, 400]);
+    expect(sentReasoningBudgets.slice(backgroundReplies.length)).toEqual([undefined, undefined, undefined, undefined]);
     await generating.context.close();
+
+    const reopened = await openCanvas();
+    await reopened.page.locator(`${shotNode} .titleBar`).click();
+    await reopened.page.locator('xpath=//button[normalize-space(.)="查看结果" and not(@disabled)]').click();
+    await reopened.page.waitForSelector(".backgroundTable tbody tr", { visible: true });
+    expect(await reopened.page.$$eval(".backgroundTable tbody tr td:first-of-type", cells => cells.map(cell => cell.textContent))).toEqual(["S01", "不确定", "S01"]);
+    await reopened.context.close();
 
     const { page } = await openCanvas(downloads);
     expect(await page.$$eval(`${resultSelector} option`, options => options.map(option => option.textContent))).toEqual(names);

@@ -81,6 +81,7 @@ export type NodeAiRequest = {
   directory?: string;
   references?: Extract<NodeOutput, { dataType: "STRING" | "IMAGE" | "VIDEO" | "FILE" }>[];
   tools?: NodeAiTool[];
+  reasoningBudget?: number;
   onEvent?: (event: NodeAiEvent) => void;
   signal?: AbortSignal;
 };
@@ -228,13 +229,13 @@ function createMediaTasks() {
 }
 
 async function requestModel(input: NodeAiRequest, context: Context, model: Model<NodeAiModel["protocol"]>, signal: AbortSignal) {
-  const { providerId, modelId, references, directory, onEvent } = input;
+  const { providerId, modelId, references, directory, reasoningBudget, onEvent } = input;
   const stream = createAssistantMessageEventStream();
   try {
     signal.throwIfAborted();
     const response = await fetch("/api/ai/generate", {
       method: "POST", headers: { "Content-Type": "application/json", "x-toonflow-workspace": "1" },
-      body: JSON.stringify({ providerId, modelId, context, directory, references, requestId: crypto.randomUUID() }), signal,
+      body: JSON.stringify({ providerId, modelId, context, directory, references, reasoningBudget, requestId: crypto.randomUUID() }), signal,
     });
     if (!response.ok) await readResult(response);
     if (!response.body || !response.headers.get("content-type")?.includes("text/event-stream")) throw new Error("AI 未返回预期的 SSE 数据流，无法接收生成内容。");

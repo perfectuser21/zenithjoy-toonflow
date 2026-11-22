@@ -153,6 +153,7 @@ export function streamAi(
   context: Context,
   signal: AbortSignal,
   references: Awaited<ReturnType<typeof readAiReferences>> = [],
+  { reasoningBudget }: { reasoningBudget?: number } = {},
 ) {
   const { provider, model: configuredModel, baseUrl } = configured;
   const model: Model<typeof provider.protocol> = {
@@ -187,6 +188,10 @@ export function streamAi(
     }, files.fetch),
     onPayload: async (payload) => {
       let body = payload as Record<string, unknown>;
+      if (reasoningBudget !== undefined && provider.protocol === "openai-completions"
+        && configuredModel.id === "qwen3.7-plus" && new URL(baseUrl).origin === "https://dashscope.aliyuncs.com") {
+        body = { ...body, thinking_budget: reasoningBudget };
+      }
       if (references.length) {
         const field = provider.protocol === "openai-responses" ? "input" : "messages";
         const messages = body[field] as { role: string; content: unknown }[];
