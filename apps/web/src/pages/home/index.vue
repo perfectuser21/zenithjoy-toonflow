@@ -1,7 +1,7 @@
 <template>
   <div class="home" :class="{ sidebarCollapsed }" :inert="creating || opening || workspaceStore.projectLoadingVisible">
     <bg class="pageBackground" :scrollTop="backgroundScrollTop" />
-    <homeAdvertisementCarousel v-if="!isBrowserWeb && !publicWeb" class="topPromotion" :advertisements="advertisements.banners" placement="banner" :mode="advertisements.bannerMode" :interval="advertisements.bannerInterval" @activate="activateAdvertisement" />
+    <homeAdvertisementCarousel v-if="showUpstreamCommunity" class="topPromotion" :advertisements="advertisements.banners" placement="banner" :mode="advertisements.bannerMode" :interval="advertisements.bannerInterval" @activate="activateAdvertisement" />
     <aside id="homeSidebar" class="homeSidebar" aria-label="首页侧栏">
       <div class="sidebarHeader">
         <div class="sidebarBrand">
@@ -25,7 +25,7 @@
         </button>
       </nav>
       <div class="sidebarFooter">
-        <homeAdvertisementCarousel v-if="!isBrowserWeb && !publicWeb" class="sidebarPromotion" :advertisements="advertisements.sidebar" @activate="activateAdvertisement" />
+        <homeAdvertisementCarousel v-if="showUpstreamCommunity" class="sidebarPromotion" :advertisements="advertisements.sidebar" @activate="activateAdvertisement" />
         <button v-if="!publicWeb" class="sidebarItem deviceButton" :class="{ connected: deviceHubEnabled || mobileConnection.online === true }" type="button" :aria-label="mobileConnectionLabel" :title="mobileConnectionLabel" @click="mobileConnectVisible = true">
           <span class="sidebarIcon">
             <component :is="deviceHubEnabled || mobileConnection.mode === 'remote' ? IconDeviceDesktop : IconQrcode" :size="18" aria-hidden="true" />
@@ -110,7 +110,7 @@
             </div>
             <div v-else id="projectListContent" class="teamProjects" />
           </section>
-          <div v-if="!publicWeb" data-home-section="explore"><explore :scrollElement="pageScroll?.wrapRef" /></div>
+          <div v-if="showUpstreamCommunity" data-home-section="explore"><explore :scrollElement="pageScroll?.wrapRef" /></div>
         </el-main>
       </div>
     </el-scrollbar>
@@ -167,10 +167,11 @@ const pageScroll = ref<ScrollbarInstance>();
 const backgroundScrollTop = ref(0);
 const activeSection = ref("home");
 const projectType = ref<"local" | "team">("local");
+const showUpstreamCommunity = computed(() => !isBrowserWeb && !publicWeb.value);
 const homeSections = computed(() => [
   { id: "home", label: "首页", icon: IconHome },
   { id: "projects", label: "项目", icon: IconFolder },
-  ...(!publicWeb.value ? [{ id: "explore", label: "探索", icon: IconCompass }] : []),
+  ...(showUpstreamCommunity.value ? [{ id: "explore", label: "探索", icon: IconCompass }] : []),
 ]);
 const mobileConnect = defineAsyncComponent(() => import("@/components/mobileConnect.vue"));
 const router = useRouter();
@@ -205,7 +206,7 @@ const placeholderPhrases = [
 const promptPlaceholder = ref(translate(placeholderPhrases[0]!));
 
 onMounted(() => {
-  if (!isBrowserWeb && !publicWeb.value) void loadAdvertisements();
+  if (showUpstreamCommunity.value) void loadAdvertisements();
   window.addEventListener("dragend", clearAttachmentDrag, true);
   window.addEventListener("drop", clearAttachmentDrag, true);
   window.addEventListener("blur", clearAttachmentDrag);
@@ -385,7 +386,7 @@ function updateActiveSection() {
   const wrap = pageScroll.value?.wrapRef;
   if (!wrap) return;
   backgroundScrollTop.value = wrap.scrollTop;
-  if (!publicWeb.value && wrap.scrollTop > 0 && wrap.scrollTop + wrap.clientHeight >= wrap.scrollHeight - 2) {
+  if (showUpstreamCommunity.value && wrap.scrollTop > 0 && wrap.scrollTop + wrap.clientHeight >= wrap.scrollHeight - 2) {
     activeSection.value = "explore";
     return;
   }

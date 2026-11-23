@@ -1,5 +1,5 @@
 <template>
-  <div class="userWeb" :class="{ withArt: !!$slots.art }">
+  <div class="userWeb">
     <div class="authContent">
       <header class="authHeader">
         <div class="brand">
@@ -31,13 +31,6 @@
         </section>
       </main>
     </div>
-    <aside v-if="$slots.art" class="artPanel" aria-hidden="true">
-      <slot name="art" />
-      <div class="artBrand">
-        <img class="artLogo" :src="brand.logoUrl" alt="" />
-        <span>{{ brand.name }}</span>
-      </div>
-    </aside>
   </div>
 </template>
 
@@ -143,8 +136,6 @@ onBeforeUnmount(() => {
   color: var(--el-text-color-primary);
   font-family: var(--el-font-family), "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
 
-  &.withArt { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-
   .authContent {
     display: flex;
     flex-direction: column;
@@ -213,32 +204,7 @@ onBeforeUnmount(() => {
     }
   }
 
-  .artPanel {
-    position: relative;
-    min-width: 0;
-    overflow: hidden;
-    border-radius: var(--ui-radius-large, 12px);
-
-    .artBrand {
-      position: relative;
-      display: flex;
-      align-items: center;
-      justify-content: flex-end;
-      gap: 12px;
-      padding: 28px;
-      color: #fff;
-      font-size: 30px;
-      font-weight: 600;
-      letter-spacing: 0.4px;
-
-      .artLogo { width: 44px; height: 44px; object-fit: contain; filter: brightness(0) invert(1); }
-    }
-  }
-
   @media (max-width: 800px) {
-    &.withArt { grid-template-columns: minmax(0, 1fr); }
-    .artPanel { display: none; }
-
     .authContent {
       .authHeader { padding: 24px; }
       .authMain { padding: 32px 24px 96px; }
