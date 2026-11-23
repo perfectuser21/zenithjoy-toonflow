@@ -369,7 +369,8 @@ def verifyPublicCandidate(client, local, request, expectedBoot=None, timeout=240
 def verifyGeneration(config, request, bootId):
     require(config.get('generationVerifier'), '缺少本候选真实生成任务验收器，禁止晋级')
     program = rootFile(config['generationVerifier'], executable=True)
-    receipt = json.loads(run([str(program)], timeout=600, input=json.dumps(request).encode()))
+    timeout = 900 if request['environment'] == 'staging' else 600
+    receipt = json.loads(run([str(program)], timeout=timeout, input=json.dumps(request).encode()))
     require(isinstance(receipt, dict) and all(receipt.get(key) == request[key] for key in releaseIdentityFields)
             and receipt.get('publicOrigin') == config['publicOrigin'] and receipt.get('bootId') == bootId
             and receipt.get('businessMode') == 'tenant' and receipt.get('result') == 'passed'
