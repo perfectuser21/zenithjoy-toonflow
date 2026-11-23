@@ -6,12 +6,28 @@ publicOrigins = {
     'staging': 'https://aivideo-staging.zenjoymedia.media',
     'production': 'https://aivideo.zenithjoy.tech',
 }
+requiredBusinessJourneys = {
+    'staging': (
+        'ordinaryAccountLogin',
+        'canvasSaveReadback',
+        'crossAccountIsolation',
+        'trimOutputReadback',
+        'videoGenerationReadback',
+    ),
+    'production': (
+        'ordinaryAccountLogin',
+        'canvasSaveReadback',
+        'crossAccountIsolation',
+        'trimOutputReadback',
+        'mediaGenerationReadback',
+    ),
+}
 releaseIdentityFields = ('environment', 'sourceSha', 'image', 'runId', 'runAttempt')
 imagePattern = r'ghcr.io/perfectuser21/zenithjoy-toonflow@sha256:[a-f0-9]{64}'
 publicReceiptFields = (
     *releaseIdentityFields, 'publicOrigin', 'result', 'runningImage', 'bootId',
     'businessVerified', 'businessMode', 'trimVerified', 'generationVerified', 'generationMediaType',
-    'crossAccountIsolationVerified', 'frameAnalysisNodeSha256',
+    'crossAccountIsolationVerified', 'passedJourneys', 'frameAnalysisNodeSha256',
     'backupVerified', 'restoreVerified', 'quotaRestoreVerified', 'predecessorImage', 'backupId', 'transfer',
 )
 
@@ -23,6 +39,13 @@ def requireQuotaVolume(config):
 
 def matchesString(pattern, value):
     return isinstance(value, str) and re.fullmatch(pattern, value) is not None
+
+
+def validatePassedJourneys(passed, environment):
+    required = requiredBusinessJourneys[environment]
+    if (not isinstance(passed, list) or len(passed) != len(required)
+            or not all(isinstance(journey, str) for journey in passed) or set(passed) != set(required)):
+        raise RuntimeError('业务回执必须完整记录本环境已通过的验收旅程')
 
 
 def validateReceipt(receipt, request, environment):
@@ -46,6 +69,7 @@ def validateReceipt(receipt, request, environment):
             receipt['generationMediaType'] != 'video'
             or not matchesString('[a-f0-9]{64}', receipt.get('frameAnalysisNodeSha256'))):
         raise RuntimeError('香港验收缺少视频生成或逐帧拉片构建包证据')
+    validatePassedJourneys(receipt.get('passedJourneys'), environment)
     transfer = receipt.get('transfer')
     key = f"aivideoReleases/{request['sourceSha']}/{request['runId']}/{request['runAttempt']}/image.oci"
     if (not isinstance(transfer, dict) or set(transfer) != {'key', 'sha256', 'bytes'} or transfer['key'] != key

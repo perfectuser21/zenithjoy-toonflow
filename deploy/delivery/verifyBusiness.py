@@ -37,7 +37,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import unicodedata
-from releasePolicy import imagePattern, publicOrigins, releaseIdentityFields, requireQuotaVolume
+from releasePolicy import imagePattern, publicOrigins, releaseIdentityFields, requireQuotaVolume, validatePassedJourneys
 
 
 def require(condition, message):
@@ -395,6 +395,8 @@ def main():
     clients = [newPublicClient(config) for _ in accounts]
     for client, account in zip(clients, accounts):
         client.login(account)
+    passedJourneys = ['ordinaryAccountLogin']
+    for client, account in zip(clients, accounts):
         verifyNode(client, 'mashupNode', '批量混剪')
         _, seed = snapshot(client, account)
         require(seed.get('deliveryAcceptance') is True, '账号画布未明确标记为专用验收seed，禁止写入')
@@ -407,16 +409,23 @@ def main():
         fresh = newPublicClient(config)
         fresh.login(account)
         saveCanvas(client, fresh, account, request)
+    passedJourneys.append('canvasSaveReadback')
     fresh = newPublicClient(config)
     fresh.login(accounts[0])
     verifyTrim(clients[0], fresh, clients[1], accounts[0], config)
+    passedJourneys.append('trimOutputReadback')
     mediaType = verifyGeneration(config, request, bootId)
+    passedJourneys.append('videoGenerationReadback' if request['environment'] == 'staging' else 'mediaGenerationReadback')
+    # 画布、截取和生成均要求兄弟账号的访问请求被拒绝。
+    passedJourneys.append('crossAccountIsolation')
+    validatePassedJourneys(passedJourneys, request['environment'])
     require(verifyContainer(release, request, config['localOrigin']) == containerId, '业务验收期间候选容器变化')
     verifyPublicCandidate(fresh, local, request, bootId)
     receipt = {**{key: request[key] for key in releaseIdentityFields}, 'publicOrigin': config['publicOrigin'],
                'result': 'passed', 'businessVerified': True, 'runningImage': request['image'],
                'businessMode': 'tenant', 'trimVerified': True, 'generationVerified': True,
-               'generationMediaType': mediaType, 'bootId': bootId, 'crossAccountIsolationVerified': True}
+               'generationMediaType': mediaType, 'bootId': bootId, 'crossAccountIsolationVerified': True,
+               'passedJourneys': passedJourneys}
     if frameNodeDigest is not None:
         require(verifyFrameNode(fresh, containerId) == frameNodeDigest, '验收期间逐帧拉片构建包变化')
         receipt['frameAnalysisNodeSha256'] = frameNodeDigest

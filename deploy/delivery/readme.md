@@ -93,6 +93,8 @@ COS 中转由 CI 将固定 digest 的完整 OCI 归档上传至既有私有桶�
 
 成功回执包含五个身份字段、固定 `publicOrigin`、`runningImage`、候选进程 `bootId`、`businessMode=tenant`、业务及跨账号隔离和裁剪证明、实际生成媒体类型、配额卷备份恢复证明、`predecessorImage`、`backupId` 和 COS 对象元数据。香港还须出具实际生成视频和逐帧拉片构建包的 SHA-256。旧共享站回执无法晋级。回执禁止包含令牌、密码、签名链接或用户内容。
 
+回执的 `passedJourneys` 逐项记录已通过的发布验收。每次候选须重新跑齐 `releasePolicy.py` 中对应环境的旅程。现有 PR 回归对照本次 PR 的基线提交，检查两地已有旅程是否完整保留。逐帧拉片字段记录构建包 SHA-256。
+
 业务验收通过普通账号保存并读回专用画布，检查其他账号的访问请求被拒绝，实际触发截取和生成并读回产物。香港生成配置用 `generationRequest.mediaType=video`，产物须通过 ffprobe 的格式与时长校验。杭州可沿用已审定的图片、视频或音频配置。
 
 ## 收口条件
