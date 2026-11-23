@@ -8,6 +8,7 @@ import { normalizeNodeMenu, type StoredNodeMenuItem } from "@toonflow/server/nod
 import { nodeToolPermissionsSchema } from "@toonflow/tool-canvas/runtime";
 import type { ReasoningEfforts, ThinkingLevel } from "@toonflow/server/modelReasoning";
 import type { ProviderSources } from "@toonflow/server/channel";
+import { isBrowserWeb, webBrand } from "@/lib/branding";
 import http from "@/lib/http";
 import { currentUser, publicWeb } from "@/stores/multiTenant";
 import "element-plus/es/components/message/style/css";
@@ -47,7 +48,7 @@ export const settingsStorage = {
   },
 };
 
-export const defaultUiSettings = { theme: "dark", language: "system", primaryColor: "#409eff", fontScale: 100, mobileScale: 75, radius: 8, startupAnimation: true };
+export const defaultUiSettings = { theme: "dark", language: "system", primaryColor: isBrowserWeb ? webBrand.primaryColor : "#409eff", fontScale: 100, mobileScale: 75, radius: 8, startupAnimation: true };
 export const uiSettings = computed(() => {
   const raw = settings.value.ui;
   const ui = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};

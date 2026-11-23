@@ -1,11 +1,8 @@
 <template>
-  <div class="userWeb">
+  <div class="userWeb" :style="{ '--el-color-primary': brand.primaryColor }">
     <div class="authContent">
       <header class="authHeader">
-        <div class="brand">
-          <img class="brandLogo" :src="brand.logoUrl" alt="" />
-          <span class="brandName">{{ brand.name }}</span>
-        </div>
+        <img class="wordmark" :src="brand.wordmarkUrl" :alt="brand.name" width="2527" height="657" />
       </header>
       <main class="authMain">
         <section class="authPanel" aria-labelledby="authTitle">
@@ -45,7 +42,7 @@ import "element-plus/es/components/form/style/css";
 import "element-plus/es/components/form-item/style/css";
 import "element-plus/es/components/input/style/css";
 
-const props = defineProps<{ request: UserRequest; brand: { name: string; logoUrl: string }; registrationEnabled: boolean }>();
+const props = defineProps<{ request: UserRequest; brand: { name: string; wordmarkUrl: string; primaryColor: string }; registrationEnabled: boolean }>();
 const emit = defineEmits<{ authenticated: [user: UserIdentity] }>();
 const mode = ref<"login" | "register">("login");
 const userName = ref("");
@@ -128,61 +125,56 @@ onBeforeUnmount(() => {
 
 <style lang="scss" scoped>
 .userWeb {
+  --el-bg-color: #0f172a;
+  --el-fill-color-blank: rgb(255 255 255 / 5%);
+  --el-border-color: rgb(255 255 255 / 16%);
+  --el-border-color-hover: rgb(255 255 255 / 32%);
+  --el-text-color-primary: #fff;
+  --el-text-color-regular: #e2e8f0;
+  --el-color-primary-light-3: #3b82f6;
+  --el-color-primary-light-5: #60a5fa;
+  --el-color-primary-dark-2: #1d4ed8;
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  place-items: center;
   min-height: 100svh;
-  padding: 8px;
-  background: var(--el-bg-color);
+  padding: 24px 16px;
+  background: linear-gradient(135deg, #1e3a8a, #0f172a);
   color: var(--el-text-color-primary);
   font-family: var(--el-font-family), "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
 
   .authContent {
-    display: flex;
-    flex-direction: column;
+    width: min(100%, 448px);
     min-width: 0;
 
     .authHeader {
-      display: flex;
-      align-items: center;
-      padding: 28px clamp(24px, 4.4vw, 64px);
+      display: grid;
+      justify-items: center;
+      margin-bottom: 32px;
 
-      .brand {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-
-        .brandLogo { width: 30px; height: 30px; object-fit: contain; }
-        .brandName { font-size: 20px; font-weight: 600; line-height: 1.4; letter-spacing: -0.5px; }
-      }
+      .wordmark { display: block; width: min(100%, 200px); height: auto; }
     }
 
     .authMain {
-      display: flex;
-      flex: 1;
-      align-items: center;
-      justify-content: center;
-      min-width: 0;
-      padding: 40px clamp(24px, 4.4vw, 64px) 112px;
-
       .authPanel {
-        width: 100%;
-        max-width: 380px;
-        min-width: 0;
+        padding: clamp(20px, 7vw, 32px);
+        border: 1px solid rgb(255 255 255 / 10%);
+        border-radius: 24px;
+        background: rgb(255 255 255 / 5%);
+        box-shadow: 0 24px 48px rgb(0 0 0 / 24%);
 
         .panelHeader {
-          margin-bottom: 32px;
+          margin-bottom: 24px;
+          text-align: center;
 
-          h1 { margin: 0; font-size: 32px; font-weight: 650; line-height: 1.35; letter-spacing: -0.6px; overflow-wrap: anywhere; }
+          h1 { margin: 0; font-size: 24px; font-weight: 650; line-height: 1.35; }
         }
 
         .authForm {
-          width: 100%;
-
-          :deep(.el-form-item) { margin-bottom: 24px; }
+          :deep(.el-form-item) { margin-bottom: 20px; }
           :deep(.el-form-item__label) { height: auto; padding-bottom: 8px; color: var(--el-text-color-regular); font-weight: 500; line-height: 1.5; }
-          :deep(.el-input__wrapper) { min-height: 46px; padding: 1px 14px; }
+          :deep(.el-input__wrapper) { min-height: 46px; padding: 1px 14px; border-radius: 12px; }
           :deep(.el-input__inner) { height: 44px; line-height: 44px; }
-          :deep(.el-form-item__error) { position: static; padding-top: 6px; line-height: 1.5; overflow-wrap: anywhere; }
+          :deep(.el-form-item__error) { position: static; padding-top: 6px; color: #fca5a5; line-height: 1.5; overflow-wrap: anywhere; }
 
           .requestError {
             align-items: flex-start;
@@ -191,23 +183,17 @@ onBeforeUnmount(() => {
             :deep(.el-alert__title) { line-height: 1.5; overflow-wrap: anywhere; }
           }
 
-          .submitButton { width: 100%; min-height: 46px; margin-left: 0; font-weight: 600; }
+          .submitButton { width: 100%; min-height: 46px; margin-left: 0; border-radius: 12px; font-weight: 600; }
         }
 
         .accountSwitch {
-          margin-top: 24px;
+          margin-top: 16px;
           text-align: center;
 
-          .modeButton { min-height: 44px; margin-left: 0; padding: 10px 16px; white-space: normal; }
+          .modeButton { min-height: 44px; margin-left: 0; padding: 10px 16px; color: #93c5fd; white-space: normal; }
+          .modeButton:hover { color: #bfdbfe; }
         }
       }
-    }
-  }
-
-  @media (max-width: 800px) {
-    .authContent {
-      .authHeader { padding: 24px; }
-      .authMain { padding: 32px 24px 96px; }
     }
   }
 }
