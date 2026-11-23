@@ -243,7 +243,7 @@ def main():
             preflight = {'environment':request['environment'], 'sourceSha':request['sourceSha'],
                          'image':request['image'], 'result':'ready', 'deployed':False}
             if request['environment'] == 'production':
-                rootFile(config.get('productionCandidateConfig', ''), private=True)
+                rootJson(config.get('productionCandidateConfig', ''), private=True)
                 preflight['productionCandidateGate'] = True
             print(json.dumps(preflight))
             return

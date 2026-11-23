@@ -97,17 +97,21 @@ jobs:
               def test_verified_candidate_can_become_public(self):
                   self.assertEqual(self.release(candidate_passes=True), ('candidate', ['verified']))
 
-              def release(self, candidate_passes):
-                  with tempfile.TemporaryDirectory() as state:
-                      return self.drive_release(Path(state), candidate_passes)
+              def test_production_preflight_proves_gate_without_switching(self):
+                  self.assertEqual(self.release(candidate_passes=False, preflight=True), ('old', []))
 
-              def drive_release(self, state, candidate_passes):
+              def release(self, candidate_passes, preflight=False):
+                  with tempfile.TemporaryDirectory() as state:
+                      return self.drive_release(Path(state), candidate_passes, preflight)
+
+              def drive_release(self, state, candidate_passes, preflight):
                   (state / 'identity.json').write_text('{"environment":"production"}')
                   (state / 'quotaHelper').write_bytes(b'')
                   config = {
                       'environment': 'production', 'publicOrigin': releaseHost.publicOrigins['production'],
                       'stateDirectory': str(state), 'dataDirectory': '/live', 'container': 'public',
                       'service': 'public.service', 'businessConfig': '/business.json',
+                      'productionCandidateConfig': '/candidate.json',
                       'quotaHelper': str(state / 'quotaHelper'), 'quotaHelperSha256': hashlib.sha256(b'').hexdigest(),
                       'businessVerifier': 'verify', 'backupCommand': 'backup', 'restoreVerifier': 'restore',
                       'switchCommand': 'switch', 'readinessCommand': 'ready', 'stagingWitness': 'witness',
@@ -117,6 +121,9 @@ jobs:
                   request = {'environment': 'production', 'sourceSha': '1' * 40,
                              'image': 'ghcr.io/perfectuser21/zenithjoy-toonflow@sha256:' + 'a' * 64,
                              'runId': '42', 'runAttempt': '1', 'transfer': stage['transfer'], 'stagingReceipt': stage}
+                  if preflight:
+                      request.pop('transfer')
+                      request['operation'] = 'preflight'
                   public = 'old'
                   verification = []
 
@@ -148,21 +155,24 @@ jobs:
                               'generationRequest': {'mediaType': 'video', 'providerId': 'multiTenant', 'modelId': 'wan3.0-video-prime'}}
                   with patch.multiple(
                       releaseHost, configPath=state / 'release.json', run=run,
-                      rootFile=lambda path, **_: path, rootJson=lambda *_a, **_k: business,
+                      rootFile=lambda path, executable=False: path, rootJson=lambda *_a, **_k: business,
                       validateBusinessConfig=lambda *_: None, validateGenerationConfig=lambda *_: None,
-                      validateCosTransfer=lambda *_: None, validateReceipt=lambda *_: None, ensureImage=lambda *_: None,
+                      validateCosTransfer=lambda *_: None, validateCosIdentity=lambda *_: None,
+                      validateReceipt=lambda *_: None, ensureImage=lambda *_: None,
                       inspect=lambda *_: {'Id': public, 'Image': public, 'Config': {'Image': public},
                                          'State': {'Running': True}}, imageId=lambda *_: 'candidate',
                   ), patch.object(releaseHost, 'verifyProductionCandidate', candidate, create=True), patch.object(
                       releaseHost.os, 'geteuid', return_value=0
                   ), patch.object(releaseHost.sys, 'stdin', io.TextIOWrapper(io.BytesIO(json.dumps(request).encode()))), patch(
                       'sys.stdout', io.StringIO()
-                  ):
+                  ) as output:
                       try:
                           releaseHost.main()
                       except RuntimeError:
-                          if candidate_passes:
+                          if candidate_passes or preflight:
                               raise
+                      if preflight:
+                          self.assertTrue(json.loads(output.getvalue())['productionCandidateGate'])
                   self.assertEqual((state / '42-1.json').exists(), candidate_passes)
                   return public, verification
 
