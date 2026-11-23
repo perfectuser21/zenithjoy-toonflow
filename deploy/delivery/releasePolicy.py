@@ -30,7 +30,7 @@ imagePattern = r'ghcr.io/perfectuser21/zenithjoy-toonflow@sha256:[a-f0-9]{64}'
 publicReceiptFields = (
     *releaseIdentityFields, 'publicOrigin', 'result', 'runningImage', 'bootId',
     'businessVerified', 'businessMode', 'trimVerified', 'generationVerified', 'generationMediaType',
-    'crossAccountIsolationVerified', 'passedJourneys', 'frameAnalysisNodeSha256',
+    'crossAccountIsolationVerified', 'passedJourneys', 'frameAnalysisNodeSha256', 'generationProfile',
     'backupVerified', 'restoreVerified', 'quotaRestoreVerified', 'predecessorImage', 'backupId', 'transfer',
 )
 
@@ -49,6 +49,25 @@ def validatePassedJourneys(passed, environment):
     if (not isinstance(passed, list) or len(passed) != len(required)
             or not all(isinstance(journey, str) for journey in passed) or set(passed) != set(required)):
         raise RuntimeError('业务回执必须完整记录本环境已通过的验收旅程')
+
+
+generationProfileFields = ('mediaType', 'providerId', 'modelId')
+
+
+def generationProfile(business):
+    request = business.get('generationRequest')
+    if not isinstance(request, dict):
+        raise RuntimeError('缺少媒体生成验收配置')
+    return validateGenerationProfile({key: request.get(key) for key in generationProfileFields})
+
+
+def validateGenerationProfile(profile):
+    if (not isinstance(profile, dict) or set(profile) != set(generationProfileFields)
+            or profile['mediaType'] not in ('image', 'video', 'audio')
+            or not all(matchesString(r'[A-Za-z0-9_.:-]{1,200}', profile[key])
+                       for key in ('providerId', 'modelId'))):
+        raise RuntimeError('媒体生成验收模型合同无效')
+    return profile
 
 
 def validateReceipt(receipt, request, environment):
@@ -73,6 +92,8 @@ def validateReceipt(receipt, request, environment):
             or not matchesString('[a-f0-9]{64}', receipt.get('frameAnalysisNodeSha256'))):
         raise RuntimeError('香港验收缺少视频生成或逐帧拉片构建包证据')
     validatePassedJourneys(receipt.get('passedJourneys'), environment)
+    if validateGenerationProfile(receipt.get('generationProfile'))['mediaType'] != receipt['generationMediaType']:
+        raise RuntimeError('媒体生成验收回执类型与模型配置不匹配')
     transfer = receipt.get('transfer')
     key = f"aivideoReleases/{request['sourceSha']}/{request['runId']}/{request['runAttempt']}/image.oci"
     if (not isinstance(transfer, dict) or set(transfer) != {'key', 'sha256', 'bytes'} or transfer['key'] != key

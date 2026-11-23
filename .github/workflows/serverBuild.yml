@@ -74,6 +74,98 @@ jobs:
                   raise RuntimeError(f'{environment} required release journeys removed: {", ".join(missing)}')
           PY
           fi
+          python3 -B - <<'PY'
+          import hashlib
+          import io
+          import json
+          from pathlib import Path
+          import tempfile
+          import unittest
+          from unittest.mock import patch
+
+          import sys
+          sys.path.insert(0, 'deploy/delivery')
+          import releaseHost
+
+
+          class ProductionCutoverTest(unittest.TestCase):
+              def test_failed_candidate_leaves_public_incumbent_running(self):
+                  self.assertEqual(self.release(candidate_passes=False), ('old', []))
+
+              def test_verified_candidate_can_become_public(self):
+                  self.assertEqual(self.release(candidate_passes=True), ('candidate', ['verified']))
+
+              def release(self, candidate_passes):
+                  with tempfile.TemporaryDirectory() as state:
+                      return self.drive_release(Path(state), candidate_passes)
+
+              def drive_release(self, state, candidate_passes):
+                  (state / 'identity.json').write_text('{"environment":"production"}')
+                  (state / 'quotaHelper').write_bytes(b'')
+                  config = {
+                      'environment': 'production', 'publicOrigin': releaseHost.publicOrigins['production'],
+                      'stateDirectory': str(state), 'dataDirectory': '/live', 'container': 'public',
+                      'service': 'public.service', 'businessConfig': '/business.json',
+                      'quotaHelper': str(state / 'quotaHelper'), 'quotaHelperSha256': hashlib.sha256(b'').hexdigest(),
+                      'businessVerifier': 'verify', 'backupCommand': 'backup', 'restoreVerifier': 'restore',
+                      'switchCommand': 'switch', 'readinessCommand': 'ready', 'stagingWitness': 'witness',
+                  }
+                  (state / 'release.json').write_text(json.dumps(config))
+                  stage = {'transfer': {'key': 'object', 'sha256': 'a' * 64, 'bytes': 1}}
+                  request = {'environment': 'production', 'sourceSha': '1' * 40,
+                             'image': 'ghcr.io/perfectuser21/zenithjoy-toonflow@sha256:' + 'a' * 64,
+                             'runId': '42', 'runAttempt': '1', 'transfer': stage['transfer'], 'stagingReceipt': stage}
+                  public = 'old'
+                  verification = []
+
+                  def candidate(*_):
+                      if not candidate_passes:
+                          raise RuntimeError('production candidate generation failed')
+                      verification.append('verified')
+                      return {'bootId': 'candidate-boot'}
+
+                  def run(args, **_):
+                      nonlocal public
+                      if args[0] == 'witness':
+                          return json.dumps(stage)
+                      if args[0] == 'systemctl':
+                          return '/usr/bin/docker start -a public'
+                      if args[0] == 'docker':
+                          return json.dumps([{'Config': {'Labels': {'org.opencontainers.image.revision': request['sourceSha']}}}])
+                      if args[0] == 'backup':
+                          public = 'offline'
+                          return json.dumps({'backupVerified': True, 'restoreVerified': True,
+                                             'quotaRestoreVerified': True, 'backupId': '1'})
+                      if args[0] == 'switch':
+                          public = 'candidate'
+                      if args[0] == 'verify':
+                          return '{}'
+                      return ''
+
+                  business = {'environment': 'production', 'publicOrigin': config['publicOrigin'],
+                              'generationRequest': {'mediaType': 'video', 'providerId': 'multiTenant', 'modelId': 'wan3.0-video-prime'}}
+                  with patch.multiple(
+                      releaseHost, configPath=state / 'release.json', run=run,
+                      rootFile=lambda path, **_: path, rootJson=lambda *_a, **_k: business,
+                      validateBusinessConfig=lambda *_: None, validateGenerationConfig=lambda *_: None,
+                      validateCosTransfer=lambda *_: None, validateReceipt=lambda *_: None, ensureImage=lambda *_: None,
+                      inspect=lambda *_: {'Id': public, 'Image': public, 'Config': {'Image': public},
+                                         'State': {'Running': True}}, imageId=lambda *_: 'candidate',
+                  ), patch.object(releaseHost, 'verifyProductionCandidate', candidate, create=True), patch.object(
+                      releaseHost.os, 'geteuid', return_value=0
+                  ), patch.object(releaseHost.sys, 'stdin', io.TextIOWrapper(io.BytesIO(json.dumps(request).encode()))), patch(
+                      'sys.stdout', io.StringIO()
+                  ):
+                      try:
+                          releaseHost.main()
+                      except RuntimeError:
+                          if candidate_passes:
+                              raise
+                  self.assertEqual((state / '42-1.json').exists(), candidate_passes)
+                  return public, verification
+
+          unittest.main()
+          PY
           bun test apps/server/src/utils/plugins/trustedNodeInitialization.test.ts
       - name: Test simultaneous clip previews
         run: bun test apps/server/src/utils/media/trimReadQueue.test.ts

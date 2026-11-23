@@ -12,7 +12,8 @@ import sys
 import tempfile
 import time
 from imageTransfer import ensureImage, errorClass, validateCosTransfer, validateCosIdentity
-from releasePolicy import imagePattern, publicOrigins, publicReceipt, releaseIdentityFields, requireQuotaVolume, validateReceipt
+from productionCandidate import verifyProductionCandidate
+from releasePolicy import generationProfile, imagePattern, publicOrigins, publicReceipt, releaseIdentityFields, requireQuotaVolume, validateReceipt
 from verifyBusiness import (newPublicClient, publicClient, rootJson, validateBusinessConfig,
                             verifyContainer, verifyPublicCandidate)
 from verifyGeneration import validateGenerationConfig
@@ -112,10 +113,11 @@ def verifyTransaction(config, request, transaction, journal):
             and backup.get('quotaRestoreVerified') is True and backup.get('backupId'), '本事务缺少已验证的配额卷备份')
     running = inspect(config['container'])
     require(running['State']['Running'] and running['Image'] == imageId(request['image']), '待验收候选已改变')
+    profile = generationProfile(rootJson(config['businessConfig'], private=True))
     receipt = json.loads(run([config['businessVerifier']], input=json.dumps(request), timeout=1200))
     receipt.update(backupVerified=True, restoreVerified=True, quotaRestoreVerified=True,
                    backupId=backup['backupId'], predecessorImage=transaction['predecessorImage'],
-                   transfer=transaction['transfer'])
+                   transfer=transaction['transfer'], generationProfile=profile)
     validateReceipt(receipt, request, request['environment'])
     final = inspect(config['container'])
     require(final['State']['Running'] and final['Image'] == imageId(request['image']), '验收后容器停止或运行镜像改变')
@@ -255,6 +257,9 @@ def main():
         run([config['readinessCommand']], input=json.dumps(request), timeout=300)
         transaction = {'request': request, 'transfer':transferIdentity, 'phase':'preparing', 'predecessorId':current['Image'],
                        'predecessorImage':current['Config']['Image'], 'startedAt':time.time()}
+        if request['environment'] == 'production':
+            diagnosticPhase = 'production_candidate_verification'
+            transaction['candidateVerification'] = verifyProductionCandidate(config, request, current, inspect, run)
         diagnosticPhase = 'transaction'
         atomicJson(journal, transaction)
         # 备份成功后持续停写直到切换，避免回退备份遗漏期间的新数据。
