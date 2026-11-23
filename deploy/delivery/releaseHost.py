@@ -12,12 +12,12 @@ import sys
 import tempfile
 import time
 from imageTransfer import ensureImage, errorClass, validateCosTransfer, validateCosIdentity
-from backupShared import sharedDirectories
-from verifyBusiness import rootJson
+from releasePolicy import imagePattern, publicOrigins, publicReceipt, releaseIdentityFields, requireQuotaVolume, validateReceipt
+from verifyBusiness import (newPublicClient, publicClient, rootJson, validateBusinessConfig,
+                            verifyContainer, verifyPublicCandidate)
+from verifyGeneration import validateGenerationConfig
 
 configPath = Path('/etc/aivideo/release.json')
-publicOrigins = {'staging':'https://toonflow.zenjoymedia.media','production':'https://aivideo.zenithjoy.tech'}
-imagePattern = r'ghcr.io/perfectuser21/zenithjoy-toonflow@sha256:[a-f0-9]{64}'
 diagnosticPath = None
 diagnosticPhase = 'preflight'
 
@@ -105,33 +105,23 @@ def imageId(image):
     return json.loads(run(['docker', 'image', 'inspect', image]))[0]['Id']
 
 
-def validateReceipt(receipt, request, environment):
-    for key in ('sourceSha', 'image', 'runId', 'runAttempt'):
-        require(receipt.get(key) == request[key], '验收版本身份不匹配')
-    require(receipt.get('publicOrigin') == publicOrigins[environment], '验收入口不是已指定的员工站或正式站')
-    require(receipt.get('environment') == environment and receipt.get('result') == 'passed'
-            and receipt.get('businessVerified') is True and receipt.get('runningImage') == request['image'],
-            '业务验收未通过')
-
-
 def verifyTransaction(config, request, transaction, journal):
     rootFile(config['businessVerifier'], executable=True)
     backup = transaction['backup']
     require(backup.get('backupVerified') is True and backup.get('restoreVerified') is True
-            and backup.get('backupId'), '本事务缺少已验证的备份')
+            and backup.get('quotaRestoreVerified') is True and backup.get('backupId'), '本事务缺少已验证的配额卷备份')
     running = inspect(config['container'])
     require(running['State']['Running'] and running['Image'] == imageId(request['image']), '待验收候选已改变')
     receipt = json.loads(run([config['businessVerifier']], input=json.dumps(request), timeout=1200))
+    receipt.update(backupVerified=True, restoreVerified=True, quotaRestoreVerified=True,
+                   backupId=backup['backupId'], predecessorImage=transaction['predecessorImage'],
+                   transfer=transaction['transfer'])
     validateReceipt(receipt, request, request['environment'])
     final = inspect(config['container'])
     require(final['State']['Running'] and final['Image'] == imageId(request['image']), '验收后容器停止或运行镜像改变')
-    receipt.update(backupVerified=True, restoreVerified=True, backupId=backup['backupId'],
-                   predecessorImage=transaction['predecessorImage'])
-    if 'transfer' in transaction:
-        receipt['transfer'] = transaction['transfer']
     transaction.update(phase='completed', receipt=receipt)
     atomicJson(journal, transaction)
-    print(json.dumps(receipt))
+    print(json.dumps(publicReceipt(receipt)))
 
 
 def main():
@@ -143,9 +133,10 @@ def main():
     require(len(raw) <= 32768, '请求过大')
     request = json.loads(raw)
     transfer = request.pop('transfer', None)
-    required = {'environment', 'sourceSha', 'image', 'runId', 'runAttempt'}
+    required = set(releaseIdentityFields)
     require(set(request) <= required | {'stagingReceipt', 'operation'} and required <= set(request), '请求字段不合法')
-    require(request['environment'] == config['environment'], '主机环境不匹配')
+    require(request['environment'] in publicOrigins and request['environment'] == config['environment'], '主机环境不匹配')
+    requireQuotaVolume(config)
     require(config.get('publicOrigin') == publicOrigins[request['environment']], '主机发布入口配置不匹配')
     require(re.fullmatch(r'[a-f0-9]{40}', request['sourceSha']) is not None, '源码版本不合法')
     require(re.fullmatch(imagePattern, request['image']) is not None, '镜像必须为固定 digest')
@@ -191,8 +182,8 @@ def main():
                     witness = rootFile(config['stagingWitness'], executable=True)
                     authoritative = json.loads(run([witness], input=json.dumps(request)))
                     validateReceipt(authoritative, request, 'staging')
-                    require(authoritative.get('transfer') == previous.get('transfer')
-                            and request['stagingReceipt'].get('transfer') == previous.get('transfer'), 'COS对象身份不匹配')
+                    require(authoritative['transfer'] == previous['transfer'], 'COS对象身份不匹配')
+                    require(publicReceipt(authoritative) == publicReceipt(request['stagingReceipt']), '香港回执与只读见证不一致')
                 previous['verificationResumedAt'] = time.time()
                 atomicJson(journal, previous)
                 verifyTransaction(config, request, previous, journal)
@@ -204,30 +195,37 @@ def main():
                 require(previous['request'] == request, '相同发布编号的请求发生变化')
                 require(previous.get('transfer') == transferIdentity, '相同发布编号的COS对象发生变化')
             require(previous.get('phase') == 'completed', '上次发布结果未知，需要读取事务后人工处理')
-            running = inspect(config['container'])
-            require(running['State']['Running'] and running['Image'] == imageId(request['image']), '历史回执与当前运行版本不一致')
-            print(json.dumps(previous['receipt']))
+            receipt = previous['receipt']
+            validateReceipt(receipt, request, request['environment'])
+            if operation == 'receipt' and request['environment'] == 'staging':
+                business = rootJson(config['businessConfig'], private=True)
+                require(business.get('environment') == 'staging' and business.get('publicOrigin') == publicOrigins['staging']
+                        and business.get('businessMode') == 'tenant', '香港见证配置与当前客户服务不一致')
+                verifyContainer(config, request, business['localOrigin'])
+                local = publicClient(business['localOrigin'].rstrip('/'))
+                verifyPublicCandidate(newPublicClient(business), local, request, receipt['bootId'], timeout=10)
+            else:
+                running = inspect(config['container'])
+                require(running['State']['Running'] and running['Image'] == imageId(request['image']), '历史回执与当前运行版本不一致')
+            print(json.dumps(publicReceipt(receipt)))
             return
         require(operation not in ('receipt', 'verify'), '对应发布事务不存在')
-        shared = config.get('dataMode') == 'sharedDirectory'
-        require(config.get('dataMode', 'quotaVolume') in ('quotaVolume', 'sharedDirectory'), '数据模式不合法')
-        if shared:
-            # 旧员工共享站保留原目录，仅 staging 允许；正式站仍必须使用配额卷。
-            sharedDirectories(config, rootJson(config['businessConfig'], private=True))
-        else:
-            # 配额 helper 是宿主组件，不随应用镜像隐式升级。
-            helper = Path(rootFile(config['quotaHelper']))
-            require(hashlib.sha256(helper.read_bytes()).hexdigest() == config['quotaHelperSha256'], '配额 helper 版本变化')
+        business = rootJson(config['businessConfig'], private=True)
+        require(business.get('environment') == request['environment'] and business.get('publicOrigin') == config['publicOrigin'],
+                '业务验收配置不属于本环境')
+        validateBusinessConfig(business)
+        validateGenerationConfig(business)
+        # 配额 helper 是宿主组件，不随应用镜像隐式升级。
+        helper = Path(rootFile(config['quotaHelper']))
+        require(hashlib.sha256(helper.read_bytes()).hexdigest() == config['quotaHelperSha256'], '配额 helper 版本变化')
         rootFile(config['businessVerifier'], executable=True)
         rootFile(config['backupCommand'], executable=True)
-        if not shared:
-            rootFile(config['restoreVerifier'], executable=True)
+        rootFile(config['restoreVerifier'], executable=True)
         rootFile(config['switchCommand'], executable=True)
         rootFile(config['readinessCommand'], executable=True)
         current = inspect(config['container'])
         require(current['State']['Running'] is True, '当前应用未运行')
-        if not shared:
-            run(['mountpoint', '-q', config['dataDirectory']])
+        run(['mountpoint', '-q', config['dataDirectory']])
         if request['environment'] == 'production':
             validateReceipt(request.get('stagingReceipt', {}), request, 'staging')
             require(request['stagingReceipt'].get('transfer') == transferIdentity, 'COS对象身份不匹配')
@@ -235,7 +233,7 @@ def main():
             witness = rootFile(config['stagingWitness'], executable=True)
             authoritative = json.loads(run([witness], input=json.dumps(request)))
             validateReceipt(authoritative, request, 'staging')
-            require(authoritative.get('transfer') == transferIdentity, 'COS对象身份不匹配')
+            require(publicReceipt(authoritative) == publicReceipt(request['stagingReceipt']), '香港回执与只读见证不一致')
         execution = run(['systemctl', 'show', config['service'], '--property=ExecStart', '--value'])
         require('/usr/bin/docker start -a ' + config['container'] in execution, '服务尚未接入固定容器启动模式')
         # preflight 无拉取、停机、创建事务或写入业务数据。
@@ -262,7 +260,7 @@ def main():
         # 备份成功后持续停写直到切换，避免回退备份遗漏期间的新数据。
         backup = json.loads(run([config['backupCommand']], input=json.dumps(request), timeout=900))
         require(backup.get('backupVerified') is True and backup.get('restoreVerified') is True
-                and backup.get('backupId'), '完整备份恢复验证未通过')
+                and backup.get('quotaRestoreVerified') is True and backup.get('backupId'), '完整配额卷备份恢复验证未通过')
         transaction.update(phase='backupVerified', backup=backup)
         atomicJson(journal, transaction)
         transaction['phase'] = 'switching'

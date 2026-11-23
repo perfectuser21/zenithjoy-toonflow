@@ -4,7 +4,7 @@
 复用同目录root安装的verifyBusiness.py。businessConfig增加：
 generationRequest：generate API扁平请求（directory/mediaType/providerId/modelId/
 prompt及该媒体类型已有schema可选项），不允许taskId/nodeId/canvasPath。
-directory必须等于sharedWorkspace.directory或tenant首个专用账号directory。
+directory必须等于首个普通验收账号的工作区。staging必须生成视频。
 generationExpected：fileCount（1至4）、timeoutSeconds（1至420）、
 pollSeconds（1至30）；video/audio另必填minDuration/maxDuration。
 模型及供应商由root配置明确选择，不内置默认模型或假供应商。
@@ -28,6 +28,7 @@ import time
 import uuid
 
 sys.dont_write_bytecode = True
+from releasePolicy import imagePattern, publicOrigins, releaseIdentityFields, requireQuotaVolume
 from verifyBusiness import (newPublicClient, publicClient, relativeFile, require,
                             rootJson, run, validateBusinessConfig, verifyContainer, verifyPublicCandidate)
 
@@ -78,15 +79,14 @@ def inspectArtifact(content, mediaType, expected):
 def validateGenerationConfig(config):
     """只读校验生成请求和产物合同；不调用HTTP、不提交任务、不写文件。"""
     require(isinstance(config, dict), '生成验收配置必须为对象')
-    mode = config.get('businessMode')
-    require(config.get('environment') in ('staging', 'production') and mode in ('tenant', 'shared')
-            and (mode == 'tenant' or config.get('environment') == 'staging'),
-            '生产生成验收必须使用tenant模式')
+    require(config.get('environment') in publicOrigins and config.get('businessMode') == 'tenant',
+            '生成验收必须使用普通账号tenant模式')
     configured = config.get('generationRequest')
     require(isinstance(configured, dict), '缺少实际生成请求配置')
     payload = dict(configured)
     mediaType = payload.get('mediaType')
     require(mediaType in ('image', 'video', 'audio'), '实际生成媒体类型非法')
+    require(config['environment'] != 'staging' or mediaType == 'video', '香港验收必须生成视频')
     common = {'directory', 'mediaType', 'providerId', 'modelId', 'prompt', 'other', 'outputDirectory', 'images'}
     optional = {'image': {'ratio', 'size'},
                 'video': {'ratio', 'referenceOrder', 'videos', 'audios', 'firstFrame', 'lastFrame',
@@ -99,8 +99,8 @@ def validateGenerationConfig(config):
             and isinstance(payload['prompt'], str) and 1 <= len(payload['prompt'].strip()) <= 100000,
             '必须明确配置实际供应商、模型及提示词')
     accounts = config.get('accounts')
-    require(mode == 'shared' or isinstance(accounts, list) and len(accounts) == 2, '生成验收缺少固定专用账号')
-    workspace = config.get('sharedWorkspace') if mode == 'shared' else accounts[0]
+    require(isinstance(accounts, list) and len(accounts) == 2, '生成验收缺少固定专用账号')
+    workspace = accounts[0]
     require(isinstance(workspace, dict) and isinstance(payload['directory'], str)
             and 1 <= len(payload['directory']) <= 4096 and PurePosixPath(payload['directory']).is_absolute()
             and '..' not in payload['directory'].split('/') and '\\' not in payload['directory']
@@ -185,14 +185,13 @@ def main():
     raw = sys.stdin.buffer.read(32769)
     require(len(raw) <= 32768, '请求过大')
     request = json.loads(raw)
-    fields = {'environment', 'sourceSha', 'image', 'runId', 'runAttempt'}
+    fields = set(releaseIdentityFields)
     require(fields <= set(request) <= fields | {'operation', 'stagingReceipt'}, '生成验收版本请求字段非法')
-    origins = {'staging': 'https://toonflow.zenjoymedia.media', 'production': 'https://aivideo.zenithjoy.tech'}
-    require(request['environment'] in origins and request['environment'] == release['environment']
-            and release['publicOrigin'] == origins[request['environment']], '生成验收环境或公网入口不匹配')
+    require(request['environment'] in publicOrigins and request['environment'] == release['environment']
+            and release['publicOrigin'] == publicOrigins[request['environment']], '生成验收环境或公网入口不匹配')
+    requireQuotaVolume(release)
     require(isinstance(request['sourceSha'], str) and re.fullmatch('[a-f0-9]{40}', request['sourceSha'])
-            and isinstance(request['image'], str) and re.fullmatch(
-                r'ghcr.io/perfectuser21/zenithjoy-toonflow@sha256:[a-f0-9]{64}', request['image']), '生成验收候选非法')
+            and isinstance(request['image'], str) and re.fullmatch(imagePattern, request['image']), '生成验收候选非法')
     require(all(isinstance(request[key], str) and re.fullmatch('[1-9][0-9]{0,19}', request[key])
                 for key in ('runId', 'runAttempt')), '生成验收发布编号非法')
     config = rootJson(release['businessConfig'], private=True)
@@ -200,7 +199,6 @@ def main():
             '生成验收配置不属于本环境')
     validateBusinessConfig(config)
     payload, expected, workspace = validateGenerationConfig(config)
-    mode = config['businessMode']
     mediaType = payload['mediaType']
     verifyContainer(release, request, config['localOrigin'])
     client = newPublicClient(config)
@@ -214,8 +212,9 @@ def main():
             and isinstance(publicIdentity.get('capabilities'), dict)
             and publicIdentity['capabilities'].get('mediaTaskReadOnly') is True,
             '公网/本机候选缺少真实只读任务状态能力，拒绝提交生成')
-    if mode == 'tenant':
-        client.login(workspace)
+    client.login(workspace)
+    other = newPublicClient(config)
+    other.login(config['accounts'][1])
     # root账本与主发布事务共用受保护目录；原子独占创建杜绝相同run再次提交。
     state = Path(release['stateDirectory'])
     identity = rootJson(state / 'identity.json')
@@ -235,13 +234,13 @@ def main():
     transaction.update(phase='submitted', submittedAt=time.time())
     durableJson(journal, transaction)
     deadline = time.monotonic() + expected['timeoutSeconds']
+    statusRequest = {'directory': payload['directory'], 'taskIds': [taskId],
+                     'resume': False, 'readOnly': True}
     while True:
         require(time.monotonic() < deadline, '生成等待超时，保留原taskId待核对')
         verifyContainer(release, request, config['localOrigin'])
         verifyPublicCandidate(client, local, request, bootId)
-        statuses = client.request('POST', '/api/ai/media/tasks/status',
-                                  body={'directory': payload['directory'], 'taskIds': [taskId],
-                                        'resume': False, 'readOnly': True})
+        statuses = client.request('POST', '/api/ai/media/tasks/status', body=statusRequest)
         require(isinstance(statuses, list) and len(statuses) == 1 and statuses[0].get('taskId') == taskId,
                 '生成状态回执身份不匹配')
         status = statuses[0]
@@ -256,8 +255,8 @@ def main():
     transaction.update(phase='generated', generatedAt=time.time())
     durableJson(journal, transaction)
     fresh = newPublicClient(config)
-    if mode == 'tenant':
-        fresh.login(workspace)
+    fresh.login(workspace)
+    other.request('POST', '/api/ai/media/tasks/status', body=statusRequest, expected=403)
     artifacts = []
     for file in files:
         require(isinstance(file, dict) and file.get('mediaType') == mediaType
@@ -269,13 +268,14 @@ def main():
         persisted = fresh.request('GET', '/api/workspaces/files/read', query, raw=True, limit=128 * 1024 * 1024)
         digest = hashlib.sha256(content).hexdigest()
         require(content and digest == hashlib.sha256(persisted).hexdigest(), '新会话生成产物持久化读回不同')
+        other.request('GET', '/api/workspaces/files/read', query, raw=True, expected=403)
         inspectArtifact(persisted, mediaType, expected)
         artifacts.append({'sha256': digest, 'bytes': len(content), 'mediaType': mediaType})
     verifyContainer(release, request, config['localOrigin'])
     verifyPublicCandidate(fresh, local, request, bootId)
     receipt = {**{key: request[key] for key in fields}, 'publicOrigin': config['publicOrigin'],
                'result': 'passed', 'generationVerified': True, 'taskId': taskId,
-               'businessMode': mode, 'bootId': bootId, 'artifacts': artifacts}
+               'businessMode': 'tenant', 'generationMediaType': mediaType, 'bootId': bootId, 'artifacts': artifacts}
     transaction.update(phase='completed', receipt=receipt, completedAt=time.time())
     durableJson(journal, transaction)
     print(json.dumps(receipt))

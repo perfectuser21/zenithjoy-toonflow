@@ -16,6 +16,7 @@ on:
       - '.dockerignore'
       - 'deploy/**'
       - '.github/workflows/candidateImage.yml'
+      - '.github/workflows/canvasDelivery.yml'
       - '!apps/**/*.test.ts'
       - '!packages/**/*.test.ts'
   workflow_dispatch:
@@ -68,7 +69,7 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/cos-venv"
           "$RUNNER_TEMP/cos-venv/bin/pip" install setuptools==80.9.0 wheel==0.45.1
           "$RUNNER_TEMP/cos-venv/bin/pip" install --no-build-isolation -r deploy/delivery/cosRequirements.txt
-      - name: Deploy and verify Hong Kong staging
+      - name: Deploy and verify Hong Kong customer staging
         id: deploy
         env:
           RELEASE_HOST: ${{ vars.CANVAS_RELEASE_HOST }}
@@ -128,15 +129,26 @@ jobs:
           source=$(jq -er '.head_sha' <<< "$run")
           gh run download "$STAGING_RUN" --repo "$GITHUB_REPOSITORY" --name "staging-release-$attempt" --dir "$RUNNER_TEMP/approved-staging"
           receipt="$RUNNER_TEMP/approved-staging/releaseReceipt.json"
-          jq -e --arg run "$STAGING_RUN" --arg attempt "$attempt" --arg source "$source" '
-            .environment == "staging" and .runId == $run and .runAttempt == $attempt and
-            .sourceSha == $source and .result == "passed" and .businessVerified == true and
-            .runningImage == .image and
-            .transfer.key == "aivideoReleases/\($source)/\($run)/\($attempt)/image.oci"
-          ' "$receipt" > /dev/null
-          jq -r '"image=\(.image)", "source=\(.sourceSha)", "archive_key=\(.transfer.key)",
-            "archive_sha256=\(.transfer.sha256)", "archive_bytes=\(.transfer.bytes)"' "$receipt" >> "$GITHUB_OUTPUT"
-          echo "receipt=$(jq -c . "$receipt")" >> "$GITHUB_OUTPUT"
+          PYTHONPATH=deploy/delivery python3 -B - "$receipt" "$source" "$STAGING_RUN" "$attempt" <<'PY'
+          import json, os, sys
+          from releasePolicy import publicReceipt, validateReceipt
+
+          path, source, run, attempt = sys.argv[1:]
+          with open(path) as receiptFile:
+              receipt = json.load(receiptFile)
+          request = {'sourceSha': source, 'runId': run, 'runAttempt': attempt, 'image': receipt['image']}
+          validateReceipt(receipt, request, 'staging')
+          transfer = receipt['transfer']
+          if transfer['bytes'] > 768 * 1024 * 1024:
+              raise RuntimeError('staging COS archive exceeds release limit')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              print('image=' + receipt['image'], file=output)
+              print('source=' + source, file=output)
+              print('archive_key=' + transfer['key'], file=output)
+              print('archive_sha256=' + transfer['sha256'], file=output)
+              print('archive_bytes=' + str(transfer['bytes']), file=output)
+              print('receipt=' + json.dumps(publicReceipt(receipt), separators=(',', ':')), file=output)
+          PY
       - name: Install COS signing SDK
         run: |
           python3 -m venv "$RUNNER_TEMP/cos-venv"

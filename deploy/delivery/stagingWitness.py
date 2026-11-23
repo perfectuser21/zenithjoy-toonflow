@@ -7,6 +7,7 @@ import re
 import stat
 import subprocess
 import sys
+from releasePolicy import publicReceipt, releaseIdentityFields, validateReceipt
 
 
 def privateFile(name):
@@ -21,7 +22,7 @@ def privateFile(name):
 
 
 def witnessPayload(request, operation='receipt'):
-    payload={key:request[key] for key in ('sourceSha','image','runId','runAttempt')}
+    payload={key:request[key] for key in releaseIdentityFields[1:]}
     payload.update(environment='staging',operation=operation)
     return payload
 
@@ -53,14 +54,8 @@ def main():
                           text=True,check=True,timeout=45,
                           env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LANG':'C.UTF-8'})
     receipt=json.loads(result.stdout)
-    for key in ('environment','sourceSha','image','runId','runAttempt'):
-        if receipt.get(key)!=payload[key]:
-            raise RuntimeError('staging witness identity mismatch')
-    if receipt.get('publicOrigin')!='https://toonflow.zenjoymedia.media':
-        raise RuntimeError('witness refers to a different staging entry')
-    if receipt.get('result')!='passed' or receipt.get('businessVerified') is not True or receipt.get('runningImage')!=payload['image']:
-        raise RuntimeError('staging witness not passed')
-    print(json.dumps(receipt))
+    validateReceipt(receipt,payload,'staging')
+    print(json.dumps(publicReceipt(receipt)))
 
 
 if __name__=='__main__':

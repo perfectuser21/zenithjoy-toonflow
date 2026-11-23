@@ -2,55 +2,53 @@
 
 目标：Mac 研发 → PR CI → master 构建不可变镜像 → 香港唯一 staging → 同一镜像杭州唯一 production。
 
-固定员工入口为香港 `https://toonflow.zenjoymedia.media`，正式入口为杭州 `https://aivideo.zenithjoy.tech`。隔离的c001回环实例不代表员工入口验收通过。配置及发布回执必须包含匹配的publicOrigin；真实业务验收器须验证该公网入口对应本候选。
+香港 staging 的唯一公网入口是 `https://aivideo-staging.zenjoymedia.media`。杭州 production 的公网入口是 `https://aivideo.zenithjoy.tech`。按 `releasePolicy.py` 设置主机和业务验收配置的 `publicOrigin`。真实验收会核对公网与回环是否连接同一候选进程。
 
-同一发布版本不意味着两个环境共享数据库或素材。staging和production数据保持隔离；员工在旧香港站积累的业务内容需要单独核对迁移，发布流程不默认复制、覆盖或删除它们。员工香港站目前是systemd直接启动Bun，且数据仍是普通目录；本目录当前的容器/独立ext4配额卷执行器不能直接部署到员工站。要先完成保留数据的迁移演练及入口切换，再接入CD。
-
-当前交付包括编排和主机执行器代码，**尚未完成员工入口切换及真实发布验收**。仓库变量 `CANVAS_DELIVERY_ENABLED=false`，因此自动发布不启动。只有下列主机接入及真实演练通过后才能设为 `true`。不能通过人工写入 passed 回执启用。
+两地各用独立数据和 ext4 项目配额卷。旧香港员工共享站的数据另行保留并核对迁移。旧共享目录备份独立于 Canvas 发布链。香港完成所需存储、账号、裁剪服务和公网配置并通过真实演练后，才能启用 `CANVAS_DELIVERY_ENABLED`。
 
 ## 已实现的仓库入口
 
 - `serverBuild.yml`：画布网页、所有应用、插件、依赖锁、Dockerfile 和发布入口变更触发现有完整构建，包含前端；超时 30 分钟。
 - `candidateImage.yml`：保留手动构建，同时允许 delivery 调用并返回 GHCR 不可变 digest。
 - `canvasDelivery.yml`：master 自动触发；同一发布锁串行、进行中的发布不取消；staging 成功后 production 才能启动；生产不重新构建镜像。
-- `remoteRelease.sh`：固定 SSH 主机密钥、专用 SSH 身份、请求经 stdin；校验当前 run/attempt、源码 SHA、镜像 digest、实际运行镜像及业务验收回执；生产额外要求备份、恢复、前驱与备份编号。缺项、SSH 断线、未知结果均失败。
+- `remoteRelease.sh`：固定 SSH 主机密钥、专用 SSH 身份、请求经 stdin；校验 run/attempt、源码 SHA、固定镜像 digest、普通账号业务验收及配额卷备份恢复。缺项、SSH 断线、未知结果均失败。
 
 镜像传输失败时保留本次已接收 OCI 和 root 私有阶段诊断；启动时遇到已有 `imageTransfer*` 临时目录即拒绝新传输，由运维先读回身份、空间和事务后处理，不能自动删除未知结果。启动时保留至少两个归档上限加 1 GiB 空间；最终归档与加载后读回归档各有独立上限。归档验证后通过 Docker Engine `image load` 加载，与此前人工 898 导入使用的入口一致，再完整导出读回验证；这不说明之前失败的根因已确定。本机缓存导出或校验失败只是缓存未命中，其不完整缓存文件会删除；随后从 COS 接收的归档失败时保留。香港见证只提供验收回执。
 
-## 尚未实现、禁止假定存在的主机能力
+## 主机接入条件
 
-两地主机目前均缺少 `/usr/local/sbin/aivideo-release`。本目录现在包含控制器 `releaseHost.py`、完整卷备份 `backupVolume.py`、容器切换 `switchContainer.py`、配额恢复 `restoreVolume.py` 和准入检查 `releaseReadiness.py` 的实现，尚未安装或演练；语法检查不能代替运行验收。
+安装固定发布入口 `/usr/local/sbin/aivideo-release`。专用 SSH key 的 forced-command 仅调用该入口，禁用任意 shell、端口转发和 PTY。执行器独立核对主机环境、源码标签、镜像 digest、香港回执和前驱镜像。
 
-该程序必须由 root 安装并保持不可被发布账号修改，专用 SSH key 通过 forced-command 仅调用它，禁止任意 shell、端口转发和 PTY。执行器须独立校验机器环境、源码标签、digest、香港验收来源与生产前驱。不能信任请求中的 passed 字段。
+香港：将 CI staging 环境指向新公网入口对应的客户服务，验收使用同一实例和同一配额卷。设定固定容器启动方式，核对持久挂载、备份容量、配额 helper 和裁剪 worker、store。提供两个不同普通账号、专用画布和截取源，以及可实际生成视频的模型配置。
 
-香港：只替换当前 staging 的镜像，保留独立配额卷、权限、端口与配额 helper。不得连接杭州生产凭据或启动未经核验的 worker 恢复逻辑。
-
-杭州：目前 systemd 启动预建容器，必须先实现保留原容器配置与镜像的事务切换；停止写入后完整备份工作区、数据库及项目配额登记和扩展属性，在隔离环境完成恢复验证；切换后做真实业务读回。失败须区分尚未切换与已产生新写入，禁止盲目还原覆盖用户新数据。镜像已拉取不等于发布成功。
+杭州：演练保留原容器配置与镜像的事务切换。停止写入后完整备份工作区、数据库、项目配额登记和扩展属性，在隔离环境验证恢复。切换后核验真实业务，失败时按事务记录判断候选是否已产生新写入。
 
 ## 主机执行器接入
 
-由运维在独立审查和香港演练通过后安装到 `/opt/aivideo/delivery/`，文件及父目录 root 所有、不可由发布账号写入。`/usr/local/sbin/aivideo-release` 必须是固定 root wrapper，清空不必要环境后执行 `releaseHost.py`，不接受任意 shell 命令。
+将本目录的主机执行器及依赖（包括 `releasePolicy.py`）配套安装到 `/opt/aivideo/delivery/`。文件及父目录必须由 root 所有，发布账号不可写。`/usr/local/sbin/aivideo-release` 必须是固定 root wrapper，清空不必要环境后执行 `releaseHost.py`，不接受任意 shell 命令。
 
 `/etc/aivideo/release.json` 的路径字段均为 root 维护的固定绝对路径：
 
 | 字段 | 用途 |
 | --- | --- |
-| publicOrigin | 员工staging或production的固定公网入口 |
+| publicOrigin | `releasePolicy.py` 中环境对应的固定公网入口 |
 | environment | staging 或 production，绑定本机 |
+| dataMode | `quotaVolume`，缺省同值 |
 | stateDirectory | root 私有事务目录，内有 identity.json 的 environment |
 | container / service / quotaService | 当前应用容器、应用 unit、配额 helper unit |
 | dataDirectory / volumeImage | 挂载点及其 loop ext4 原始镜像；备份时核对二者关系 |
 | backupDirectory | root 私有备份目录，禁止发布账号写入 |
 | backupCapsuleBytes | root显式配置的备份胶囊硬容量，256MiB至64GiB；实分配后仍留宿主1GiB |
 | quotaHelper / quotaHelperSha256 | 固定配额 helper 及审定哈希 |
+| trimRuntimeManifest / trimArtifactDirectory | 宿主裁剪运行组件及固定哈希清单，组件须与候选一致 |
 | backupCommand / switchCommand | 审定安装的上述两个程序 |
 | readinessCommand | 安装 releaseReadiness.py：只读核对服务、挂载、空间和所需验收入口 |
 | restoreVerifier | 安装 restoreVolume.py：克隆卷配额与降权EDQUOT验收 |
 | requiredBackupPaths / minimumBackupDatabases | 必需数据路径与最少数据库数；备份缺项拒绝 |
-| businessVerifier | verifyBusiness.py：真实公网与本机版本一致、保存读回、截取、生成；尚未安装运行 |
-| businessConfig | root 私有业务验收配置；专用验收画布需 deliveryAcceptance 标记 |
+| businessVerifier | 使用 `verifyBusiness.py`，核对候选、隔离、保存读回、裁剪和生成 |
+| businessConfig | root 私有配置，使用 `businessMode=tenant`。配置两个普通账号和有 `deliveryAcceptance=true` 标记的画布，以及真实裁剪和生成参数 |
 | applicationDataDirectory / containerDataDirectory | 可选的卷内应用目录及容器挂载目标，迁移员工站时保留原绝对路径 |
-| stagingWitness | 安装 stagingWitness.py，生产独立取回香港可信验收；主机尚未配置 |
+| stagingWitness | 使用 `stagingWitness.py`，杭州独立读取香港的可信回执 |
 | expectedQuotaKiB / expectedQuotaInodes | 本次配置的已审定限额，当前账号为5242880KiB与100000个inode |
 | serviceUid / serviceGid | 恢复副本上非特权配额探针的UID/GID，必须大于零 |
 | containerCreateArgs | root 固定的容器配置，不接受来自 CI 的挂载或权限参数 |
@@ -61,7 +59,7 @@
 
 备份采用root显式配置的 `backupCapsuleBytes` 硬容量胶囊：宿主ext4/4KiB块上先完整预分配，并在nodiscard格式化后再次预分配、fsync和核对；宿主保留至少1GiB。原始卷完整扫描只用于估算，最终冻结后重新扫描；稀疏快照保留全部非零块并完整cmp，实际可写配额恢复只在胶囊内部执行。胶囊满额即失败，不依赖压缩率或文件系统元数据常数推断空间安全。恢复结束后卸载胶囊，零洞压缩前后SHA相等，再持久化回执。备份目录必须与冻结数据卷处于不同文件系统。看门狗不依赖标记成功才解冻；手动解冻前保持兜底，解冻后撤销timer/service并核对触发标记，触发过一律不接受快照。此方案尚未实机演练，不代表现役备份通过。
 
-香港隔离c001实例的systemd使用 `docker run --rm`；员工站则是直接启动Bun。两者均不满足容器切换器要求，不能混作同一staging。需先完成员工站的数据保留和固定容器启动演练。杭州已使用 `docker start -a`。两地配额 helper 哈希不同，不得用同镜像发布暗中覆盖 helper。
+应用 unit 使用 `docker start -a` 启动固定容器。按候选组件哈希单独管理宿主配额 helper 和裁剪组件，应用发布不覆盖主机组件。
 
 程序未包含自动数据回滚。切换后应用可能已迁移数据库或产生新写入，失败保留事务、前驱容器和完整备份，不盲目用旧镜像或备份覆盖。
 
@@ -83,7 +81,7 @@
 
 GitHub 环境权限与发布者范围配置完成后才启用仓库变量 `CANVAS_DELIVERY_ENABLED=true`。
 
-master 推送只部署香港 staging。通知团队在 https://toonflow.zenjoymedia.media 试用，团队确认后再手动运行 Canvas delivery，填写通过的 staging run ID 并勾选团队已验收。正式任务使用这次 staging 归档的同一源码、镜像和 COS 对象，杭州仍向香港读取当前见证。
+master 推送部署香港 staging。团队在 `https://aivideo-staging.zenjoymedia.media` 验收后，运行 Canvas delivery，填写 staging run ID 并勾选团队已验收。杭州使用该 run 的同一源码、镜像和 COS 对象，并从香港独立读取同一验收回执。
 
 COS 中转由 CI 将固定 digest 的完整 OCI 归档上传至既有私有桶，不创建桶或自动删除对象。repository variables `CANVAS_COS_BUCKET`、`CANVAS_COS_REGION` 与 repository secrets `CANVAS_COS_SECRET_ID`、`CANVAS_COS_SECRET_KEY` 使用仅限 `aivideoReleases/` 的读写身份，不授予删除或分块清理权限。对象键绑定源码 SHA、run 和 attempt；已有对象仅在长度与 SHA 元数据相同才复用。两个 environment 各自生成短期 GET 签名，签名仅经受限 SSH stdin 提供，不写日志、输出或回执。
 
@@ -93,9 +91,11 @@ COS 中转由 CI 将固定 digest 的完整 OCI 归档上传至既有私有桶�
 
 请求：`environment/sourceSha/image/runId/runAttempt`；production 另带当前同一 run 的 `stagingReceipt`。所有字段按严格白名单验证，禁止将请求拼接成 shell 命令。
 
-成功回执必须返回匹配的上述五个身份字段，及 `result="passed"`、`businessVerified=true`、`runningImage`（完整 digest）。生产额外返回 `backupVerified=true`、`restoreVerified=true`、`predecessorImage`、`backupId`。不得包含令牌、密码、供应商签名链接或用户内容。SSH 控制器只把该 JSON 写入 stdout，诊断输出放 stderr 且脱敏。
+成功回执包含五个身份字段、固定 `publicOrigin`、`runningImage`、候选进程 `bootId`、`businessMode=tenant`、业务及跨账号隔离和裁剪证明、实际生成媒体类型、配额卷备份恢复证明、`predecessorImage`、`backupId` 和 COS 对象元数据。香港还须出具实际生成视频和逐帧拉片构建包的 SHA-256。旧共享站回执无法晋级。回执禁止包含令牌、密码、签名链接或用户内容。
 
-真实验收至少包括普通账号登录、保存画布、刷新后读回、跨账号隔离、视频截取结果的时长与持久化，以及本次改动影响的生成任务。HTTP 200 或容器健康不能取代业务验收。目前香港普通账号画布刷新通过，但安全截取能力仍返回 403，所以目前不具备生产晋级条件。
+回执的 `passedJourneys` 逐项记录已通过的发布验收。每次候选须重新跑齐 `releasePolicy.py` 中对应环境的旅程。现有 PR 回归对照本次 PR 的基线提交，检查两地已有旅程是否完整保留。逐帧拉片字段记录构建包 SHA-256。
+
+业务验收通过普通账号保存并读回专用画布，检查其他账号的访问请求被拒绝，实际触发截取和生成并读回产物。香港生成配置用 `generationRequest.mediaType=video`，产物须通过 ffprobe 的格式与时长校验。杭州可沿用已审定的图片、视频或音频配置。
 
 ## 收口条件
 
@@ -112,7 +112,7 @@ COS 中转由 CI 将固定 digest 的完整 OCI 归档上传至既有私有桶�
 
 ### 只读香港见证的权限合同
 
-生产配置 `stagingWitnessHost`、`stagingWitnessUser`、`stagingWitnessKey`、`stagingWitnessKnownHosts`；后两个必须是root保护的文件。见证key与部署key分开，从1Password管理，不复用个人SSH身份。香港见证账号的authorized_keys强制命令只能调用受限sudo的readRelease.py包装器（安装为aivideo-read-release），禁PTY、转发和任意shell。包装器只接受operation=receipt且environment=staging，不得把见证账号直接绑定到可deploy的releaseHost.py。控制器在任何回执输出前都会拒绝尚未完成的事务，即使旧回执镜像恰好仍在运行。当前只完成代码，尚未安装账号、密钥或wrapper。
+生产配置 `stagingWitnessHost`、`stagingWitnessUser`、`stagingWitnessKey`、`stagingWitnessKnownHosts`；后两个必须是root保护的文件。见证key与部署key分开，从1Password管理，不复用个人SSH身份。香港见证账号的authorized_keys强制命令只能调用受限sudo的readRelease.py包装器（安装为aivideo-read-release），禁PTY、转发和任意shell。包装器只接受operation=receipt且environment=staging，不得把见证账号直接绑定到可deploy的releaseHost.py。香港见证拒绝未完成事务。读回历史回执时重新核对公网和回环的候选源码、镜像与 bootId。同一镜像重启后，旧回执不可晋级。
 
 ## 本轮接入与验证现状
 
@@ -120,7 +120,7 @@ GitHub staging/production environments、仅master分支策略、各自专用SSH
 
 员工站Cloudflare Access增设独立机器验收策略，保留原人员登录策略。机器凭据仅在1Password及私有缓存；实际公网ffmpeg/status通过，媒体Range请求206且仅传回1024字节。员工数据在线兼容副本用现有c001镜像保留原路径启动，2秒截取耗时0.803秒、ffprobe读回2秒；兼容容器随后停止。在线副本不算一致性备份，未替换现役员工服务。
 
-verifyBusiness.py在staging保留shared工作区模式，production必须验证两个普通账号隔离；均要求专用画布标记、版本/bootId一致、实际截取与生成结果。verifyGeneration.py只提交一次带固定taskId任务，后续只读轮询，未知结果不重发。新identity API声明候选版本和只读能力；旧版缺此接口时不允许付费验收。
+两地通过 `verifyBusiness.py` 验证两个普通账号的隔离，核对专用画布、候选身份、持久截取和生成产物。`verifyGeneration.py` 只提交一次带固定 taskId 的任务，随后只读轮询。候选在身份接口缺少只读轮询能力时拒绝提交。
 
 网页媒体读取改为显式服务器能力开放时使用原受控接口的Range读取；桌面与旧服务器保留Blob读取。剪辑预览在metadata可用时初始化，避免必须等待整个视频下载。此优化尚未部署，不能据此宣称员工卡顿已修复。
 
