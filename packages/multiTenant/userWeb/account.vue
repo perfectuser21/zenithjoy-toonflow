@@ -4,51 +4,31 @@
       <span class="accountAvatar" aria-hidden="true">{{ Array.from(userName.trim())[0]?.toUpperCase() }}</span>
       <p class="userName">{{ userName }}</p>
     </div>
-    <section v-if="role === 'user'" class="providerSection" aria-labelledby="providerKeyTitle" :aria-busy="keyLoading || keySaving">
-      <header class="sectionHeader">
-        <h3 id="providerKeyTitle">阿里云 {{ translate("API 密钥") }}</h3>
-        <el-button :loading="keyLoading" :disabled="busy || keySaving" @click="loadProviderKey">{{ translate("刷新") }}</el-button>
-      </header>
-      <p>{{ translate("用于接入阿里云模型，使用产生的费用由您的阿里云账号承担。") }}</p>
-      <p v-if="keyStatus">{{ keyStatus.configured ? translate("已配置") : translate("未配置") }}</p>
-      <el-alert v-if="keyError" :title="keyError" type="error" :closable="false" showIcon />
-      <form @submit.prevent="saveProviderKey">
-        <el-input v-model="apiKey" type="password" autocomplete="off" :aria-label="translate('API 密钥')" :disabled="busy || keySaving" maxlength="4096" />
-        <el-button nativeType="submit" type="primary" :loading="keySaving" :disabled="busy || keyLoading || !keyStatus || keyConflict || !apiKey.trim()">{{ translate("保存") }}</el-button>
-      </form>
-      <el-button v-if="keyStatus?.configured" :disabled="busy || keyLoading || keySaving || keyConflict" @click="unbindProviderKey">{{ translate("解绑密钥") }}</el-button>
-    </section>
     <section v-if="role === 'user'" class="billingSection" aria-labelledby="accountBalanceTitle" :aria-busy="balanceLoading">
       <header class="sectionHeader">
-        <h3 id="accountBalanceTitle">{{ translate("余额") }}</h3>
+        <h3 id="accountBalanceTitle">{{ translate("积分余额") }}</h3>
         <el-button :loading="balanceLoading" :disabled="busy || balanceLoading" @click="loadBalance">{{ translate("刷新") }}</el-button>
       </header>
       <el-alert v-if="balanceError" :title="balanceError" type="error" :closable="false" showIcon />
       <el-skeleton v-if="balanceLoading && !balance" :rows="4" animated />
       <template v-if="balance">
-        <div class="walletList">
-          <section v-for="wallet in balance.wallets" :key="wallet.currency" class="walletRow" :aria-label="wallet.currency">
-            <h4>{{ wallet.currency }}</h4>
-            <dl>
-              <div><dt>{{ translate("余额") }}</dt><dd>{{ wallet.balance }}</dd></div>
-              <div><dt>{{ translate("已预占") }}</dt><dd>{{ wallet.reserved }}</dd></div>
-              <div><dt>{{ translate("可用余额") }}</dt><dd>{{ wallet.available }}</dd></div>
-            </dl>
-          </section>
-        </div>
+        <dl class="pointsBalance">
+          <div><dt>{{ translate("积分余额") }}</dt><dd>{{ balance.balance }}</dd></div>
+          <div><dt>{{ translate("已预占") }}</dt><dd>{{ balance.reserved }}</dd></div>
+          <div><dt>{{ translate("可用积分") }}</dt><dd>{{ balance.available }}</dd></div>
+        </dl>
         <section class="transactions" aria-labelledby="accountTransactionsTitle">
-          <h3 id="accountTransactionsTitle">{{ translate("最近账目") }}</h3>
-          <p v-if="!balance.transactions.length" class="emptyText">{{ translate("暂无账目") }}</p>
+          <h3 id="accountTransactionsTitle">{{ translate("积分流水") }}</h3>
+          <p v-if="!balance.transactions.length" class="emptyText">{{ translate("暂无积分流水") }}</p>
           <div v-else class="tableScroll">
             <table>
-              <thead><tr><th scope="col">{{ translate("时间") }}</th><th scope="col">{{ translate("类型") }}</th><th scope="col">{{ translate("金额") }}</th><th scope="col">{{ translate("状态") }}</th><th scope="col">{{ translate("说明") }}</th></tr></thead>
+              <thead><tr><th scope="col">{{ translate("时间") }}</th><th scope="col">{{ translate("类型") }}</th><th scope="col">{{ translate("积分") }}</th><th scope="col">{{ translate("状态") }}</th></tr></thead>
               <tbody>
                 <tr v-for="transaction in balance.transactions" :key="transaction.id">
                   <td class="timeCell">{{ formatTime(transaction.createdAt) }}</td>
-                  <td>{{ transaction.kind === 'credit' ? translate("增加余额") : translate("模型调用") }}</td>
+                  <td>{{ transaction.kind === 'credit' ? translate("增加积分") : translate("模型调用") }}</td>
                   <td class="amountCell">{{ formatAmount(transaction) }}</td>
                   <td>{{ transaction.status === 'reserved' ? translate("已预占") : transaction.status === 'released' ? translate("已释放") : translate("已结算") }}</td>
-                  <td class="descriptionCell">{{ transaction.label || transaction.note }}</td>
                 </tr>
               </tbody>
             </table>
@@ -66,117 +46,37 @@
 <script setup lang="ts">
 import { locale, translate } from "@toonflow/i18n/vue";
 import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { ElAlert, ElButton, ElInput, ElMessageBox, ElSkeleton } from "element-plus";
-import type { BillingSnapshot, BillingTransaction } from "@toonflow/multi-tenant-billing/config";
+import { ElAlert, ElButton, ElSkeleton } from "element-plus";
+import type { CustomerPoints } from "@toonflow/multi-tenant-billing/config";
 import type { UserRequest } from "./types";
 import "element-plus/es/components/alert/style/css";
 import "element-plus/es/components/button/style/css";
-import "element-plus/es/components/input/style/css";
-import "element-plus/es/components/message-box/style/css";
 import "element-plus/es/components/skeleton/style/css";
 
 const props = defineProps<{ request: UserRequest; userName: string; role?: "admin" | "user" }>();
 const emit = defineEmits<{ loggedOut: [] }>();
 const busy = ref(false);
 const requestError = ref("");
-const balance = ref<BillingSnapshot | null>(null);
+const balance = ref<CustomerPoints | null>(null);
 const balanceLoading = ref(false);
 const balanceError = ref("");
-const apiKey = ref("");
-const keyStatus = ref<{ configured: boolean; revision: number } | null>(null);
-const keyLoading = ref(false);
-const keySaving = ref(false);
-const keyConflict = ref(false);
-const keyError = ref("");
 const timeFormat = computed(() => new Intl.DateTimeFormat(locale.value, {
   year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
 }));
 const controller = new AbortController();
 let balanceRequest: AbortController | undefined;
-let keyRequest: AbortController | undefined;
 let disposed = false;
-
-async function loadProviderKey() {
-  if (props.role !== "user" || !props.userName || busy.value || keySaving.value || disposed) return;
-  keyRequest?.abort();
-  const request = new AbortController();
-  const userName = props.userName;
-  keyRequest = request;
-  keyLoading.value = true;
-  keyError.value = "";
-  try {
-    const result = await props.request<{ configured: boolean; revision: number }>({ method: "GET", url: "/api/multiTenant/user/providerKey", signal: request.signal });
-    if (!disposed && !request.signal.aborted && keyRequest === request && props.role === "user" && props.userName === userName) {
-      keyStatus.value = result;
-      keyConflict.value = false;
-    }
-  } catch {
-    if (!disposed && !request.signal.aborted && keyRequest === request) keyError.value = translate("读取失败，请重试");
-  } finally {
-    if (keyRequest === request) { keyRequest = undefined; keyLoading.value = false; }
-  }
-}
-
-async function saveProviderKey() {
-  if (!keyStatus.value || keyConflict.value || !apiKey.value.trim() || keyLoading.value || keySaving.value || busy.value) return;
-  const request = new AbortController();
-  const userName = props.userName;
-  keyRequest = request;
-  keySaving.value = true;
-  keyError.value = "";
-  try {
-    const result = await props.request<{ configured: boolean; revision: number }>({ method: "PUT", url: "/api/multiTenant/user/providerKey", data: { apiKey: apiKey.value, expectedRevision: keyStatus.value.revision }, signal: request.signal });
-    if (!disposed && !request.signal.aborted && keyRequest === request && props.role === "user" && props.userName === userName) {
-      keyStatus.value = result;
-      apiKey.value = "";
-    }
-  } catch (cause) {
-    if (!disposed && !request.signal.aborted && keyRequest === request) {
-      keyConflict.value = typeof cause === "object" && cause !== null && "status" in cause && cause.status === 409;
-      keyError.value = keyConflict.value ? `${translate("这条数据已发生变化，请刷新列表后重试。")} ${translate("保存失败，请重试；当前填写的内容已保留")}` : translate("保存失败，修改内容已保留，请重试");
-    }
-  } finally {
-    if (keyRequest === request) { keyRequest = undefined; keySaving.value = false; }
-  }
-}
-
-async function unbindProviderKey() {
-  if (!keyStatus.value?.configured || keyConflict.value || keyLoading.value || keySaving.value || busy.value) return;
-  const userName = props.userName, revision = keyStatus.value.revision;
-  try {
-    await ElMessageBox.confirm(translate("解绑后，新任务需要重新配置阿里云密钥。已经提交的任务不受影响。"), translate("解绑密钥"), { confirmButtonText: translate("解绑"), cancelButtonText: translate("取消"), type: "warning" });
-  } catch { return; }
-  if (disposed || props.role !== "user" || props.userName !== userName || keyStatus.value?.revision !== revision || keyLoading.value || keySaving.value || busy.value) return;
-  const request = new AbortController();
-  keyRequest = request;
-  keySaving.value = true;
-  keyError.value = "";
-  try {
-    const result = await props.request<{ configured: boolean; revision: number }>({ method: "POST", url: "/api/multiTenant/user/providerKey/unbind", data: { expectedRevision: revision }, signal: request.signal });
-    if (!disposed && !request.signal.aborted && keyRequest === request && props.role === "user" && props.userName === userName) {
-      keyStatus.value = result;
-      apiKey.value = "";
-    }
-  } catch (cause) {
-    if (!disposed && !request.signal.aborted && keyRequest === request) {
-      keyConflict.value = typeof cause === "object" && cause !== null && "status" in cause && cause.status === 409;
-      keyError.value = keyConflict.value ? translate("这条数据已发生变化，请刷新列表后重试。") : translate("解绑失败，请重试");
-    }
-  } finally {
-    if (keyRequest === request) { keyRequest = undefined; keySaving.value = false; }
-  }
-}
 
 function formatTime(value: number) {
   const date = new Date(value);
   return value > 0 && Number.isFinite(date.getTime()) ? timeFormat.value.format(date) : translate("未记录");
 }
 
-function formatAmount(transaction: BillingTransaction) {
+function formatAmount(transaction: CustomerPoints["transactions"][number]) {
   if (transaction.status === "reserved") return translate("待结算");
   const prefix = transaction.kind === "credit" ? "+"
-    : transaction.status === "settled" && !/^0(?:\.0+)?$/.test(transaction.amount) ? "-" : "";
-  return `${prefix}${transaction.amount} ${transaction.currency}`;
+    : transaction.status === "settled" && !/^0(?:\.0+)?$/.test(transaction.points) ? "-" : "";
+  return `${prefix}${transaction.points}`;
 }
 
 async function loadBalance() {
@@ -188,7 +88,7 @@ async function loadBalance() {
   balanceLoading.value = true;
   balanceError.value = "";
   try {
-    const result = await props.request<BillingSnapshot>({ method: "GET", url: "/api/multiTenant/user/balance", signal: request.signal });
+    const result = await props.request<CustomerPoints>({ method: "GET", url: "/api/multiTenant/user/balance", signal: request.signal });
     if (!disposed && !request.signal.aborted && balanceRequest === request && props.role === "user" && props.userName === userName) balance.value = result;
   } catch (cause) {
     if (!disposed && !request.signal.aborted && balanceRequest === request) balanceError.value = cause instanceof Error ? cause.message : translate("读取余额失败，请重试");
@@ -198,28 +98,17 @@ async function loadBalance() {
 }
 
 watch(() => [props.userName, props.role], () => {
-  keyRequest?.abort();
-  keyRequest = undefined;
-  keyStatus.value = null;
-  apiKey.value = "";
-  keyLoading.value = false;
-  keySaving.value = false;
-  keyConflict.value = false;
-  keyError.value = "";
   balanceRequest?.abort();
   balanceRequest = undefined;
   balanceLoading.value = false;
   balance.value = null;
   balanceError.value = "";
   void loadBalance();
-  void loadProviderKey();
 }, { immediate: true });
 
 async function logout() {
   if (busy.value) return;
   balanceRequest?.abort();
-  keyRequest?.abort();
-  apiKey.value = "";
   busy.value = true;
   requestError.value = "";
   try {
@@ -234,8 +123,6 @@ onBeforeUnmount(() => {
   disposed = true;
   controller.abort();
   balanceRequest?.abort();
-  keyRequest?.abort();
-  apiKey.value = "";
 });
 </script>
 
@@ -288,20 +175,6 @@ onBeforeUnmount(() => {
     }
   }
 
-  .providerSection {
-    display: grid;
-    gap: 16px;
-    min-width: 0;
-    padding-top: 24px;
-    border-top: 1px solid var(--el-border-color-light);
-
-    .sectionHeader { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
-    h3 { margin: 0; font-size: 15px; font-weight: 600; }
-    p { margin: 0; color: var(--el-text-color-regular); font-size: 14px; }
-    form { display: flex; flex-wrap: wrap; gap: 12px; }
-    .el-input { flex: 1 1 220px; }
-  }
-
   .billingSection {
     display: grid;
     gap: 20px;
@@ -320,23 +193,14 @@ onBeforeUnmount(() => {
       .el-button { min-height: 40px; margin: 0; }
     }
 
-    .walletList {
-      .walletRow {
-        padding: 16px 0;
-        border-bottom: 1px solid var(--el-border-color-lighter);
+    .pointsBalance {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+      margin: 0;
 
-        &:first-child { padding-top: 0; }
-        h4 { margin: 0 0 12px; font-size: 14px; font-weight: 600; line-height: 1.6; }
-        dl {
-          display: grid;
-          grid-template-columns: repeat(3, minmax(0, 1fr));
-          gap: 16px;
-          margin: 0;
-
-          dt { color: var(--el-text-color-regular); font-size: 13px; line-height: 1.6; }
-          dd { margin: 6px 0 0; font-size: 14px; line-height: 1.6; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-        }
-      }
+      dt { color: var(--el-text-color-regular); font-size: 13px; line-height: 1.6; }
+      dd { margin: 6px 0 0; font-size: 14px; line-height: 1.6; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
     }
 
     .transactions {
@@ -358,13 +222,12 @@ onBeforeUnmount(() => {
           th { color: var(--el-text-color-regular); font-weight: 500; white-space: nowrap; }
           td { color: var(--el-text-color-primary); }
           .timeCell, .amountCell { white-space: nowrap; font-variant-numeric: tabular-nums; }
-          .descriptionCell { min-width: 120px; max-width: 240px; overflow-wrap: anywhere; }
         }
       }
     }
 
     @media (max-width: 480px) {
-      .walletList .walletRow dl { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+      .pointsBalance { grid-template-columns: minmax(0, 1fr); gap: 12px; }
     }
   }
 }
