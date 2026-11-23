@@ -180,9 +180,6 @@ def candidateHashes(image):
 
 
 def verifyRuntimeReadiness(config, business, request):
-    if business.get('businessMode') == 'shared':
-        require(request['environment'] == 'staging', 'shared裁剪不能证明生产tenant')
-        return {'trimRuntimeVerified': False, 'trimRuntimeScope': 'sharedBypass'}
     require(business.get('businessMode') == 'tenant', '裁剪业务模式缺失')
     manifest = rootJson(config['trimRuntimeManifest'])
     directory = rootDirectory(config['trimArtifactDirectory'])

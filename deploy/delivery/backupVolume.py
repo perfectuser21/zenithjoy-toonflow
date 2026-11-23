@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from releasePolicy import requireQuotaVolume
 from volumeSnapshot import scanVolume, requireSpace, sparseCopy, capsuleSize, reserve, requireCapsuleFilesystem
 
 
@@ -44,6 +45,7 @@ def main():
         raise RuntimeError('root required')
     config = json.loads(Path('/etc/aivideo/release.json').read_text())
     request = json.load(sys.stdin)
+    requireQuotaVolume(config)
     # 只能由控制器调用；输入不控制任何宿主路径、unit 名称或命令。
     key = str(time.time_ns())
     target = Path(config['backupDirectory']) / key
@@ -179,6 +181,7 @@ def main():
         if proof.get('snapshot') != str(snapshot) or proof.get('quotaRestoreVerified') is not True:
             raise RuntimeError('quota restore has not been verified')
         receipt = {'backupId':key, 'backupVerified':True, 'restoreVerified':True,
+                   'quotaRestoreVerified':True,
                    'sha256':digest(snapshot), 'filesVerifiedReadable':fileCount,
                    'databasesVerified':databaseCount, 'storage':storage, 'sourceSha':request['sourceSha']}
         command(['umount', str(payload)])

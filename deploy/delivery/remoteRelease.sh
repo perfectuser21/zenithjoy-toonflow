@@ -31,6 +31,7 @@ if (( jumpCount != 0 )); then
   [[ "$RELEASE_JUMP_PORT" =~ ^[0-9]{1,5}$ ]] || exit 1
   (( 10#$RELEASE_JUMP_PORT > 0 && 10#$RELEASE_JUMP_PORT <= 65535 )) || exit 1
 fi
+deliveryDirectory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 umask 077
 releaseTmp=$(mktemp -d /tmp/aivideo-release.XXXXXXXX)
 trap 'rm -rf "$releaseTmp"' EXIT
@@ -54,10 +55,11 @@ fi
   printf 'Host *\n  BatchMode yes\n  IdentitiesOnly yes\n  IdentityAgent none\n  ForwardAgent no\n  StrictHostKeyChecking yes\n  GlobalKnownHostsFile /dev/null\n  ClearAllForwardings yes\n  ControlMaster no\n  ConnectTimeout 15\n  ServerAliveInterval 15\n  ServerAliveCountMax 4\n'
 } > "$releaseTmp/config"
 chmod 600 "$releaseTmp/config"
-# 请求通过 stdin 传输；公网入口与模型密钥不写入发布回执。
-"${RUNNER_TEMP:?Missing runner temp}/cos-venv/bin/python" - <<'PY' > "$releaseTmp/request.json" 2>/dev/null
+# 请求通过 stdin 传输；COS 签名不写入发布回执。
+PYTHONPATH="$deliveryDirectory" "${RUNNER_TEMP:?Missing runner temp}/cos-venv/bin/python" -B - <<'PY' > "$releaseTmp/request.json" 2>/dev/null
 import os,json,logging,re
 from qcloud_cos import CosConfig,CosS3Client
+from releasePolicy import publicReceipt,validateReceipt
 logging.disable(logging.CRITICAL)
 request={'environment':os.environ['RELEASE_ENVIRONMENT'],'sourceSha':os.environ['RELEASE_SHA'],'image':os.environ['RELEASE_IMAGE'],'runId':os.environ['GITHUB_RUN_ID'],'runAttempt':os.environ['GITHUB_RUN_ATTEMPT']}
 stage=None
@@ -68,37 +70,27 @@ if request['environment']=='production':
 key=os.environ['RELEASE_COS_KEY']; digest=os.environ['RELEASE_COS_SHA256']; length=int(os.environ['RELEASE_COS_BYTES'])
 assert key==f"aivideoReleases/{request['sourceSha']}/{request['runId']}/{request['runAttempt']}/image.oci"
 assert re.fullmatch(r'[a-f0-9]{64}',digest) and 0<length<=768*1024*1024
+transfer={'key':key,'sha256':digest,'bytes':length}
+if stage is not None:
+    validateReceipt(stage,request,'staging')
+    assert stage['transfer']==transfer
+    request['stagingReceipt']=publicReceipt(stage)
 client=CosS3Client(CosConfig(Region=os.environ['CANVAS_COS_REGION'],SecretId=os.environ['CANVAS_COS_SECRET_ID'],
                              SecretKey=os.environ['CANVAS_COS_SECRET_KEY'],Scheme='https',EnableOldDomain=True))
 url=client.get_presigned_url(Method='GET',Bucket=os.environ['CANVAS_COS_BUCKET'],Key=key,Expired=7200)
-transfer={'key':key,'sha256':digest,'bytes':length}
-if stage is not None:
-    assert stage['environment']=='staging' and stage['sourceSha']==request['sourceSha'] and stage['image']==request['image']
-    assert stage['result']=='passed' and stage['businessVerified'] is True
-    assert stage['transfer']==transfer
-    request['stagingReceipt']=stage
 request['transfer']={**transfer,'url':url}
 print(json.dumps(request))
 PY
 ssh -F "$releaseTmp/config" -T releaseTarget /usr/local/sbin/aivideo-release \
   < "$releaseTmp/request.json" > "$releaseTmp/receipt.json"
-python3 - "$releaseTmp/request.json" "$releaseTmp/receipt.json" <<'PY'
+PYTHONPATH="$deliveryDirectory" python3 -B - "$releaseTmp/request.json" "$releaseTmp/receipt.json" <<'PY'
 import json,sys,os
+from releasePolicy import publicReceipt,validateReceipt
 request=json.load(open(sys.argv[1])); receipt=json.load(open(sys.argv[2]))
-origins={'staging':'https://toonflow.zenjoymedia.media','production':'https://aivideo.zenithjoy.tech'}
-assert receipt.get('publicOrigin')==origins[request['environment']], 'release public origin mismatch'
-for key in ('environment','sourceSha','image','runId','runAttempt'):
-    assert receipt[key]==request[key],f'receipt mismatch: {key}'
-assert receipt['result']=='passed' and receipt['businessVerified'] is True
-assert receipt['runningImage']==request['image']
+validateReceipt(receipt,request,request['environment'])
 assert receipt['transfer']=={k:request['transfer'][k] for k in ('key','sha256','bytes')}
-if request['environment']=='production':
-    assert receipt['backupVerified'] is True and receipt['restoreVerified'] is True
-    assert receipt['predecessorImage'] and receipt['backupId']
 # 仅公开固定白名单字段，原始远端输出不打印到 CI 日志。
-keys=('publicOrigin','environment','sourceSha','image','runId','runAttempt','result','businessVerified','runningImage','backupVerified','restoreVerified','predecessorImage','backupId','transfer')
-public={k:receipt[k] for k in keys if k in receipt}
-encoded=json.dumps(public,separators=(',',':'))
+encoded=json.dumps(publicReceipt(receipt),separators=(',',':'))
 with open('releaseReceipt.json','w') as f: f.write(encoded+'\n')
 with open(os.environ['GITHUB_OUTPUT'],'a') as f: f.write('receipt='+encoded+'\n')
 PY
