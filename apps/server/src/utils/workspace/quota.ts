@@ -6,6 +6,28 @@ import { projectQuotaRoot } from "@/utils/workspace/projectQuota";
 // 共享目录锁不自动回收：进程意外退出时保持关闭，等待运维核实后恢复。
 const quotaBytes = 5 * 1024 * 1024 * 1024;
 const minimumFreeBytes = 2 * 1024 * 1024 * 1024;
+// 写入请求进入配额检查前已缓冲文件内容，限制队列占用的内存。
+const maxQueuedWrites = 8;
+let quotaWriteTail = Promise.resolve();
+let queuedWrites = 0;
+
+async function runQuotaWrite<T>(write: () => Promise<T>): Promise<T> {
+  if (queuedWrites >= maxQueuedWrites) {
+    throw Object.assign(new Error("工作区写入请求过多，请稍后重试"), { status: 429 });
+  }
+  const previous = quotaWriteTail;
+  const finished = Promise.withResolvers<void>();
+  quotaWriteTail = finished.promise;
+  queuedWrites++;
+
+  await previous;
+  try {
+    return await write();
+  } finally {
+    queuedWrites--;
+    finished.resolve();
+  }
+}
 
 function within(root: string, path: string) {
   const offset = relative(root, path);
@@ -50,27 +72,29 @@ export async function withWorkspaceQuota<T>(path: string, requested: number | ((
   const actualRoot = await realpath(root);
   if (actualRoot !== root || !within(actualRoot, actualPath)) throw Object.assign(new Error("工作区目录无效"), { status: 403 });
   const lock = resolve(dataDirectory, "multiTenant", "workspaceQuotaLock");
-  try { await mkdir(lock, { mode: 0o700 }); }
-  catch (cause) {
-    if ((cause as NodeJS.ErrnoException).code === "EEXIST") throw Object.assign(new Error("存储空间正在检查，请稍后重试"), { status: 503 });
-    throw cause;
-  }
-  try {
-    const size = typeof requested === "number" ? requested : await requested();
-    if (!Number.isSafeInteger(size) || size < 0) throw Object.assign(new Error("工作区容量参数无效"), { status: 400 });
-    const current = await totalBytes(root);
-    const existing = replace ? await lstat(path).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return null;
-      throw error;
-    }) : null;
-    if (existing && !existing.isFile()) throw Object.assign(new Error("只能覆盖普通文件"), { status: 403 });
-    if (current - (existing?.size ?? 0) + size > quotaBytes) throw Object.assign(new Error("工作区存储空间已满，请释放空间后重试"), { status: 507 });
-    const disk = await statfs(root, { bigint: true });
-    if (disk.bavail * disk.bsize < BigInt(minimumFreeBytes) + BigInt(size)) {
-      throw Object.assign(new Error("服务器剩余空间不足，请稍后重试"), { status: 507 });
+  return runQuotaWrite(async () => {
+    try { await mkdir(lock, { mode: 0o700 }); }
+    catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code === "EEXIST") throw Object.assign(new Error("存储空间正在检查，请稍后重试"), { status: 503 });
+      throw cause;
     }
-    return await action();
-  } finally { await rmdir(lock); }
+    try {
+      const size = typeof requested === "number" ? requested : await requested();
+      if (!Number.isSafeInteger(size) || size < 0) throw Object.assign(new Error("工作区容量参数无效"), { status: 400 });
+      const current = await totalBytes(root);
+      const existing = replace ? await lstat(path).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      }) : null;
+      if (existing && !existing.isFile()) throw Object.assign(new Error("只能覆盖普通文件"), { status: 403 });
+      if (current - (existing?.size ?? 0) + size > quotaBytes) throw Object.assign(new Error("工作区存储空间已满，请释放空间后重试"), { status: 507 });
+      const disk = await statfs(root, { bigint: true });
+      if (disk.bavail * disk.bsize < BigInt(minimumFreeBytes) + BigInt(size)) {
+        throw Object.assign(new Error("服务器剩余空间不足，请稍后重试"), { status: 507 });
+      }
+      return await action();
+    } finally { await rmdir(lock); }
+  });
 }
 
 export { totalBytes as workspaceTreeBytes };
