@@ -336,6 +336,9 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
         { id: "mashup", type: "remote-mashupNode", position: { x: 90, y: 90 }, data: { mashup: {
           groups: groups.map(({ name }) => ({ name, clips: [] })), limit: 100,
         } } },
+        { id: "parallelMashup", type: "remote-mashupNode", position: { x: 480, y: 570 }, data: { mashup: {
+          groups: groups.map(({ name }) => ({ name, clips: [{ name, url: `assets/${name}.mp4`, mimeType: "video/mp4" }] })), limit: 1,
+        } } },
         { id: "qianchuan", type: "remote-qianchuanUploadNode", position: { x: 480, y: 90 }, data: {} },
         ...videoNodes,
         { id: "concat", type: "remote-videoConcatNode", position: { x: 850, y: 550 }, data: { videoConcat: { segmentCount: 2 } } },
@@ -411,6 +414,7 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     let backgroundRequests = 0;
     let ordinaryWeb = false;
     let modelCatalogUnavailable = false;
+    let pendingVideoUpload: Promise<void> | undefined;
     gateway.use((req, res, next) => {
       if (ordinaryWeb) res.locals.multiTenantWeb = true;
       for (const { cookie, assertion } of staff.values()) {
@@ -422,6 +426,11 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       if (req.method === "GET" && req.path === "/api/workspaces/files/mashupZip") {
         const index = nativeDownloads.push(0) - 1;
         res.once("finish", () => { nativeDownloads[index] = res.statusCode; });
+      }
+      if (pendingVideoUpload && req.method === "PUT" && req.path === "/api/workspaces/files/write"
+        && typeof req.query.path === "string" && req.query.path.startsWith("assets/A/")) {
+        void pendingVideoUpload.then(() => next());
+        return;
       }
       next();
     });
@@ -569,19 +578,53 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       throw Error("画布未保存验收产物");
     }
     const generating = await openCanvas();
+    const primaryMashup = '.vue-flow__node[data-id="mashup"]';
+    const parallelMashup = '.vue-flow__node[data-id="parallelMashup"]';
     for (const { name, files } of groups) {
-      const input = await generating.page.waitForSelector(`input[type=file][aria-label="${name} 组视频"]`, { timeout: 10000 });
+      const input = await generating.page.waitForSelector(`${primaryMashup} input[type=file][aria-label="${name} 组视频"]`, { timeout: 10000 });
       if (!input) throw Error(`找不到 ${name} 组视频入口`);
       await input.uploadFile(...files);
       await generating.page.waitForSelector(`xpath=//section[div/strong="${name}" and div/span="10 个片段" and ancestor::fieldset[not(@disabled)]]`, { timeout: 10000 });
     }
-    await generating.page.locator('xpath=//button[normalize-space(.)="生成成片" and not(@disabled)]').setTimeout(5000).click();
     const downloadButton = 'xpath=//button[normalize-space(.)="下载 100 条成片 ZIP" and not(@disabled)]';
-    const completed = await generating.page.waitForSelector(`${downloadButton} | //*[@role="alert" and ancestor::*[contains(@class,"mashupContent")]]`, { visible: true, timeout: 30000 });
-    if (!completed || await completed.evaluate(element => element.tagName) !== "BUTTON") {
-      throw Error(`100 条混剪未生成完成：${await completed?.evaluate(element => element.textContent)}`);
+    const videoUpload = Promise.withResolvers<void>();
+    pendingVideoUpload = videoUpload.promise;
+    try {
+      const input = await generating.page.waitForSelector('.vue-flow__node[data-id="A"] input[type=file]', { timeout: 5000 });
+      if (!input) throw Error("缺少并行视频上传入口");
+      const writing = generating.page.waitForRequest(request => {
+        const url = new URL(request.url());
+        return request.method() === "PUT" && url.pathname === "/api/workspaces/files/write" && url.searchParams.get("path")?.startsWith("assets/A/") === true;
+      }, { timeout: 5000 });
+      await input.uploadFile(groups[0]!.files[0]!);
+      await writing;
+      const controls = `${primaryMashup} button.run:not([disabled]), ${parallelMashup} button.run:not([disabled])`;
+      expect(await generating.page.$$eval(controls, buttons => {
+        for (const button of buttons) Reflect.get(button, "click").call(button);
+        return buttons.length;
+      })).toBe(2);
+      const firstCompleted = await generating.page.waitForSelector(
+        `${parallelMashup} select[aria-label="选择成片"], ${parallelMashup} [role="alert"]`, { visible: true, timeout: 10000 });
+      if (await firstCompleted?.evaluate(element => element.tagName) !== "SELECT") {
+        throw Error(`视频上传仍在进行时，混剪未完成：${await firstCompleted?.evaluate(element => element.textContent)}`);
+      }
+      const parallel = await waitForSaved<MashupClip[]>(async () => {
+        const results = (await savedNodeData("parallelMashup"))?.mashup?.batch.results;
+        return results?.length === 1 ? results : undefined;
+      });
+      expect(await generating.page.$(`${primaryMashup} [role="status"] button`)).not.toBeNull();
+      expect(await readFile(join(project.directory, parallel[0].url))).not.toHaveLength(0);
+      await generating.page.waitForSelector(downloadButton, { visible: true, timeout: 30000 });
+      expect((await savedNodeData("A"))?.outputs?.video?.value.url).toBe("assets/A.mp4");
+    } finally {
+      pendingVideoUpload = undefined;
+      videoUpload.resolve();
     }
-    const resultSelector = '.mashupContent select[aria-label="选择成片"]';
+    await waitForSaved<string>(async () => {
+      const url = (await savedNodeData("A"))?.outputs?.video?.value.url;
+      return url?.startsWith("assets/A/") ? url : undefined;
+    });
+    const resultSelector = `${primaryMashup} select[aria-label="选择成片"]`;
     const names = await generating.page.$$eval(`${resultSelector} option`, options => options.map(option => option.textContent));
     expect(names).toHaveLength(100);
     expect(new Set(names).size).toBe(100);
@@ -918,3 +961,47 @@ test("short, overlong and delayed AAC each stay inside their own video segment",
     await rm(root, { recursive: true, force: true });
   }
 }, 30000);
+
+test("Aliyun receives explicit pixel dimensions for canvas image generation and editing", async () => {
+  const { loadMediaProviderSource } = await import("../media/provider");
+  const source = await readFile(fileURLToPath(new URL("../../../../../packages/providers/src/media/aliyun.ts", import.meta.url)), "utf8");
+  const taskId = randomUUID();
+  const imageUrl = "https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/fixture.png";
+  const submits: { model: string; size: string | undefined; imageCount: number }[] = [];
+  let terminalStatus: "SUCCEEDED" | "FAILED" | "CANCELED" = "SUCCEEDED";
+  const fetcher: typeof fetch = Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    expect(url.origin).toBe("https://dashscope.aliyuncs.com");
+    if (init?.method === "POST") {
+      expect(url.pathname).toBe("/api/v1/services/aigc/image-generation/generation");
+      if (typeof init.body !== "string") throw new Error("预期 JSON 生成请求");
+      const body = JSON.parse(init.body);
+      submits.push({ model: body.model, size: body.parameters.size,
+        imageCount: body.input.messages[0].content.filter((item: object) => "image" in item).length });
+      return Response.json({ output: { task_id: taskId } });
+    }
+    expect(url.pathname).toBe(`/api/v1/tasks/${taskId}`);
+    if (terminalStatus !== "SUCCEEDED") return Response.json({ output: { task_status: terminalStatus,
+      code: "InvalidParameter", message: "fixture-private-parameter-detail" } });
+    return Response.json({ output: { task_status: "SUCCEEDED", choices: [{ message: { content: [{ image: imageUrl }] } }] } });
+  }, { preconnect: fetch.preconnect });
+  const provider = await loadMediaProviderSource(source, { apiKey: "offline-fixture" }, undefined, fetcher);
+  const edit = { model: "qwen-image-3.0-pro", prompt: "改成蓝色", size: "2K", ratio: "16:9",
+    images: [{ type: "url" as const, url: "https://assets.example.test/reference.png" }] };
+  if (!provider.generateImage) throw new Error("阿里云图片功能未注册");
+  expect(await provider.generateImage(edit)).toEqual([{ type: "url", mediaType: "image", url: imageUrl, mimeType: "image/png" }]);
+  await provider.generateImage({ model: "qwen-image-2.1-turbo", prompt: "蓝色方块", size: "1K", ratio: "9:16" });
+  await provider.generateImage({ model: "qwen-image-3.0", prompt: "蓝色方块", size: "1024x768" });
+  await expect(provider.generateImage({ ...edit, size: "4096*4096" })).rejects.toThrow("图片总像素");
+  expect(submits).toEqual([
+    { model: "qwen-image-3.0-pro", size: "2048*1152", imageCount: 1 },
+    { model: "qwen-image-2.1-turbo", size: "576*1024", imageCount: 0 },
+    { model: "qwen-image-3.0", size: "1024*768", imageCount: 0 },
+  ]);
+  terminalStatus = "FAILED";
+  await expect(provider.generateImage(edit)).rejects.toMatchObject({
+    code: "MEDIA_TASK_FAILED", message: "阿里云图片参数无效，请核对尺寸、比例或参考图",
+  });
+  terminalStatus = "CANCELED";
+  await expect(provider.generateImage(edit)).rejects.toMatchObject({ code: "MEDIA_TASK_FAILED", message: "阿里云图片任务已取消" });
+});

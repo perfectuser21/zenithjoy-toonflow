@@ -136,7 +136,7 @@ async function addFiles(slot: number, list?: ArrayLike<File>) {
       ensureCurrent(saved);
       state.groups[slot].clips.push({ url, mimeType, name: file.name });
     }
-    await saved.save();
+    await saved.save(undefined, "checkpoint");
   } catch (reason) { showError(reason); } finally { busy.value = false; }
 }
 async function run(first: boolean) {
@@ -159,7 +159,7 @@ async function run(first: boolean) {
       batch.previewOnly = false;
     }
     if (first || selectedIndex.value >= target) selectedIndex.value = 0;
-    await saved.save(signal);
+    await saved.save(signal, "checkpoint");
     const lastClip: { url: string; blob: Blob }[] = [];
     await renderBatch(snapshot, target, batch.results.length, async (clips, index) => {
       signal.throwIfAborted(); ensureCurrent(saved);
@@ -178,7 +178,7 @@ async function run(first: boolean) {
       const url = await uploadNodeFile(workspace, id, new File([output], name, { type: "video/mp4" }));
       ensureCurrent(saved);
       batch.results.push({ name, url, mimeType: "video/mp4" });
-      await saved.save();
+      await saved.save(undefined, "checkpoint");
     });
   } catch (reason) {
     if (signal.aborted) error.value = "已暂停，已完成的视频可直接查看或下载";

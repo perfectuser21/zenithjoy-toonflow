@@ -137,7 +137,7 @@ async function run() {
     const previousResult = state.result;
     state.result = { url, mimeType: "video/mp4", sourceKey: key };
     try {
-      await saved.save(signal);
+      await saved.save(signal, "checkpoint");
     } catch (reason) {
       state.result = previousResult;
       throw reason;
