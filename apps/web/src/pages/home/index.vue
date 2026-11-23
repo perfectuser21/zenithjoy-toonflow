@@ -1,12 +1,12 @@
 <template>
   <div class="home" :class="{ sidebarCollapsed }" :inert="creating || opening || workspaceStore.projectLoadingVisible">
     <bg class="pageBackground" :scrollTop="backgroundScrollTop" />
-    <homeAdvertisementCarousel v-if="!publicWeb" class="topPromotion" :advertisements="advertisements.banners" placement="banner" :mode="advertisements.bannerMode" :interval="advertisements.bannerInterval" @activate="activateAdvertisement" />
+    <homeAdvertisementCarousel v-if="!isBrowserWeb && !publicWeb" class="topPromotion" :advertisements="advertisements.banners" placement="banner" :mode="advertisements.bannerMode" :interval="advertisements.bannerInterval" @activate="activateAdvertisement" />
     <aside id="homeSidebar" class="homeSidebar" aria-label="首页侧栏">
       <div class="sidebarHeader">
         <div class="sidebarBrand">
-          <el-image class="sidebarLogo" :src="logoUrl" fit="contain" alt="Toonflow" />
-          <span class="brandName">Toonflow</span>
+          <el-image class="sidebarLogo" :class="{ upstreamLogo: !isBrowserWeb }" :src="appBrand.logoUrl" fit="contain" alt="" />
+          <span class="brandName">{{ appBrand.name }}</span>
         </div>
         <button class="sidebarToggle" type="button" :aria-label="sidebarCollapsed ? '展开侧栏' : '收起侧栏'" :title="sidebarCollapsed ? '展开侧栏' : '收起侧栏'" :aria-expanded="!sidebarCollapsed" aria-controls="homeSidebar" @click="sidebarCollapsed = !sidebarCollapsed">
           <icon-layout-sidebar-left-expand v-if="sidebarCollapsed" :size="18" aria-hidden="true" />
@@ -25,7 +25,7 @@
         </button>
       </nav>
       <div class="sidebarFooter">
-        <homeAdvertisementCarousel v-if="!publicWeb" class="sidebarPromotion" :advertisements="advertisements.sidebar" @activate="activateAdvertisement" />
+        <homeAdvertisementCarousel v-if="!isBrowserWeb && !publicWeb" class="sidebarPromotion" :advertisements="advertisements.sidebar" @activate="activateAdvertisement" />
         <button v-if="!publicWeb" class="sidebarItem deviceButton" :class="{ connected: deviceHubEnabled || mobileConnection.online === true }" type="button" :aria-label="mobileConnectionLabel" :title="mobileConnectionLabel" @click="mobileConnectVisible = true">
           <span class="sidebarIcon">
             <component :is="deviceHubEnabled || mobileConnection.mode === 'remote' ? IconDeviceDesktop : IconQrcode" :size="18" aria-hidden="true" />
@@ -40,7 +40,7 @@
           </span>
           <span class="sidebarText">设置</span>
         </button>
-        <a class="sidebarItem githubLink" href="https://github.com/HBAI-Ltd/Toonflow-app" target="_blank" rel="noopener noreferrer" aria-label="GitHub" title="GitHub">
+        <a v-if="!isBrowserWeb" class="sidebarItem githubLink" href="https://github.com/HBAI-Ltd/Toonflow-app" target="_blank" rel="noopener noreferrer" aria-label="GitHub" title="GitHub">
           <icon-brand-github :size="18" aria-hidden="true" />
           <span class="sidebarText">GitHub</span>
         </a>
@@ -51,7 +51,7 @@
         <el-main class="pageContent">
           <section class="creationPanel" data-home-section="home" aria-label="创建项目">
             <div class="brand">
-              <el-image class="brandLogo" :src="logoUrl" fit="contain" alt="Toonflow" />
+              <el-image class="brandLogo" :class="{ upstreamLogo: !isBrowserWeb }" :src="appBrand.logoUrl" fit="contain" alt="" />
               <h1>今天要做点什么？</h1>
             </div>
             <div class="promptArea">
@@ -140,7 +140,7 @@ import attachmentList from "@/components/agent/attachmentList.vue";
 import { createPastedTextFile, readTextAttachment } from "@/components/agent/textAttachments";
 import type { AgentAttachment } from "@/components/agent/types";
 import type { HomeAdvertisement, HomeAdvertisements } from "@toonflow/server/channel";
-import logoUrl from "@toonflow/assets/logo.svg";
+import { appBrand, isBrowserWeb } from "@/lib/branding";
 import { useWorkspaceStore, type Project } from "@/stores/workspace";
 import { currentUser, publicWeb } from "@/stores/multiTenant";
 import { hasDesktopUpdate } from "@/stores/desktopUpdate";
@@ -205,7 +205,7 @@ const placeholderPhrases = [
 const promptPlaceholder = ref(translate(placeholderPhrases[0]!));
 
 onMounted(() => {
-  if (!publicWeb.value) void loadAdvertisements();
+  if (!isBrowserWeb && !publicWeb.value) void loadAdvertisements();
   window.addEventListener("dragend", clearAttachmentDrag, true);
   window.addEventListener("drop", clearAttachmentDrag, true);
   window.addEventListener("blur", clearAttachmentDrag);
@@ -541,7 +541,7 @@ async function exportProject(project: Project) {
   exportingDirectory.value = directory;
   try {
     let name = project.name.replace(/[<>:"/\\|?*\x00-\x1f\x7f-\x9f]/g, "_").slice(0, 120).replace(/[. ]+$/, "");
-    if (!name || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)) name = "Toonflow";
+    if (!name || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)) name = appBrand.name;
     const files = useWorkspaceFiles(directory);
     await saveFile(() => files.exportZip(pageLifetime.signal), `${name}.zip`);
   } catch (error) {
@@ -688,7 +688,7 @@ async function createProject(fromPrompt = true) {
           height: 30px;
           transition: opacity var(--sidebarFade) ease;
 
-          .dark & { filter: invert(1); }
+          &.upstreamLogo { .dark & { filter: invert(1); } }
         }
 
         .brandName {
@@ -825,9 +825,7 @@ async function createProject(fromPrompt = true) {
               width: clamp(28px, 3.4vw, 44px);
               height: clamp(28px, 3.4vw, 44px);
 
-              .dark & {
-                filter: invert(1);
-              }
+              &.upstreamLogo { .dark & { filter: invert(1); } }
             }
 
             h1 {

@@ -1,17 +1,17 @@
 <template>
   <div class="about">
     <div class="brand">
-      <div class="brandMark"><img class="brandLogo" :src="logoUrl" alt="Toonflow Logo" /></div>
+      <div class="brandMark"><img class="brandLogo" :class="{ upstreamLogo: !isBrowserWeb }" :src="appBrand.logoUrl" alt="" /></div>
       <div class="brandInfo">
-        <h3>Toonflow</h3>
-        <div class="brandMeta">
+        <h3>{{ appBrand.name }}</h3>
+        <div v-if="!isBrowserWeb" class="brandMeta">
           <span v-if="currentVersion">v{{ currentVersion }}</span>
           <el-tag v-if="clientBuild?.channel || snapshot?.channel" type="info" size="small" round>{{ clientBuild?.channel || snapshot?.channel }}</el-tag>
         </div>
       </div>
     </div>
 
-    <el-card v-if="!publicWeb && (isMobile || !isRemoteConnection)" class="infoCard updateCard" shadow="never">
+    <el-card v-if="!isBrowserWeb && !publicWeb && (isMobile || !isRemoteConnection)" class="infoCard updateCard" shadow="never">
       <div class="cardHeader">
         <div class="updateCopy">
           <div class="cardLabel">
@@ -57,7 +57,14 @@
       </div>
     </el-card>
 
-    <el-card class="infoCard repositoryCard" shadow="never">
+    <el-card v-if="isBrowserWeb" class="infoCard" shadow="never">
+      <details class="openSourceLicense">
+        <summary>开源许可 · Toonflow</summary>
+        <pre>{{ upstreamLicense }}</pre>
+      </details>
+    </el-card>
+
+    <el-card v-else class="infoCard repositoryCard" shadow="never">
       <a class="repositoryLink" :href="repositoryUrl" target="_blank" rel="noopener noreferrer" aria-label="GitHub 仓库：HBAI-Ltd/Toonflow-app">
         <icon-brand-github class="repositoryIcon" :size="22" aria-hidden="true" />
         <div class="repositoryInfo">
@@ -67,7 +74,7 @@
       </a>
     </el-card>
 
-    <el-card class="infoCard" shadow="never">
+    <el-card v-if="!isBrowserWeb" class="infoCard" shadow="never">
       <div class="cardHeader">
         <div class="cardLabel">
           <icon-brand-wechat :size="20" aria-hidden="true" />
@@ -103,7 +110,7 @@
       </div>
     </el-card>
 
-    <section class="sponsorPanel" aria-label="赞助商">
+    <section v-if="!isBrowserWeb" class="sponsorPanel" aria-label="赞助商">
       <h3 class="sponsorTitle">
         <icon-gift :size="20" aria-hidden="true" />
         赞助商
@@ -235,7 +242,8 @@ import {
   IconBrandWechat,
   IconQrcode,
 } from "@tabler/icons-vue";
-import logoUrl from "@toonflow/assets/logo.svg";
+import { appBrand, isBrowserWeb } from "@/lib/branding";
+import upstreamLicense from "../../../../../../../LICENSE?raw";
 import type { Sponsor } from "@toonflow/server/channel";
 import http from "@/lib/http";
 import { saveSettings } from "@/stores/settings";
@@ -296,6 +304,7 @@ const resultMessage = computed(() => {
 const sponsors = ref<Sponsor[]>([]);
 
 onMounted(async () => {
+  if (isBrowserWeb) return;
   try {
     sponsors.value = await http<Sponsor[]>({ method: "GET", url: "/api/channel/community/getSponsorList", signal: controller.signal });
   } catch (error) {
@@ -382,6 +391,11 @@ async function runUpdate(nextAction: "read" | "check" | "download" | "apply") {
 </script>
 
 <style lang="scss" scoped>
+.openSourceLicense {
+  summary { cursor: pointer; }
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: 0; }
+}
+
 .about {
   display: flex;
   flex-direction: column;
@@ -407,9 +421,7 @@ async function runUpdate(nextAction: "read" | "check" | "download" | "apply") {
         height: 42px;
         object-fit: contain;
 
-        .dark & {
-          filter: invert(1);
-        }
+        &.upstreamLogo { .dark & { filter: invert(1); } }
       }
     }
 
