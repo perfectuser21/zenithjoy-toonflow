@@ -411,12 +411,12 @@ provide("nodePersistence", () => {
   return {
     directory,
     canvasPath,
-    async save(signal?: AbortSignal) {
+    async save(signal?: AbortSignal, mode?: "checkpoint") {
       signal?.throwIfAborted();
       if (project.value?.directory !== directory || canvasId.value !== canvasPath) throw new Error("画布已切换，无法保存节点任务");
       let abort = () => {};
       try {
-        const saving = flushCanvasSave();
+        const saving = flushCanvasSave(undefined, mode);
         await (signal ? Promise.race([saving, new Promise<never>((_resolve, reject) => {
           abort = () => reject(signal.reason);
           signal.addEventListener("abort", abort, { once: true });
@@ -856,9 +856,9 @@ watch(() => props.active, (active) => {
   resetCanvasKeys();
 }, { flush: "sync" });
 
-function flushCanvasSave(action?: () => Promise<void>): Promise<void> {
+function flushCanvasSave(action?: () => Promise<void>, mode?: "checkpoint"): Promise<void> {
   // ACT: 完整保存及其文件操作串行执行，重命名暂停期间的显式保存也必须等待。
-  const next = flushing.then(() => saveCanvasState(action)).then(() => { canvasSaveError.value = ""; }, error => {
+  const next = flushing.then(() => saveCanvasState(action, mode)).then(() => { canvasSaveError.value = ""; }, error => {
     canvasSaveError.value = axios.isAxiosError<{ message?: string }>(error) ? error.response?.data.message || error.message : error instanceof Error ? error.message : "画布保存失败";
     throw error;
   });
@@ -866,9 +866,9 @@ function flushCanvasSave(action?: () => Promise<void>): Promise<void> {
   return next;
 }
 
-async function saveCanvasState(action?: () => Promise<void>) {
+async function saveCanvasState(action?: () => Promise<void>, mode?: "checkpoint") {
   if (saveCancelled) throw new Error("画布保存已取消");
-  await Promise.all(flow.getNodes.value.map((node) => useNodeEvent(node.id, flow).emit("save")));
+  if (mode !== "checkpoint") await Promise.all(flow.getNodes.value.map((node) => useNodeEvent(node.id, flow).emit("save")));
   await nextTick();
   if (saveCancelled) throw new Error("画布保存已取消");
   if (saveError && project.value?.directory && canvasId.value) saveCanvas(project.value.directory, canvasId.value);
@@ -886,7 +886,7 @@ async function saveCanvasState(action?: () => Promise<void>) {
       await saving;
       if (saveError) throw saveError;
       // 画布写入期间节点可能完成生成，等新增落盘后重新保存变化。
-      await Promise.all(flow.getNodes.value.map((node) => useNodeEvent(node.id, flow).emit("save")));
+      if (mode !== "checkpoint") await Promise.all(flow.getNodes.value.map((node) => useNodeEvent(node.id, flow).emit("save")));
       await nextTick();
     } while (revision !== saveRevision);
     if (saveCancelled) throw new Error("画布保存已取消");

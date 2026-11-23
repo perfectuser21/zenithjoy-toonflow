@@ -6,7 +6,7 @@ export type NodeDocumentState = { dirty: boolean; error: string; deleted: boolea
 export type NodePersistenceContext = {
   directory: string;
   canvasPath: string;
-  save(signal?: AbortSignal): Promise<void>;
+  save(signal?: AbortSignal, mode?: "checkpoint"): Promise<void>;
 };
 
 export function useNodePersistence() {

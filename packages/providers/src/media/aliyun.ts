@@ -11,6 +11,28 @@ type TaskResponse = { code?: string; message?: string; output?: { task_id?: stri
 const modelIds = ["wan3.0-video", "wan3.0-video-prime"];
 const imageModelIds = ["qwen-image-3.0-pro", "qwen-image-3.0", "qwen-image-2.1-pro", "qwen-image-2.1-turbo"];
 const ratios = ["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"];
+const imageDimensions = {
+  "1K": { "16:9": "1024*576", "9:16": "576*1024", "1:1": "1024*1024", "4:3": "1024*768", "3:4": "768*1024", "3:2": "1008*672", "2:3": "672*1008" },
+  "2K": { "16:9": "2048*1152", "9:16": "1152*2048", "1:1": "2048*2048", "4:3": "2048*1536", "3:4": "1536*2048", "3:2": "2016*1344", "2:3": "1344*2016" },
+};
+
+function dashScopeImageSize(size?: string, ratio = "1:1") {
+  if (size === undefined) return undefined;
+  if (size === "1K" || size === "2K") {
+    const dimensions = Object.entries(imageDimensions[size]).find(([key]) => key === ratio)?.[1];
+    if (!dimensions) throw new Error("当前阿里云图片模型不支持所选比例");
+    return dimensions;
+  }
+  const pixels = /^([1-9]\d{0,3})[x*]([1-9]\d{0,3})$/i.exec(size.trim());
+  if (!pixels) throw new Error("图片尺寸请选择 1K、2K 或指定具体像素宽高");
+  const width = Number(pixels[1]);
+  const height = Number(pixels[2]);
+  const area = width * height;
+  if (area < 512 ** 2 || area > 2048 ** 2 || Math.max(width, height) > 8 * Math.min(width, height)) {
+    throw new Error("阿里云图片总像素须在 512×512 到 2048×2048 之间，宽高比须在 1:8 到 8:1 之间");
+  }
+  return `${width}*${height}`;
+}
 
 function configuration(context: Context) {
   const apiKey = context.config.apiKey.trim();
@@ -187,7 +209,12 @@ async function pollImageTask(context: Context, taskId: string): Promise<MediaAss
         return { mediaType: "image" as const, type: "url" as const, url: url.href, mimeType: "image/png" };
       });
     }
-    if (["FAILED", "CANCELED"].includes(output?.task_status ?? "")) throw Object.assign(new Error("图片任务失败或已取消"), { code: "MEDIA_TASK_FAILED" });
+    if (output?.task_status === "FAILED" || output?.task_status === "CANCELED") {
+      const message = output.task_status === "CANCELED" ? "阿里云图片任务已取消"
+        : output.code === "InvalidParameter" ? "阿里云图片参数无效，请核对尺寸、比例或参考图"
+        : "阿里云图片任务执行失败";
+      throw Object.assign(new Error(message), { code: "MEDIA_TASK_FAILED" });
+    }
     if (output?.task_status === "UNKNOWN") throw new Error("图片任务状态未知或已过期，请核对阿里云记录，不能自动重新提交");
     if (!output?.task_status) throw new Error("阿里云未返回图片任务状态，请保留原任务稍后恢复查询");
     await wait(signal);
@@ -201,10 +228,14 @@ export default {
   rules,
   readme: "支持文生视频、首尾帧和多素材参考，也可用提示词编辑参考视频。参考视频总长不超过 15 秒；参考音频总长不超过 15 秒。输入视频加输出视频总长不超过 30 秒。图片/视频/音频分别最多 20MB/100MB/15MB；视频使用 MP4/MOV，音频使用 WAV/MP3。上传素材自动使用阿里云临时存储（北京/新加坡，48 小时有效），其他地域使用公开素材地址。视频时长、帧率等由阿里云校验；长视频需先分镜切段。任务暂停或断线后恢复会继续查询原任务。",
   models: [
-    { id: "qwen-image-3.0-pro", label: "千问图像 3.0 专业版", type: "image", mode: ["text", "singleImage", "multiReference"] },
-    { id: "qwen-image-3.0", label: "千问图像 3.0", type: "image", mode: ["text", "singleImage", "multiReference"] },
-    { id: "qwen-image-2.1-pro", label: "千问图像 2.1 专业版", type: "image", mode: ["text", "singleImage", "multiReference"] },
-    { id: "qwen-image-2.1-turbo", label: "千问图像 2.1 极速版", type: "image", mode: ["text", "singleImage", "multiReference"] },
+    { id: "qwen-image-3.0-pro", label: "千问图像 3.0 专业版", type: "image", mode: ["text", "singleImage", "multiReference"],
+      imageSizes: ["2K", "1K"], imageRatios: ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3"] },
+    { id: "qwen-image-3.0", label: "千问图像 3.0", type: "image", mode: ["text", "singleImage", "multiReference"],
+      imageSizes: ["2K", "1K"], imageRatios: ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3"] },
+    { id: "qwen-image-2.1-pro", label: "千问图像 2.1 专业版", type: "image", mode: ["text", "singleImage", "multiReference"],
+      imageSizes: ["2K", "1K"], imageRatios: ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3"] },
+    { id: "qwen-image-2.1-turbo", label: "千问图像 2.1 极速版", type: "image", mode: ["text", "singleImage", "multiReference"],
+      imageSizes: ["2K", "1K"], imageRatios: ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3"] },
     {
       id: "wan3.0-video", label: "万相 3.0 标准版", type: "video",
       mode: ["text", "endFrameOptional", ["imageReference:10", "videoReference:5", "audioReference:5"]],
@@ -232,6 +263,7 @@ export default {
     if (!imageModelIds.includes(request.model) || !request.prompt.trim() || request.prompt.length > 20000) throw new Error("请选择千问图像模型并填写图片要求");
     if (request.images && request.images.length > (request.model.startsWith("qwen-image-3.0") ? 3 : 10)) throw new Error("参考图片数量超过模型限制");
     if (request.mask || request.other && Object.keys(request.other).length || request.n !== undefined && request.n !== 1) throw new Error("当前图片任务仅支持生成一张图片");
+    const size = dashScopeImageSize(request.size, request.ratio);
     const { apiKey, baseUrl } = configuration(this);
     const signal = signalFor(this, 10 * 60 * 1000);
     const images = [];
@@ -240,10 +272,9 @@ export default {
       if (image.startsWith("data:") && image.length > 14000000) throw new Error("参考图片不能超过 10 MB");
       images.push({ image });
     }
-    const parameters = request.size ? { n: 1, size: request.size.replace("x", "*") } : { n: 1 };
     const data = await requestJson(this, `${baseUrl}/api/v1/services/aigc/image-generation/generation`, {
       method: "POST", headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json", "X-DashScope-Async": "enable" },
-      body: JSON.stringify({ model: request.model, input: { messages: [{ role: "user", content: [...images, { text: request.prompt }] }] }, parameters }), signal,
+      body: JSON.stringify({ model: request.model, input: { messages: [{ role: "user", content: [...images, { text: request.prompt }] }] }, parameters: { n: 1, size } }), signal,
     });
     const taskId = data.output?.task_id;
     if (typeof taskId !== "string" || !/^[a-zA-Z0-9-]+$/.test(taskId)) throw new Error("阿里云未返回任务编号，请核对平台记录后再操作，避免重复提交");
