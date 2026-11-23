@@ -1,4 +1,5 @@
 import { createRouter, createWebHashHistory } from "vue-router";
+import { isBrowserWeb } from "@/lib/branding";
 import { useHelloStore } from "@/stores/hello";
 import { useWorkspaceStore } from "@/stores/workspace";
 import { publicWeb } from "@/stores/multiTenant";
@@ -8,11 +9,11 @@ const router = createRouter({
   routes: [
     {
       path: "/",
-      redirect: () => publicWeb.value ? "/home" : "/hello",
+      redirect: () => isBrowserWeb || publicWeb.value ? "/home" : "/hello",
     },
     {
       path: "/hello",
-      beforeEnter: async () => publicWeb.value || await useHelloStore().load() ? { path: "/home", replace: true } : true,
+      beforeEnter: async () => isBrowserWeb || publicWeb.value || await useHelloStore().load() ? { path: "/home", replace: true } : true,
       component: () => import("@/pages/hello/index.vue"),
     },
     {

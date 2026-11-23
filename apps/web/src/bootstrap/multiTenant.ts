@@ -18,12 +18,10 @@ export async function initializeMultiTenant(): Promise<{ session: UserSession; a
   let app: App<Element> | undefined;
 
   if (session.publicWeb && !session.user) {
-    const [{ default: userWeb }, { default: authBackdrop }] = await Promise.all([
-      import("@toonflow/multi-tenant-user-web"), import("@/pages/hello/bg.vue"),
-    ]);
+    const { default: userWeb } = await import("@toonflow/multi-tenant-user-web");
     app = createApp({ render: () => h(ElConfigProvider, { locale: elementLocales[locale.value] }, () => h(userWeb, {
       request: http, brand: webBrand, registrationEnabled: session.registrationEnabled, onAuthenticated: () => window.location.reload(),
-    }, { art: () => h(authBackdrop) })) });
+    })) });
   } else if (!session.publicWeb && (session.enabled || window.location.hash.startsWith("#/multiTenant"))) {
     const [{ createAdminRouter }, { RouterView }] = await Promise.all([
       import("@/pages/multiTenant/router"), import("vue-router"),
