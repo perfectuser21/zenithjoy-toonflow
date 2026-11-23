@@ -12,6 +12,7 @@ export type ModelRequestContext = {
   payload: unknown;
   scope?: string;
   recoverExisting?: boolean;
+  inputVideoSeconds?: number;
 };
 export type AvailableModel = {
   target: ModelRoute["target"];
@@ -58,7 +59,6 @@ export interface ModelAdapter<T, Public, Cloud extends Record<string, unknown>> 
 
 export type ModelGatewayOptions<Upstreams extends ModelMap, Catalogs extends ModelMap, Cloud extends Record<string, unknown>> = {
   enabled(): boolean;
-  applyUserProviderKey<K extends ModelType>(type: K, route: ModelRoute, upstream: Upstreams[K], apiKey: string): Promise<Upstreams[K]> | Upstreams[K];
   formatPrice(price: ModelPrice): string;
   adapters: { [K in ModelType]: ModelAdapter<Upstreams[K], Catalogs[K], Cloud> };
   cloud: {

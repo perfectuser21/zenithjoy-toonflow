@@ -1,3 +1,4 @@
+import { cnyToPoints } from "@toonflow/multi-tenant-billing/config";
 import { t, translateMessage } from "@/lib/i18n";
 import { createReadStream, mkdir, open, readFile, readlink, realpath, stat, statfs, unlink } from "@toonflow/file";
 import { join, relative } from "node:path";
@@ -38,6 +39,7 @@ type MediaGenerationTask = {
   actor?: ModelActor;
   legacyTaskOwnerId?: string;
   outputGeneration?: number;
+  wanInput?: { seconds: number; hashes: string[] };
   beforeSubmit?: () => Promise<void>;
   beforeNetwork?: () => Promise<void>;
   onWanSubmit?: () => void;
@@ -66,7 +68,7 @@ export async function validateWanVideoReferences(cwd: string, request: MediaGene
   actor?: ModelActor, modelRouteCipher?: string, signal?: AbortSignal, legacyTaskOwnerId?: string) {
   if (!request.videos?.length) return;
   let providerId = request.providerId, modelId = request.modelId;
-  if (modelRouteCipher) {
+  if (modelRouteCipher || actor && modelGateway.enabled()) {
     if (!actor) invalid("缺少模型请求身份");
     const execution = await modelGateway.resolve("video", providerId, modelId, modelRouteCipher, request, { actor, legacyTaskOwnerId });
     if (execution.route.target !== "backend") return;
@@ -143,7 +145,7 @@ export async function validateWanVideoReferences(cwd: string, request: MediaGene
       assertWanReferenceDuration(total);
     }
     assertWanReferenceDuration(total, request.duration);
-    return hashes;
+    return { hashes, seconds: total };
   } catch (cause) {
     checkDeadline();
     throw cause;
@@ -343,8 +345,15 @@ export async function getMediaPrice(directory: string | undefined, mediaType: "i
   if (modelGateway.enabled()) {
     const actor = currentIdentity();
     if (!actor) throw Object.assign(new Error("请先登录 Toonflow"), { status: 401 });
-    const quote = await modelGateway.quoteRequest(mediaType, request.providerId, request.modelId, request, { actor: { id: actor.id, role: actor.role } });
-    if (quote.billingMode === "userProvider") return { price: "模型费用由您的阿里云账号收取，具体以阿里云账单为准。", tips: "模型费用由您的阿里云账号收取，具体以阿里云账单为准。" };
+    if (mediaType === "video" && request.videos?.length && !directory) invalid("参考视频需要工作目录");
+    const wanInput = mediaType === "video" && directory
+      ? await validateWanVideoReferences(directory, request, actor, undefined, signal) : undefined;
+    const quote = await modelGateway.quoteRequest(mediaType, request.providerId, request.modelId, request,
+      { actor: { id: actor.id, role: actor.role } }, wanInput?.seconds);
+    if (actor.role === "user") {
+      const points = cnyToPoints(quote.amount);
+      return { points, price: `${points} 积分`, tips: "预估积分，按实际用量结算" };
+    }
     return { ...quote, price: `${quote.amount} ${quote.currency}`, tips: translateMessage("平台售价，按实际用量结算") };
   }
   const { provider } = await configuredProvider(request, mediaType, signal, directory);
@@ -365,8 +374,10 @@ export async function generateMedia(
   const checkpoint = task?.checkpoint;
   let submitted = task?.resume === true || !!checkpoint?.providerData || checkpoint?.assetCount !== undefined || !!checkpoint?.files?.length;
   try {
-    const videoHashes = !submitted && mediaType === "video" ? await validateWanVideoReferences(cwd, request, task?.actor ?? currentIdentity(), task?.modelRouteCipher, signal, task?.legacyTaskOwnerId) : undefined;
-    return await executeMedia(cwd, mediaType, request, signal, task, () => { submitted = true; }, videoHashes);
+    const wanInput = !submitted && mediaType === "video" ? await validateWanVideoReferences(cwd, request, task?.actor ?? currentIdentity(), task?.modelRouteCipher, signal, task?.legacyTaskOwnerId) : undefined;
+    if (!submitted && task?.wanInput && (!wanInput || wanInput.seconds !== task.wanInput.seconds ||
+      JSON.stringify(wanInput.hashes) !== JSON.stringify(task.wanInput.hashes))) invalid("参考视频已改变，请重新报价和生成");
+    return await executeMedia(cwd, mediaType, request, signal, task, () => { submitted = true; }, wanInput?.hashes);
   } catch (cause) {
     // ACT: 仅宿主确认尚未调用供应商的异常证明未提交；供应商错误码不能伪造此证据。
     if (!task?.modelRouteCipher || submitted) throw cause;
@@ -445,7 +456,10 @@ async function executeMedia(
       if (typeof generate !== "function") invalid(t`此供应商不支持${translateMessage({ image: "图片", video: "视频", audio: "音频" }[mediaType])}生成`);
       const rules = Array.isArray(provider.rules) ? provider.rules : [];
       if (provider.id !== "toonflow" && rules.some(rule => rule.field === "apiKey")
-        && (typeof provider.config.apiKey !== "string" || !provider.config.apiKey.trim())) invalid("请先在媒体模型设置中配置供应商 API Key");
+        && (typeof provider.config.apiKey !== "string" || !provider.config.apiKey.trim())) {
+        if (modelRouteCipher) throw Object.assign(new Error("此模型暂不可用，请联系管理员"), { status: 503 });
+        invalid("请先在媒体模型设置中配置供应商 API Key");
+      }
       const uploadedVideoHashes = new Map<string, string>();
       const submit = async (reader: (cwd: string, reference: MediaReference, type: string, signal?: AbortSignal) => Promise<MediaInput>, afterPrepare?: () => void) => {
         let prepared: Awaited<ReturnType<typeof prepareRequest<MediaInput>>>;

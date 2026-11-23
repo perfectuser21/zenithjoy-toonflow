@@ -1,3 +1,4 @@
+import { cnyToPoints } from "@toonflow/multi-tenant-billing/config";
 import { Router } from "express";
 import { z } from "zod";
 import type { Context, Message } from "@earendil-works/pi-ai";
@@ -65,6 +66,8 @@ export default Router().post("/", validateFields(inputSchema.shape), async (req,
   const input = inputSchema.parse(req.body, validationOptions());
   const identity = u.multiTenant.requestIdentity(req);
   const configured = await u.ai.getConfiguredModel(input.providerId, input.modelId, identity);
+  const publicBilling = (receipt: ModelFinalization) => identity?.role === "user" && receipt.status !== "held"
+    ? { points: cnyToPoints(receipt.amount), status: receipt.status, capped: receipt.capped } : receipt;
   const controller = new AbortController();
   let chargeId: string | undefined;
   let billing: ModelFinalization | undefined;
@@ -133,12 +136,12 @@ export default Router().post("/", validateFields(inputSchema.shape), async (req,
     }
     const publicMessage = usage ? { ...message, usage: { ...message.usage, ...usage,
       totalTokens: usage.input + usage.output + usage.cacheRead + usage.cacheWrite } } : message;
-    send({ type: "done", message: { ...u.ai.publicAiMessage(configured, publicMessage, Boolean(usage)), ...(billing ? { billing } : {}) } });
+    send({ type: "done", message: { ...u.ai.publicAiMessage(configured, publicMessage, Boolean(usage)), ...(billing ? { billing: publicBilling(billing) } : {}) } });
   } catch (cause) {
     if (!res.headersSent) throw cause;
     const receipt = (cause as ModelRunFailure | null)?.billing ?? billing;
     send({ type: "error", message: configured.route ? translateMessage("模型请求失败，请稍后重试") : cause instanceof Error ? translateError(cause) : translateMessage("模型请求失败"),
-      ...(receipt ? { billing: receipt } : {}) });
+      ...(receipt ? { billing: publicBilling(receipt) } : {}) });
   } finally {
     clearInterval(heartbeat);
     clearTimeout(deadline);

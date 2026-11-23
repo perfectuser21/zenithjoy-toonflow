@@ -1,3 +1,4 @@
+import { cnyToPoints } from "@toonflow/multi-tenant-billing/config";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
@@ -37,7 +38,7 @@ export async function getConfiguredModel(providerId: string, modelId: string, ac
   return {
     provider,
     model: { ...model, label: execution?.route.label ?? model.label, ...getModelReasoning(upstreamProviderId, model, provider.protocol), contextWindow: limits.contextWindow, maxOutputTokens: limits.maxTokens },
-    baseUrl, execution, route: execution?.route, revision: execution?.revision, publicProviderId: providerId, publicModelId: modelId,
+    baseUrl, execution, customer: actor?.role === "user", route: execution?.route, revision: execution?.revision, publicProviderId: providerId, publicModelId: modelId,
   };
 }
 
@@ -62,8 +63,7 @@ export async function listAiModels() {
 
 export function publicAiMessage(configured: ConfiguredModel, message: AssistantMessage, usageKnown = true) {
   if (!configured.route) return message;
-  const customerKey = configured.execution?.billingMode === "userProvider";
-  const priceQuote = !customerKey && usageKnown && configured.execution ? modelGateway.quote(configured.execution, message.usage) : undefined;
+  const priceQuote = usageKnown && configured.execution ? modelGateway.quote(configured.execution, message.usage) : undefined;
   return {
     role: message.role, content: message.content, api: message.api,
     provider: configured.publicProviderId, model: configured.publicModelId,
@@ -76,10 +76,11 @@ export function publicAiMessage(configured: ConfiguredModel, message: AssistantM
     stopReason: message.stopReason, timestamp: message.timestamp,
     ...(message.providerThinkingLevel === undefined ? {} : { providerThinkingLevel: message.providerThinkingLevel }),
     usageKnown,
-    ...(customerKey ? { billingMode: "userProvider", billingNotice: "模型费用由您的阿里云账号收取，具体以阿里云账单为准。", costSource: "unavailable" } : {}),
     modelRouteRevision: configured.revision,
     ...(message.errorMessage ? { errorMessage: "模型请求失败，请稍后重试" } : {}),
-    ...(priceQuote ? { priceQuote: { ...priceQuote, routeRevision: configured.revision } } : {}),
+    ...(priceQuote ? { priceQuote: {
+      ...(configured.customer ? { points: cnyToPoints(priceQuote.amount) } : priceQuote), routeRevision: configured.revision,
+    } } : {}),
   };
 }
 

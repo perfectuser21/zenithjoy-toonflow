@@ -46,6 +46,7 @@ const recordSchema = z.strictObject({
   ownerUserId: z.uuid().optional(), ownerAdminId: z.string().min(1).max(64).regex(/^[a-zA-Z0-9_-]+$/).optional(), executionLeaseId: z.uuid().optional(),
   submissionState: z.enum(["notSubmitted", "submitting"]).optional(), modelRouteCipher: z.string().min(1).max(8 * 1024 * 1024).optional(),
   chargeId: z.string().min(1).max(128).optional(),
+  wanInput: z.strictObject({ seconds: z.number().positive().max(60), hashes: z.array(hashSchema).min(1).max(64) }).optional(),
   chargeStatus: z.enum(["settled", "released", "pendingReview"]).optional(),
   state: z.enum(["running", "interrupted", "succeeded", "failed", "cancelled"]),
   createdAt: z.number().finite().nonnegative(), updatedAt: z.number().finite().nonnegative(),
@@ -321,7 +322,7 @@ async function settleCharge(task: MediaTask, files: GeneratedMedia[], signal = t
   if (record.chargeStatus === "settled" || record.chargeStatus === "released") { task.chargeFinalized = true; return; }
   if (!record.modelRouteCipher || !record.request || !record.mediaType) invalid("媒体任务扣费记录无效", 409);
   if (!files.length) invalid("媒体任务扣费记录无效", 409);
-  let seconds = 0;
+  let seconds = record.wanInput?.seconds ?? 0;
   let durationKnown = record.mediaType === "video";
   const paths = await Promise.all(files.map(file => resolveWorkspacePath(record.cwd, file.path)));
   const release = lockWorkspaceFiles(paths.map(item => item.path));
@@ -389,7 +390,7 @@ async function prepareCharge(task: MediaTask, recoverExisting = false) {
     record.chargeId = await modelGateway.reserveSnapshot(record.mediaType, record.request.providerId, record.request.modelId,
       record.modelRouteCipher, record.request, {
         actor: { id: record.ownerUserId, role: "user" }, requestId: record.taskId,
-        payload: record.request, scope: record.cwd, recoverExisting,
+        payload: record.request, scope: record.cwd, recoverExisting, inputVideoSeconds: record.wanInput?.seconds,
       }, record.ownerUserId);
   } catch (cause) {
     if ((cause as { status?: number } | null)?.status === 402) {
@@ -408,7 +409,7 @@ async function execute(task: MediaTask, resume: boolean) {
   const { record } = task;
   try {
     const files = await generateMedia(record.cwd, record.mediaType!, record.request!, task.controller!.signal, {
-      taskId: record.taskId, resume, checkpoint: record.checkpoint, modelRouteCipher: record.modelRouteCipher,
+      taskId: record.taskId, resume, checkpoint: record.checkpoint, modelRouteCipher: record.modelRouteCipher, wanInput: record.wanInput,
       onWanSubmit: record.mediaType === "video" ? () => logVideoTiming(record.taskId, "provider_submit_attempted", record.createdAt) : undefined,
       onProviderResult: record.mediaType === "video" ? () => logVideoTiming(record.taskId, "provider_result_received", record.createdAt) : undefined,
       actor: record.ownerUserId ? { id: record.ownerUserId, role: "user" }
@@ -643,12 +644,14 @@ export async function start(cwd: string, taskId: string, mediaType: "image" | "v
     const modelRouteCipher = modelGateway.enabled()
       ? await modelGateway.capture(mediaType, parsed.providerId, parsed.modelId, parsed, { actor: { id: owner!.id, role: owner!.role } }) : undefined;
     if (owner?.role === "user" && !modelRouteCipher) invalid("多租户模型路由尚未开启", 403);
-    if (mediaType === "video") await validateWanVideoReferences(cwd, parsed, owner ? { id: owner.id, role: owner.role } : undefined, modelRouteCipher);
+    const wanInput = mediaType === "video"
+      ? await validateWanVideoReferences(cwd, parsed, owner ? { id: owner.id, role: owner.role } : undefined, modelRouteCipher)
+      : undefined;
     const now = Date.now();
     const task: MediaTask = { key, blobs: [], active: false, record: {
       version: 1, taskId, cwd, mediaType, request: parsed, ...attachment,
       ownerUserId: owner?.role === "user" ? owner.id : undefined,
-      ownerAdminId: owner?.role === "admin" ? owner.id : undefined, modelRouteCipher,
+      ownerAdminId: owner?.role === "admin" ? owner.id : undefined, modelRouteCipher, wanInput,
       submissionState: attachment.executionLeaseId ? "notSubmitted" : undefined,
       state: "running", createdAt: now, updatedAt: now, checkpoint: {},
     } };

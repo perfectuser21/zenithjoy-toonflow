@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { calculateModelPrice, createModelRouting, createUserProviderKeys } from "@toonflow/multi-tenant-models";
+import { calculateModelPrice, createModelRouting } from "@toonflow/multi-tenant-models";
 import { getPublicModelId, modelRouteSchema, modelRoutesSchema, modelRoutingRevisionSchema, publicModelIdSchema, modelProviderSchema, modelProvidersSchema } from "@toonflow/multi-tenant-models/config";
 import type { ManagedModelProvider, ModelProvider, ModelRoute, ProviderConfigurationSnapshot } from "@toonflow/multi-tenant-models/config";
 import { createBilling } from "@toonflow/multi-tenant-billing";
-import { billingUsageSchema } from "@toonflow/multi-tenant-billing/config";
+import { billingUsageSchema, cnyToPoints } from "@toonflow/multi-tenant-billing/config";
 import type { BillingCredit, BillingReleaseMetadata, BillingUsage } from "@toonflow/multi-tenant-billing/config";
 import type { AvailableModel, ModelAccess, ModelExecution, ModelFinalization, ModelGatewayOptions, ModelMap, ModelOutcome, ModelRequestContext, ModelRunFailure, ModelRunInput, ModelType, ModelExecutionResources, PublicModel } from "./types";
 
@@ -31,6 +31,7 @@ const accessSchema = z.strictObject({ actor: z.object({ id: z.string().min(1).ma
 const contextSchema = z.strictObject({
   actor: z.object({ id: z.string().min(1).max(64), role: z.enum(["user", "admin"]) }).nullable(),
   requestId: z.uuid(), payload: z.unknown(), scope: z.string().min(1).max(4096).optional(), recoverExisting: z.boolean().optional(),
+  inputVideoSeconds: z.number().positive().max(60).optional(),
 });
 const outcomeSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("usage"), usage: billingUsageSchema }),
@@ -43,6 +44,26 @@ function fail(message: string, status = 400): never { throw Object.assign(new Er
 
 function matchesPublicModel(route: ModelRoute, modelId: string) {
   return getPublicModelId(route) === modelId || route.id === modelId;
+}
+
+function withInputVideoSeconds(usage: BillingUsage, inputSeconds?: number): BillingUsage {
+  return usage.seconds === undefined || inputSeconds === undefined
+    ? usage : { ...usage, seconds: usage.seconds + inputSeconds };
+}
+
+function customerModel(route: ModelRoute) {
+  const price = route.salePrice;
+  if (route.target !== "backend" || price.currency !== "CNY") return false;
+  return price.mode === "perMillionTokens"
+    ? Number(price.input) > 0 && Number(price.output) > 0
+    : Number(price.amount) > 0;
+}
+
+function customerPriceLabel(price: ModelRoute["salePrice"]) {
+  if (price.mode === "perMillionTokens") {
+    return `输入 ${cnyToPoints(price.input)} / 输出 ${cnyToPoints(price.output)} 积分/百万 Token`;
+  }
+  return `${cnyToPoints(price.amount)} 积分/${price.mode === "perSecond" ? "秒" : "次"}`;
 }
 
 async function access<T>(operation: () => Promise<T> | T, message: string) {
@@ -77,7 +98,6 @@ export function createModelGateway<Upstreams extends ModelMap, Catalogs extends 
   options: ModelGatewayOptions<Upstreams, Catalogs, Cloud>,
 ) {
   const routing = createModelRouting(dataDirectory);
-  const providerKeys = createUserProviderKeys(dataDirectory);
   const billing = createBilling(dataDirectory);
   const executionOwners = new WeakMap<object, { ownerId: string; billingMode: "platform" | "userProvider" }>();
   const routeAccess = <T>(operation: () => Promise<T> | T) => access(operation, "模型路由配置访问失败");
@@ -184,22 +204,8 @@ export function createModelGateway<Upstreams extends ModelMap, Catalogs extends 
       const current = await read();
       const route = current.routes.find(item => matchesPublicModel(item, publicModelId) && item.type === type && item.enabled);
       if (!route) fail("平台模型不存在或已停用", 404);
+      if (actor.role === "user" && !customerModel(route)) fail("所选模型暂不可用", 403);
       execution = { route, revision: current.revision, upstream: await readUpstream(type, route, current.revision) };
-      // 新请求只开放明确支持的客户自带密钥供应商；不得把别名或未知代理回退为平台计费。
-      if (actor.role === "user" && !(route.target === "backend" &&
-        (type === "text" ? route.providerId === "aliyunQwen" : route.providerId === "aliyun"))) {
-        fail("该模型暂未开放客户自带密钥调用，请联系管理员", 403);
-      }
-      if (actor.role === "user" && route.target === "backend" &&
-        (type === "text" ? route.providerId === "aliyunQwen" : route.providerId === "aliyun")) {
-        const apiKey = await providerKeys.openForExecution(actor.id, "aliyun");
-        if (!apiKey) fail("请先在个人设置中配置阿里云 API Key", 400);
-        const price = route.salePrice;
-        const salePrice = price.mode === "perMillionTokens"
-          ? { ...price, input: "0", output: "0", cacheRead: "0", cacheWrite: "0" } : { ...price, amount: "0" };
-        execution = { route: { ...route, salePrice, costPrice: null }, revision: current.revision, billingMode: "userProvider",
-          upstream: await options.applyUserProviderKey(type, route, execution.upstream, apiKey) };
-      }
     }
     if (request !== undefined) await routeAccess(() => adapter.validate(execution, request));
     executionOwners.set(execution, { ownerId: actor.id, billingMode: execution.billingMode ?? "platform" });
@@ -223,7 +229,7 @@ export function createModelGateway<Upstreams extends ModelMap, Catalogs extends 
     const checked = { route, revision, upstream: await routeAccess(() => adapter.restore(execution.upstream, route)) };
     await routeAccess(() => adapter.validate(checked, input.payload));
     if (input.actor.role === "admin") return undefined;
-    const maximumUsage = await routeAccess(() => adapter.maximumUsage(checked, input.payload));
+    const maximumUsage = withInputVideoSeconds(await routeAccess(() => adapter.maximumUsage(checked, input.payload)), input.inputVideoSeconds);
     let requestHash: string;
     if (execution.legacyFormat) {
       if (!input.scope || !input.payload || typeof input.payload !== "object" || Array.isArray(input.payload)) fail("媒体任务路由快照无效", 409);
@@ -231,7 +237,8 @@ export function createModelGateway<Upstreams extends ModelMap, Catalogs extends 
       requestHash = hashRequest({ owner: input.actor.id, routeId: route.id, revision, request: { ...input.payload, directory: input.scope } });
     } else {
       requestHash = hashRequest({ owner: input.actor.id, routeId: route.id, revision, payload: input.payload, scope: input.scope,
-        ...(owner.billingMode === "userProvider" ? { billingMode: owner.billingMode } : {}) });
+        ...(owner.billingMode === "userProvider" ? { billingMode: owner.billingMode } : {}),
+        ...(input.inputVideoSeconds === undefined ? {} : { inputVideoSeconds: input.inputVideoSeconds }) });
     }
     const result = await billingAccess(() => billing.reserve({
       userId: input.actor!.id, requestId: input.requestId, requestHash, route, revision, maximumUsage, recoverExisting: input.recoverExisting,
@@ -353,25 +360,26 @@ export function createModelGateway<Upstreams extends ModelMap, Catalogs extends 
       const current = await read();
       const resources = executionResources(current.revision);
       const catalog: (Catalogs[K] & PublicModel)[] = [];
+      const customer = actor?.role === "user";
       for (const route of current.routes) {
-        if (!route.enabled || !types.includes(route.type as K)) continue;
+        if (!route.enabled || !types.includes(route.type as K) || customer && !customerModel(route)) continue;
         const adapter = options.adapters[route.type as K];
         const execution = { route, revision: current.revision,
           upstream: await readUpstream(route.type as K, route, current.revision, resources) };
-        const customerKey = actor?.role === "user" && route.target === "backend" && (route.type === "text" ? route.providerId === "aliyunQwen" : route.providerId === "aliyun");
-        const label = customerKey ? "阿里云账号计费" : options.formatPrice(route.salePrice);
+        const label = customer ? customerPriceLabel(route.salePrice) : options.formatPrice(route.salePrice);
         const attributes = await routeAccess(() => adapter.publicModel(execution));
         if (!attributes || typeof attributes !== "object" || Array.isArray(attributes)) fail("平台模型能力配置无效", 503);
-        catalog.push({ ...attributes, providerId: "multiTenant", providerLabel: "Toonflow", routeId: route.id, modelId: getPublicModelId(route),
-          label: `${route.label} · ${label}`, ...(customerKey ? {} : { salePrice: route.salePrice }), priceLabel: label });
+        catalog.push({ ...attributes, providerId: "multiTenant", providerLabel: customer ? "悦升云端" : "Toonflow",
+          routeId: route.id, modelId: getPublicModelId(route), label: `${route.label} · ${label}`,
+          ...(customer ? {} : { salePrice: route.salePrice }), priceLabel: label });
       }
       return catalog;
     },
     quote,
-    async quoteRequest<K extends ModelType>(type: K, providerId: string, modelId: string, request: unknown, access: ModelAccess) {
+    async quoteRequest<K extends ModelType>(type: K, providerId: string, modelId: string, request: unknown, access: ModelAccess, inputVideoSeconds?: number) {
       const execution = await resolve(type, providerId, modelId, undefined, request, access);
-      if (execution.billingMode === "userProvider") return { billingMode: "userProvider" as const, revision: execution.revision };
-      const result = quote(execution, await routeAccess(() => options.adapters[type].maximumUsage(execution, request)));
+      const usage = await routeAccess(() => options.adapters[type].maximumUsage(execution, request));
+      const result = quote(execution, withInputVideoSeconds(usage, inputVideoSeconds));
       if (!result) fail("当前模型暂时无法报价");
       return { ...result, billingMode: "platform" as const };
     },

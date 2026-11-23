@@ -1,6 +1,6 @@
 import type { Request } from "express";
 import type { ModelProvider, ModelRoute } from "@toonflow/multi-tenant-models/config";
-import type { BillingCredit } from "@toonflow/multi-tenant-billing/config";
+import { cnyToPoints, type BillingCredit, type CustomerPoints } from "@toonflow/multi-tenant-billing/config";
 import { authorize } from "./index";
 import { requestIdentity } from "./runtime";
 import { modelGateway } from "./gateway";
@@ -56,10 +56,18 @@ export async function releaseUserReservation(req: Request, userId: string, reque
   return modelGateway.releaseReservation(userId, requestId, { actorId: "admin", reason });
 }
 
-export async function readOwnBalance(req: Request) {
+export async function readOwnBalance(req: Request): Promise<CustomerPoints> {
   assertAppRequest(req);
   const user = requestIdentity(req);
   if (!user) throw Object.assign(new Error("请先登录 Toonflow"), { status: 401 });
-  if (user.role !== "user") return { wallets: [], transactions: [] };
-  return modelGateway.readBalance(user.id);
+  if (user.role !== "user") return { balance: "0", reserved: "0", available: "0", transactions: [] };
+  const snapshot = await modelGateway.readBalance(user.id);
+  const wallet = snapshot.wallets.find(item => item.currency === "CNY");
+  return {
+    balance: cnyToPoints(wallet?.balance ?? "0"),
+    reserved: cnyToPoints(wallet?.reserved ?? "0"),
+    available: cnyToPoints(wallet?.available ?? "0"),
+    transactions: snapshot.transactions.filter(item => item.currency === "CNY").map(({ id, kind, status, amount, createdAt }) =>
+      ({ id, kind, status, points: cnyToPoints(amount), createdAt })),
+  };
 }
