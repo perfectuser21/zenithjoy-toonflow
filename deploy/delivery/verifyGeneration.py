@@ -8,6 +8,8 @@ directory必须等于首个普通验收账号的工作区。staging必须生成�
 generationExpected：fileCount（1至4）、timeoutSeconds（1至420）、
 pollSeconds（1至30）；video/audio另必填minDuration/maxDuration。
 模型及供应商由root配置明确选择，不内置默认模型或假供应商。
+香港另要求 studioImageVerification={modelId,gatewayHost,maxPoints}，以第二个专用账号
+生成一张测试图，校验积分结算、落盘 PNG 与 Mac Studio 网关回执。
 
 提交前在release.stateDirectory持久化generation-<run>-<attempt>.json；
 同一发布编号再次调用一律拒绝，避免未知结果重复扣费。任务ID输出至stderr，
@@ -16,12 +18,14 @@ pollSeconds（1至30）；video/audio另必填minDuration/maxDuration。
 仅使用readOnly=true、resume=false轮询；旧API没有能力声明则拒绝提交，
 避免旧状态入口忽略未知字段后隐式恢复任务。每次轮询先检查同一bootId。
 """
+from decimal import Decimal
 import hashlib
 import json
 import math
 import os
 from pathlib import Path, PurePosixPath
 import re
+import subprocess
 import sys
 import tempfile
 import time
@@ -176,7 +180,72 @@ def validateGenerationConfig(config):
                     for key in ('minDuration', 'maxDuration'))
                 and 0 < expected['minDuration'] <= expected['maxDuration'] <= 3600,
                 '视频/音频必须配置审定时长范围')
+    if config['environment'] == 'staging':
+        studio = config.get('studioImageVerification')
+        require(isinstance(studio, dict) and set(studio) == {'modelId', 'gatewayHost', 'maxPoints'}
+                and studio['modelId'] == 'gpt-image-2.5-sunburst'
+                and isinstance(studio['gatewayHost'], str)
+                and re.fullmatch(r'[a-z0-9-]+\.[a-z0-9-]+\.ts\.net', studio['gatewayHost'])
+                and asPoints(studio['maxPoints']) > 0,
+                '香港缺少固定 Mac Studio 图片模型、私网目标或积分上限')
     return payload, expected, workspace
+
+
+def asPoints(value):
+    require(isinstance(value, str) and re.fullmatch(r'[0-9]{1,18}(?:\.[0-9]{1,3})?', value),
+            '客户积分钱包或报价金额格式非法')
+    return Decimal(value)
+
+
+def readPoints(client):
+    result = client.request('GET', '/api/multiTenant/user/balance', timeout=20)
+    require(isinstance(result, dict) and set(result) == {'balance', 'reserved', 'available', 'transactions'}
+            and isinstance(result['transactions'], list), '客户积分钱包未开放或返回了内部字段')
+    for key in ('balance', 'reserved', 'available'):
+        asPoints(result[key])
+    for row in result['transactions']:
+        require(isinstance(row, dict) and set(row) == {'id', 'kind', 'status', 'points', 'createdAt'},
+                '客户积分流水包含非公开字段')
+        asPoints(row['points'])
+    require(asPoints(result['balance']) - asPoints(result['reserved']) == asPoints(result['available']),
+            '客户积分余额与预占不一致')
+    return result
+
+
+def readGenerationQuote(client, payload):
+    reply = client.request('POST', '/api/ai/media/price', body=payload, timeout=30)
+    require(isinstance(reply, dict) and set(reply) == {'points', 'price', 'tips'}
+            and reply['price'] == reply['points'] + ' 积分', '客户生成报价未以积分公开')
+    points = asPoints(reply['points'])
+    require(points > 0, '发布验收必须使用真实计费的模型')
+    return points
+
+
+def verifyPointsSettlement(before, after, taskId, quote):
+    matches = [row for row in after['transactions'] if row['id'] == taskId]
+    require(len(matches) == 1 and matches[0]['kind'] == 'model' and matches[0]['status'] == 'settled',
+            '本次生成没有唯一已结算的客户积分流水')
+    actual = asPoints(matches[0]['points'])
+    require(0 < actual <= quote and asPoints(before['balance']) - asPoints(after['balance']) == actual
+            and before['reserved'] == after['reserved'], '本次实际积分扣款、余额或预占读回不一致')
+
+
+def verifyGatewayReceipt(container, taskId, createdAt, gatewayHost):
+    result = subprocess.run(['docker', 'logs', '--since', str(int(createdAt)), container],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            timeout=20, check=True, text=True)
+    matches = []
+    for line in result.stdout.splitlines():
+        if not line.startswith('{') or taskId not in line or 'canvasOpenaiImageGateway' not in line:
+            continue
+        event = json.loads(line)
+        if event.get('event') == 'canvasOpenaiImageGateway' and event.get('taskId') == taskId:
+            matches.append(event)
+    require(len(matches) == 1 and matches[0].get('status') == 200
+            and matches[0].get('gatewayHost') == gatewayHost
+            and re.fullmatch(r'req_[A-Za-z0-9_-]{1,120}', matches[0].get('upstreamRequestId') or '')
+            and re.fullmatch(r'[a-f0-9-]{36}', matches[0].get('requestId') or ''),
+            '未读回同一真实图片任务的 Mac Studio 目标和 OpenAI 回执')
 
 
 def main():
@@ -199,7 +268,6 @@ def main():
             '生成验收配置不属于本环境')
     validateBusinessConfig(config)
     payload, expected, workspace = validateGenerationConfig(config)
-    mediaType = payload['mediaType']
     verifyContainer(release, request, config['localOrigin'])
     client = newPublicClient(config)
     local = publicClient(config['localOrigin'].rstrip('/'))
@@ -212,9 +280,38 @@ def main():
             and isinstance(publicIdentity.get('capabilities'), dict)
             and publicIdentity['capabilities'].get('mediaTaskReadOnly') is True,
             '公网/本机候选缺少真实只读任务状态能力，拒绝提交生成')
+    checkPoints = request['environment'] == 'staging'
+    receipt = verifyGenerationCase(config, release, request, bootId, (payload, expected, workspace), checkPoints)
+    if checkPoints:
+        studio = config['studioImageVerification']
+        studioWorkspace = config['accounts'][1]
+        studioPayload = {'directory': studioWorkspace['directory'], 'mediaType': 'image', 'providerId': 'multiTenant',
+                         'modelId': studio['modelId'], 'prompt': 'A blue glass cube on white, no people or text',
+                         'size': '1K', 'ratio': '1:1', 'outputDirectory': 'assets/deliveryStudio'}
+        studioExpected = {'fileCount': 1, 'timeoutSeconds': 210, 'pollSeconds': 5}
+        studioReceipt = verifyGenerationCase(config, release, request, bootId,
+                                             (studioPayload, studioExpected, studioWorkspace), True,
+                                             studio=studio)
+        require(studioReceipt.get('studioImageGatewayVerified') is True, 'Mac Studio 出图验收缺失')
+        receipt['studioImageGatewayVerified'] = True
+    print(json.dumps(receipt))
+
+
+def verifyGenerationCase(config, release, request, bootId, case, checkPoints, studio=None):
+    payload, expected, workspace = case
+    mediaType = payload['mediaType']
+    client = newPublicClient(config)
+    local = publicClient(config['localOrigin'].rstrip('/'))
+    verifyPublicCandidate(client, local, request, bootId)
     client.login(workspace)
     other = newPublicClient(config)
-    other.login(config['accounts'][1])
+    other.login(next(account for account in config['accounts'] if account['userId'] != workspace['userId']))
+    if checkPoints:
+        client.request('GET', '/api/multiTenant/user/providerKey', expected=403, timeout=20)
+        startingPoints = readPoints(client)
+        quote = readGenerationQuote(client, payload)
+        require(not studio or quote <= asPoints(studio['maxPoints']), 'Mac Studio 验收报价超出积分上限')
+        require(asPoints(startingPoints['available']) >= quote, '专用发布验收账号积分低于本次报价')
     # root账本与主发布事务共用受保护目录；原子独占创建杜绝相同run再次提交。
     state = Path(release['stateDirectory'])
     identity = rootJson(state / 'identity.json')
@@ -222,8 +319,9 @@ def main():
     require(state.stat().st_mode & 0o077 == 0, '生成事务目录必须为root私有')
     taskId = str(uuid.uuid4())
     payload['taskId'] = taskId
-    journal = state / ('generation-' + request['runId'] + '-' + request['runAttempt'] + '.json')
-    transaction = {'request': {key: request[key] for key in fields}, 'publicOrigin': config['publicOrigin'],
+    journalPrefix = 'studioImageGeneration-' if studio else 'generation-'
+    journal = state / (journalPrefix + request['runId'] + '-' + request['runAttempt'] + '.json')
+    transaction = {'request': {key: request[key] for key in releaseIdentityFields}, 'publicOrigin': config['publicOrigin'],
                    'taskId': taskId, 'bootId': bootId, 'phase': 'prepared', 'createdAt': time.time(),
                    'requestSha256': hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()}
     durableJson(journal, transaction, create=True)
@@ -273,12 +371,19 @@ def main():
         artifacts.append({'sha256': digest, 'bytes': len(content), 'mediaType': mediaType})
     verifyContainer(release, request, config['localOrigin'])
     verifyPublicCandidate(fresh, local, request, bootId)
-    receipt = {**{key: request[key] for key in fields}, 'publicOrigin': config['publicOrigin'],
+    if checkPoints:
+        verifyPointsSettlement(startingPoints, readPoints(fresh), taskId, quote)
+    receipt = {**{key: request[key] for key in releaseIdentityFields}, 'publicOrigin': config['publicOrigin'],
                'result': 'passed', 'generationVerified': True, 'taskId': taskId,
                'businessMode': 'tenant', 'generationMediaType': mediaType, 'bootId': bootId, 'artifacts': artifacts}
+    if checkPoints:
+        receipt['customerPointsSettled'] = True
+    if studio:
+        verifyGatewayReceipt(release['container'], taskId, transaction['createdAt'], studio['gatewayHost'])
+        receipt['studioImageGatewayVerified'] = True
     transaction.update(phase='completed', receipt=receipt, completedAt=time.time())
     durableJson(journal, transaction)
-    print(json.dumps(receipt))
+    return receipt
 
 
 if __name__ == '__main__':

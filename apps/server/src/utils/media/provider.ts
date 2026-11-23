@@ -628,7 +628,8 @@ export async function loadMediaProviderSource(source: string, config: Record<str
           if (gatewayRequestId) {
             const upstream = response.headers.get("x-request-id");
             const upstreamRequestId = upstream && /^req_[a-zA-Z0-9_-]{1,120}$/.test(upstream) ? upstream : undefined;
-            console.info(JSON.stringify({ event: "canvasOpenaiImageGateway", taskId, requestId: gatewayRequestId, upstreamRequestId, status: response.status }));
+            const gatewayHost = URL.parse(input instanceof Request ? input.url : String(input))?.hostname;
+            console.info(JSON.stringify({ event: "canvasOpenaiImageGateway", taskId, requestId: gatewayRequestId, upstreamRequestId, status: response.status, gatewayHost }));
             if (response.ok && (response.headers.get("x-client-request-id") !== gatewayRequestId || !upstreamRequestId)) {
               await response.body?.cancel().catch(() => {});
               throw new Error("图片网关未返回可核对的请求编号");

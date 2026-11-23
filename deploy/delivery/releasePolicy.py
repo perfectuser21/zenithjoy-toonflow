@@ -9,10 +9,13 @@ publicOrigins = {
 requiredBusinessJourneys = {
     'staging': (
         'ordinaryAccountLogin',
+        'customerBrandAndEntryAssets',
         'canvasSaveReadback',
         'crossAccountIsolation',
         'trimOutputReadback',
         'videoGenerationReadback',
+        'customerPointsSettlement',
+        'studioImageGatewayReadback',
     ),
     'production': (
         'ordinaryAccountLogin',
