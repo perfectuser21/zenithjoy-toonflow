@@ -18,8 +18,9 @@ generationVerifier 为 root 安装的固定可执行程序：stdin 为版本请�
 同五个身份字段、publicOrigin、bootId、businessMode、result=passed、generationVerified=true 和实际媒体类型；必须真实
 验收本候选生成任务，不接受历史任务、stub或豁免。本程序不自带生成模型调用，
 缺少该程序即失败；运维安装前应确认其费用授权及验收合同。
-公网与候选容器回环 /api/delivery/identity 的sourceSha/image/bootId必须完全一致，
-不能在反代注入静态版本。缺失上述能力时失败，不能使发布晋级。
+默认要求公网与容器回环的sourceSha/image/bootId一致。传入一个绝对路径时，使用
+独立的root:root 0600发布配置验收杭州候选，所有业务请求走候选容器回环，
+该路径原样传给生成验收器。回执仍记录固定的production环境和公网入口。
 """
 import hashlib
 from html.parser import HTMLParser
@@ -64,6 +65,20 @@ def rootJson(path, private=False):
     path = rootFile(path, private)
     require(path.stat().st_size <= 65536, '配置文件过大')
     return json.loads(path.read_text())
+
+
+def readReleaseProfile():
+    livePath = Path('/etc/aivideo/release.json')
+    require(len(sys.argv) <= 2, '只允许传入一个隔离验收配置路径')
+    if len(sys.argv) == 1:
+        return rootJson(livePath), None
+    profile = Path(sys.argv[1])
+    require(profile.is_absolute() and profile != livePath and '..' not in profile.parts
+            and not sys.argv[1].startswith('//'), '隔离验收需要独立的绝对配置路径')
+    release = rootJson(profile, private=True)
+    require(isinstance(release, dict) and release.get('environment') == 'production',
+            '隔离验收配置必须使用杭州正式环境合同')
+    return release, profile
 
 
 def run(args, timeout=30, input=None):
@@ -144,7 +159,23 @@ def fileQuery(account, path=None):
     return {'directory': account['directory'], 'path': path or account['canvasPath']}
 
 
-def newPublicClient(config):
+def loopbackAddress(origin):
+    local = urllib.parse.urlsplit(origin)
+    require(local.scheme == 'http' and local.hostname in ('127.0.0.1', '::1') and local.port
+            and local.username is None and local.password is None and local.path in ('', '/')
+            and not local.query and not local.fragment, '业务验收本机入口必须为HTTP回环端口')
+    return local.hostname, local.port
+
+
+def localClient(config):
+    host, port = loopbackAddress(config['localOrigin'])
+    authority = '[::1]' if host == '::1' else host
+    return publicClient(f'http://{authority}:{port}')
+
+
+def newPublicClient(config, *, isolated=False):
+    if isolated:
+        return localClient(config)
     return publicClient(config['publicOrigin'], config.get('accessCredentialFile'))
 
 
@@ -206,7 +237,7 @@ def relativeFile(value):
             and all(part not in ('', '.', '..') for part in value.split('/')), '专用文件路径非法')
 
 
-def validateBusinessConfig(config):
+def validateBusinessConfig(config, *, isolated=False):
     """只读配置校验；不访问业务HTTP、不写文件。凭据仅从root保护文件读取。
 
     返回需由readiness检查真实deliveryAcceptance=true标记的workspace列表。
@@ -215,10 +246,8 @@ def validateBusinessConfig(config):
     require(isinstance(config, dict), '业务验收配置必须为对象')
     require(config.get('environment') in publicOrigins and config.get('publicOrigin') == publicOrigins[config['environment']],
             '业务验收固定环境或公网入口配置错误')
-    local = urllib.parse.urlsplit(config.get('localOrigin', ''))
-    require(local.scheme == 'http' and local.hostname in ('127.0.0.1', '::1') and local.port
-            and not local.username and not local.password and local.path in ('', '/')
-            and not local.query and not local.fragment, '业务验收本机入口必须为HTTP回环端口')
+    loopbackAddress(config.get('localOrigin', ''))
+    require(not isolated or not config.get('accessCredentialFile'), '隔离业务配置禁止使用公网Access凭据')
     require(config.get('businessMode') == 'tenant', '业务验收必须使用普通账号tenant模式')
     workspaces = config.get('accounts')
     require(isinstance(workspaces, list) and len(workspaces) == 2, '必须配置两个专用验收账号')
@@ -335,7 +364,7 @@ def verifyApplicationDataMount(config, container):
     return data, target
 
 
-def verifyContainer(config, request, localOrigin):
+def verifyContainer(config, request, localOrigin, *, isolated=False):
     current = json.loads(run(['docker', 'inspect', config['container']]))[0]
     metadata = json.loads(run(['docker', 'image', 'inspect', request['image']]))[0]
     require(current['State']['Running'] is True and not current['State']['Restarting']
@@ -343,15 +372,15 @@ def verifyContainer(config, request, localOrigin):
     require((metadata['Config'].get('Labels') or {}).get('org.opencontainers.image.revision')
             == request['sourceSha'], '候选源码标签不匹配')
     verifyApplicationDataMount(config, current)
-    local = urllib.parse.urlsplit(localOrigin)
-    require(local.scheme == 'http' and local.hostname in ('127.0.0.1', '::1') and local.port
-            and not local.username and not local.password and local.path in ('', '/')
-            and not local.query and not local.fragment, '本机候选入口必须是固定HTTP回环端口')
+    host, port = loopbackAddress(localOrigin)
     bindings = current['NetworkSettings'].get('Ports') or {}
-    require(any(binding.get('HostPort') == str(local.port)
-                and binding.get('HostIp') in ('127.0.0.1', '::1', '0.0.0.0', '::')
-                for items in bindings.values() for binding in items or []),
-            '本机验收端口未绑定当前候选容器')
+    boundAddresses = {binding.get('HostIp') for items in bindings.values() for binding in items or []
+                      if binding.get('HostPort') == str(port)}
+    if isolated:
+        require(host in boundAddresses and boundAddresses <= {'127.0.0.1', '::1'},
+                '隔离验收端口必须仅由当前候选容器在回环地址监听')
+    else:
+        require(boundAddresses & {'127.0.0.1', '::1', '0.0.0.0', '::'}, '本机验收端口未绑定当前候选容器')
     return current['Id']
 
 
@@ -366,11 +395,14 @@ def verifyPublicCandidate(client, local, request, expectedBoot=None, timeout=240
     return result['bootId']
 
 
-def verifyGeneration(config, request, bootId):
+def verifyGeneration(config, request, bootId, profile=None):
     require(config.get('generationVerifier'), '缺少本候选真实生成任务验收器，禁止晋级')
     program = rootFile(config['generationVerifier'], executable=True)
     timeout = 900 if request['environment'] == 'staging' else 600
-    receipt = json.loads(run([str(program)], timeout=timeout, input=json.dumps(request).encode()))
+    command = [str(program)]
+    if profile is not None:
+        command.append(str(profile))
+    receipt = json.loads(run(command, timeout=timeout, input=json.dumps(request).encode()))
     require(isinstance(receipt, dict) and all(receipt.get(key) == request[key] for key in releaseIdentityFields)
             and receipt.get('publicOrigin') == config['publicOrigin'] and receipt.get('bootId') == bootId
             and receipt.get('businessMode') == 'tenant' and receipt.get('result') == 'passed'
@@ -431,7 +463,8 @@ def verifyClip(content, expectedDuration):
 
 def main():
     require(os.geteuid() == 0, '必须从固定root发布入口运行')
-    release = rootJson('/etc/aivideo/release.json')
+    release, profile = readReleaseProfile()
+    isolated = profile is not None
     raw = sys.stdin.buffer.read(32769)
     require(len(raw) <= 32768, '请求过大')
     request = json.loads(raw)
@@ -447,11 +480,11 @@ def main():
     config = rootJson(release['businessConfig'], private=True)
     require(config['environment'] == request['environment'] and config['publicOrigin'] == release['publicOrigin'],
             '业务验收配置环境不匹配')
-    accounts = validateBusinessConfig(config)
-    containerId = verifyContainer(release, request, config['localOrigin'])
-    local = publicClient(config['localOrigin'].rstrip('/'))
-    bootId = verifyPublicCandidate(newPublicClient(config), local, request)
-    clients = [newPublicClient(config) for _ in accounts]
+    accounts = validateBusinessConfig(config, isolated=isolated)
+    containerId = verifyContainer(release, request, config['localOrigin'], isolated=isolated)
+    local = localClient(config)
+    bootId = verifyPublicCandidate(newPublicClient(config, isolated=isolated), local, request)
+    clients = [newPublicClient(config, isolated=isolated) for _ in accounts]
     for client, account in zip(clients, accounts):
         client.login(account)
     passedJourneys = ['ordinaryAccountLogin']
@@ -468,22 +501,23 @@ def main():
     denyCrossAccount(clients[0], accounts[1])
     denyCrossAccount(clients[1], accounts[0])
     for client, account in zip(clients, accounts):
-        fresh = newPublicClient(config)
+        fresh = newPublicClient(config, isolated=isolated)
         fresh.login(account)
         saveCanvas(client, fresh, account, request)
     passedJourneys.append('canvasSaveReadback')
-    fresh = newPublicClient(config)
+    fresh = newPublicClient(config, isolated=isolated)
     fresh.login(accounts[0])
     verifyTrim(clients[0], fresh, clients[1], accounts[0], config)
     passedJourneys.append('trimOutputReadback')
-    mediaType = verifyGeneration(config, request, bootId)
+    mediaType = verifyGeneration(config, request, bootId, profile)
     passedJourneys.append('videoGenerationReadback' if request['environment'] == 'staging' else 'mediaGenerationReadback')
     if request['environment'] == 'staging':
         passedJourneys.extend(('customerPointsSettlement', 'studioImageGatewayReadback'))
     # 画布、截取和生成均要求兄弟账号的访问请求被拒绝。
     passedJourneys.append('crossAccountIsolation')
     validatePassedJourneys(passedJourneys, request['environment'])
-    require(verifyContainer(release, request, config['localOrigin']) == containerId, '业务验收期间候选容器变化')
+    require(verifyContainer(release, request, config['localOrigin'], isolated=isolated) == containerId,
+            '业务验收期间候选容器变化')
     verifyPublicCandidate(fresh, local, request, bootId)
     receipt = {**{key: request[key] for key in releaseIdentityFields}, 'publicOrigin': config['publicOrigin'],
                'result': 'passed', 'businessVerified': True, 'runningImage': request['image'],

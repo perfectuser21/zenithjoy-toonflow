@@ -2,12 +2,13 @@
 """在固定 systemd 管理模式下切换容器；保留前驱容器，不自动还原业务数据。"""
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
 import time
 from verifyBusiness import publicClient, rootJson, verifyApplicationDataMount
-from releasePolicy import requireQuotaVolume
+from releasePolicy import releaseIdentityFields, requireQuotaVolume, validatePassedJourneys
 
 
 def run(args, timeout=120):
@@ -24,6 +25,19 @@ def main():
     current = json.loads(run(['docker', 'inspect', config['container']]))[0]
     if current['Image'] != request['predecessorId']:
         raise RuntimeError('production predecessor changed')
+    if config['environment'] == 'production':
+        runId, attempt = (request[key] for key in ('runId', 'runAttempt'))
+        if not all(isinstance(value, str) and re.fullmatch('[1-9][0-9]{0,19}', value)
+                   for value in (runId, attempt)):
+            raise RuntimeError('invalid production transaction identity')
+        transaction = rootJson(Path(config['stateDirectory']) / (runId + '-' + attempt + '.json'), private=True)
+        proof = transaction.get('candidateVerification', {})
+        if (transaction.get('phase') != 'switching'
+                or any(transaction.get('request', {}).get(key) != request[key] for key in releaseIdentityFields)
+                or proof.get('predecessorId') != current['Id']
+                or proof.get('containerId') in (None, current['Id'])):
+            raise RuntimeError('production cutover requires isolated candidate verification')
+        validatePassedJourneys(proof.get('passedJourneys'), 'production')
     # 配置由 root 安装；不把请求内字符串拼接为 shell。
     args = config['containerCreateArgs']
     if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):

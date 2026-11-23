@@ -15,6 +15,7 @@ pollSeconds（1至30）；video/audio另必填minDuration/maxDuration。
 同一发布编号再次调用一律拒绝，避免未知结果重复扣费。任务ID输出至stderr，
 超时/断网/进程变化均保留事务与线上任务，运维必须核对后另行处置。
 提交前要求公网及本机身份声明capabilities.mediaTaskReadOnly=true且版本/boot一致。
+隔离验收通过唯一的位置参数传入独立发布配置，业务请求仅使用候选回环地址。
 仅使用readOnly=true、resume=false轮询；旧API没有能力声明则拒绝提交，
 避免旧状态入口忽略未知字段后隐式恢复任务。每次轮询先检查同一bootId。
 """
@@ -33,7 +34,7 @@ import uuid
 
 sys.dont_write_bytecode = True
 from releasePolicy import imagePattern, publicOrigins, releaseIdentityFields, requireQuotaVolume
-from verifyBusiness import (newPublicClient, publicClient, relativeFile, require,
+from verifyBusiness import (localClient, newPublicClient, readReleaseProfile, relativeFile, require,
                             rootJson, run, validateBusinessConfig, verifyContainer, verifyPublicCandidate)
 
 
@@ -268,7 +269,8 @@ def verifyGatewayReceipt(container, taskId, createdAt, gatewayHost):
 
 def main():
     require(os.geteuid() == 0, '必须由固定root生成验收入口运行')
-    release = rootJson('/etc/aivideo/release.json')
+    release, profile = readReleaseProfile()
+    isolated = profile is not None
     raw = sys.stdin.buffer.read(32769)
     require(len(raw) <= 32768, '请求过大')
     request = json.loads(raw)
@@ -284,11 +286,11 @@ def main():
     config = rootJson(release['businessConfig'], private=True)
     require(config['environment'] == request['environment'] and config['publicOrigin'] == release['publicOrigin'],
             '生成验收配置不属于本环境')
-    validateBusinessConfig(config)
+    validateBusinessConfig(config, isolated=isolated)
     payload, expected, workspace = validateGenerationConfig(config)
-    verifyContainer(release, request, config['localOrigin'])
-    client = newPublicClient(config)
-    local = publicClient(config['localOrigin'].rstrip('/'))
+    verifyContainer(release, request, config['localOrigin'], isolated=isolated)
+    client = newPublicClient(config, isolated=isolated)
+    local = localClient(config)
     bootId = verifyPublicCandidate(client, local, request)
     publicIdentity = client.request('GET', '/api/delivery/identity', {'nonce': str(uuid.uuid4())})
     localIdentity = local.request('GET', '/api/delivery/identity', {'nonce': str(uuid.uuid4())})
@@ -299,7 +301,8 @@ def main():
             and publicIdentity['capabilities'].get('mediaTaskReadOnly') is True,
             '公网/本机候选缺少真实只读任务状态能力，拒绝提交生成')
     checkPoints = request['environment'] == 'staging'
-    receipt = verifyGenerationCase(config, release, request, bootId, (payload, expected, workspace), checkPoints)
+    receipt = verifyGenerationCase(config, release, request, bootId, (payload, expected, workspace), checkPoints,
+                                   isolated=isolated)
     if checkPoints:
         studioReceipt = verifyGenerationCase(config, release, request, bootId,
                                              studioGenerationCase(config), True, studio=config['studioImageVerification'])
@@ -308,14 +311,14 @@ def main():
     print(json.dumps(receipt))
 
 
-def verifyGenerationCase(config, release, request, bootId, case, checkPoints, studio=None):
+def verifyGenerationCase(config, release, request, bootId, case, checkPoints, studio=None, *, isolated=False):
     payload, expected, workspace = case
     mediaType = payload['mediaType']
-    client = newPublicClient(config)
-    local = publicClient(config['localOrigin'].rstrip('/'))
+    client = newPublicClient(config, isolated=isolated)
+    local = localClient(config)
     verifyPublicCandidate(client, local, request, bootId)
     client.login(workspace)
-    other = newPublicClient(config)
+    other = newPublicClient(config, isolated=isolated)
     other.login(next(account for account in config['accounts'] if account['userId'] != workspace['userId']))
     if checkPoints:
         startingPoints, quote = verifyPointsBudget(client, payload, studio)
@@ -343,7 +346,7 @@ def verifyGenerationCase(config, release, request, bootId, case, checkPoints, st
                      'resume': False, 'readOnly': True}
     while True:
         require(time.monotonic() < deadline, '生成等待超时，保留原taskId待核对')
-        verifyContainer(release, request, config['localOrigin'])
+        verifyContainer(release, request, config['localOrigin'], isolated=isolated)
         verifyPublicCandidate(client, local, request, bootId)
         statuses = client.request('POST', '/api/ai/media/tasks/status', body=statusRequest)
         require(isinstance(statuses, list) and len(statuses) == 1 and statuses[0].get('taskId') == taskId,
@@ -359,7 +362,7 @@ def verifyGenerationCase(config, release, request, bootId, case, checkPoints, st
             '生成任务未返回审定数量的成功产物')
     transaction.update(phase='generated', generatedAt=time.time())
     durableJson(journal, transaction)
-    fresh = newPublicClient(config)
+    fresh = newPublicClient(config, isolated=isolated)
     fresh.login(workspace)
     other.request('POST', '/api/ai/media/tasks/status', body=statusRequest, expected=403)
     artifacts = []
@@ -376,7 +379,7 @@ def verifyGenerationCase(config, release, request, bootId, case, checkPoints, st
         other.request('GET', '/api/workspaces/files/read', query, raw=True, expected=403)
         inspectArtifact(persisted, mediaType, expected)
         artifacts.append({'sha256': digest, 'bytes': len(content), 'mediaType': mediaType})
-    verifyContainer(release, request, config['localOrigin'])
+    verifyContainer(release, request, config['localOrigin'], isolated=isolated)
     verifyPublicCandidate(fresh, local, request, bootId)
     if checkPoints:
         verifyPointsSettlement(startingPoints, readPoints(fresh), taskId, quote)
