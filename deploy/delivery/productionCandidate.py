@@ -62,8 +62,10 @@ def verifyProductionCandidate(config, request, incumbent, inspect, run):
     require(isolatedPort != loopbackAddress(business['localOrigin'])[1],
             '杭州候选与正式环境端口重叠')
     public = newPublicClient(business)
-    incumbentIdentity = public.request('GET', '/api/delivery/identity', timeout=10)
-    require(incumbentIdentity['image'] == incumbent['Config']['Image'], '公网当前没有指向正式前驱')
+    incumbentLocal = localClient(business)
+    incumbentVersion = {'image': incumbent['Config']['Image'],
+                        'sourceSha': incumbent['Config']['Labels']['org.opencontainers.image.revision']}
+    incumbentBoot = verifyPublicCandidate(public, incumbentLocal, incumbentVersion, timeout=10)
 
     def verifyCandidateIdentity():
         candidate = inspect(profile['container'])
@@ -87,9 +89,9 @@ def verifyProductionCandidate(config, request, incumbent, inspect, run):
     validatePassedJourneys(receipt.get('passedJourneys'), 'production')
     require(verifyCandidateIdentity() == (candidateId, bootId), '杭州候选已重启，验收失效')
     final = inspect(config['container'])
-    require(final['Id'] == incumbent['Id'] and final['State']['Running']
-            and public.request('GET', '/api/delivery/identity', timeout=10) == incumbentIdentity,
+    require(final['Id'] == incumbent['Id'] and final['State']['Running'],
             '杭州公网前驱在候选验收期间发生变化')
+    verifyPublicCandidate(public, incumbentLocal, incumbentVersion, incumbentBoot, timeout=10)
     return {'containerId': candidateId, 'predecessorId': incumbent['Id'], 'bootId': bootId,
             'generationProfile': expected,
             'passedJourneys': receipt['passedJourneys']}
