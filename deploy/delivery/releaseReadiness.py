@@ -4,8 +4,8 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 from releasePolicy import requireQuotaVolume
-from verifyBusiness import rootJson, validateBusinessConfig, verifyApplicationDataMount
-from verifyGeneration import validateGenerationConfig
+from verifyBusiness import newPublicClient, rootJson, validateBusinessConfig, verifyApplicationDataMount
+from verifyGeneration import studioGenerationCase, validateGenerationConfig, verifyPointsBudget
 from runtimeReadiness import verifyRuntimeReadiness
 from volumeSnapshot import scanVolume, requireSpace, capsuleSize, reserve, requireCapsuleFilesystem
 import subprocess
@@ -28,7 +28,15 @@ def main():
     if business['environment']!=request['environment'] or business['publicOrigin']!=config['publicOrigin']:
         raise RuntimeError('business contract identity mismatch')
     workspaces=validateBusinessConfig(business)
-    validateGenerationConfig(business)
+    payload, _, account = validateGenerationConfig(business)
+    if request['environment'] == 'staging':
+        client = newPublicClient(business)
+        client.login(account)
+        verifyPointsBudget(client, payload)
+        studioPayload, _, studioAccount = studioGenerationCase(business)
+        studioClient = newPublicClient(business)
+        studioClient.login(studioAccount)
+        verifyPointsBudget(studioClient, studioPayload, business['studioImageVerification'])
     execution=run(['systemctl','show',config['service'],'--property=ExecStart','--value'])
     if '/usr/bin/docker start -a '+config['container'] not in execution:
         raise RuntimeError('service is not using managed container startup')

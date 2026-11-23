@@ -22,6 +22,7 @@ generationVerifier 为 root 安装的固定可执行程序：stdin 为版本请�
 不能在反代注入静态版本。缺失上述能力时失败，不能使发布晋级。
 """
 import hashlib
+from html.parser import HTMLParser
 import http.cookiejar
 import json
 import math
@@ -94,7 +95,9 @@ class publicClient:
             urllib.request.ProxyHandler({}), noRedirect(), urllib.request.HTTPCookieProcessor(self.jar))
 
     def request(self, method, path, query=None, body=None, raw=False, expected=200, limit=20 * 1024 * 1024, timeout=240):
-        require(path.startswith('/api/') and '?' not in path, '接口路径非法')
+        require((path.startswith('/api/') and '?' not in path)
+                or (method == 'GET' and raw and (path == '/' or re.fullmatch(r'/assets/[A-Za-z0-9_.-]+', path))),
+                '接口路径非法')
         url = self.origin + path + ('?' + urllib.parse.urlencode(query) if query else '')
         headers = {'Origin': self.origin, 'Referer': self.origin + '/', 'x-toonflow-workspace': '1',
                    'Cache-Control': 'no-cache', 'Accept-Encoding': 'identity', **self.accessHeaders}
@@ -143,6 +146,58 @@ def fileQuery(account, path=None):
 
 def newPublicClient(config):
     return publicClient(config['publicOrigin'], config.get('accessCredentialFile'))
+
+
+class entryDocument(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.title = ''
+        self.readingTitle = False
+        self.logo = None
+        self.modules = set()
+
+    def handle_starttag(self, tag, attributes):
+        attributes = dict(attributes)
+        self.readingTitle = tag == 'title'
+        if tag == 'link' and attributes.get('id') == 'appIcon':
+            self.logo = attributes.get('href')
+        source = attributes.get('src')
+        if tag == 'script' and attributes.get('type') == 'module' and source:
+            if not re.fullmatch(r'https://static\.cloudflareinsights\.com/beacon\.min\.js(?:/[A-Za-z0-9]+)?', source):
+                self.modules.add(source)
+        if tag == 'link' and attributes.get('rel') == 'modulepreload' and attributes.get('href'):
+            self.modules.add(attributes['href'])
+
+    def handle_endtag(self, tag):
+        if tag == 'title':
+            self.readingTitle = False
+
+    def handle_data(self, data):
+        if self.readingTitle:
+            self.title += data
+
+
+def verifyCustomerEntry(client, local):
+    page = client.request('GET', '/', raw=True, limit=256 * 1024, timeout=15)
+    document = entryDocument()
+    document.feed(page.decode('utf-8'))
+    originDocument = entryDocument()
+    originDocument.feed(local.request('GET', '/', raw=True, limit=256 * 1024, timeout=10).decode('utf-8'))
+    require((document.title, document.logo, document.modules)
+            == (originDocument.title, originDocument.logo, originDocument.modules),
+            '公网首页身份与当前候选首页不同')
+    require(document.title.strip() == '悦升云端'
+            and isinstance(document.logo, str) and re.fullmatch(r'/assets/yueshengCloud-[\w-]+\.png', document.logo)
+            and 0 < len(document.modules) <= 150, '悦升品牌或应用入口资源缺失')
+    logo = client.request('GET', document.logo, raw=True, limit=1024 * 1024, timeout=15)
+    require(logo.startswith(b'\x89PNG\r\n\x1a\n')
+            and logo == local.request('GET', document.logo, raw=True, limit=1024 * 1024, timeout=10),
+            '公网悦升品牌图标与候选文件不同')
+    for path in sorted(document.modules):
+        require(re.fullmatch(r'/assets/[A-Za-z0-9_.-]+\.js', path), '应用入口模块路径无效')
+        public = client.request('GET', path, raw=True, limit=8 * 1024 * 1024, timeout=15)
+        direct = local.request('GET', path, raw=True, limit=8 * 1024 * 1024, timeout=10)
+        require(public and public == direct, '公网入口模块与候选文件不同')
 
 
 def relativeFile(value):
@@ -314,11 +369,15 @@ def verifyPublicCandidate(client, local, request, expectedBoot=None, timeout=240
 def verifyGeneration(config, request, bootId):
     require(config.get('generationVerifier'), '缺少本候选真实生成任务验收器，禁止晋级')
     program = rootFile(config['generationVerifier'], executable=True)
-    receipt = json.loads(run([str(program)], timeout=600, input=json.dumps(request).encode()))
+    timeout = 900 if request['environment'] == 'staging' else 600
+    receipt = json.loads(run([str(program)], timeout=timeout, input=json.dumps(request).encode()))
     require(isinstance(receipt, dict) and all(receipt.get(key) == request[key] for key in releaseIdentityFields)
             and receipt.get('publicOrigin') == config['publicOrigin'] and receipt.get('bootId') == bootId
             and receipt.get('businessMode') == 'tenant' and receipt.get('result') == 'passed'
             and receipt.get('generationVerified') is True, '真实生成任务验收未通过')
+    if request['environment'] == 'staging':
+        require(receipt.get('customerPointsSettled') is True, '普通账号真实生成未核实积分结算')
+        require(receipt.get('studioImageGatewayVerified') is True, '香港经 Mac Studio 生成图片未核验')
     mediaType = receipt.get('generationMediaType')
     require(mediaType == config['generationRequest']['mediaType']
             and mediaType in ('image', 'video', 'audio') and (request['environment'] != 'staging' or mediaType == 'video'),
@@ -396,6 +455,9 @@ def main():
     for client, account in zip(clients, accounts):
         client.login(account)
     passedJourneys = ['ordinaryAccountLogin']
+    if request['environment'] == 'staging':
+        verifyCustomerEntry(clients[0], local)
+        passedJourneys.append('customerBrandAndEntryAssets')
     for client, account in zip(clients, accounts):
         verifyNode(client, 'mashupNode', '批量混剪')
         _, seed = snapshot(client, account)
@@ -416,6 +478,8 @@ def main():
     passedJourneys.append('trimOutputReadback')
     mediaType = verifyGeneration(config, request, bootId)
     passedJourneys.append('videoGenerationReadback' if request['environment'] == 'staging' else 'mediaGenerationReadback')
+    if request['environment'] == 'staging':
+        passedJourneys.extend(('customerPointsSettlement', 'studioImageGatewayReadback'))
     # 画布、截取和生成均要求兄弟账号的访问请求被拒绝。
     passedJourneys.append('crossAccountIsolation')
     validatePassedJourneys(passedJourneys, request['environment'])

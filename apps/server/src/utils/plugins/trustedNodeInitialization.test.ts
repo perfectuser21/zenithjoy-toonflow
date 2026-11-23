@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from "@toonflow/file";
+import type { ModelMap, ModelType } from "@toonflow/multi-tenant-gateway";
 import express from "express";
 import { unzipSync } from "fflate";
 import { tmpdir } from "node:os";
@@ -178,6 +179,80 @@ test("the four exported MP4s contain the selected pictures and original audio in
   }
 }, 30000);
 
+test("platform image routes charge customer points and exempt administrators", async () => {
+  const { createMultiTenant } = await import("@toonflow/multi-tenant-auth");
+  const { createModelGateway } = await import("@toonflow/multi-tenant-gateway");
+  const { cnyToPoints } = await import("@toonflow/multi-tenant-billing/config");
+  const root = await mkdtemp(join(tmpdir(), "toonflowCustomerPoints"));
+  try {
+    const auth = createMultiTenant(root);
+    await auth.setup("points-admin", "fixture-password");
+    const user = await auth.createUser("points-customer", "fixture-password");
+    const admin = await auth.getAdminIdentity();
+    if (!admin) throw Error("积分验收缺少管理员身份");
+    const customer = { id: user.id, role: "user" } as const;
+    const secret = "fixture-platform-secret";
+    const provider = { kind: "media", id: "fixtureImage", label: "内部图片供应商", config: { apiKey: secret } } as const;
+    const model = { id: "fixture-upstream", label: "内部图片模型", type: "image" } as const;
+    const adapter = {
+      sources: {
+        backend: {
+          async available(type: string) {
+            return type === "image" ? [{ target: "backend" as const, providerId: provider.id, providerLabel: provider.label,
+              modelId: model.id, label: model.label, type: model.type }] : [];
+          },
+          async resolve() { return { apiKey: secret }; },
+        },
+        toonflowCloud: { async available() { return []; }, async resolve() { throw Error("积分验收禁止使用外部服务"); } },
+      },
+      restore(value: unknown) { return value; },
+      publicModel() { return { type: model.type }; },
+      validate() {},
+      maximumUsage() { return { requests: 1 }; },
+    };
+    type FixtureCatalog = Record<ModelType, { type: typeof model.type }>;
+    const gateway = createModelGateway<ModelMap, FixtureCatalog, Record<string, never>>(root, {
+      enabled: () => true,
+      formatPrice: () => "平台报价",
+      adapters: { text: adapter, image: adapter, video: adapter, audio: adapter },
+      cloud: { parse() { throw Error("积分验收禁止读取外部配置"); }, async load() { throw Error("积分验收禁止使用外部服务"); } },
+      providers: {
+        async legacy() { return [provider]; },
+        normalize: providers => providers,
+        describe: providers => providers.map(entry => ({ ...entry, models: [model] })),
+        inspect() { throw Error("积分验收不读取供应商源码"); },
+      },
+    });
+    const paid = { id: randomUUID(), publicId: "fixture-public", label: "图片生成 · 精细", type: "image", enabled: true,
+      target: "backend", providerId: provider.id, upstreamModelId: model.id, costPrice: null,
+      salePrice: { currency: "CNY", mode: "perRequest", amount: "1.5" } } as const;
+    await gateway.save([paid, { ...paid, id: randomUUID(), publicId: "fixture-free", salePrice: { ...paid.salePrice, amount: "0" } }], 0);
+    expect((await gateway.getProviders()).providers[0]?.config.apiKey).toBe(secret);
+    expect(await gateway.catalog(["image"], customer)).toEqual([{
+      type: "image", providerId: "multiTenant", providerLabel: "悦升云端", routeId: paid.id, modelId: paid.publicId,
+      label: "图片生成 · 精细 · 1500 积分/次", priceLabel: "1500 积分/次",
+    }]);
+
+    await gateway.credit({ userId: user.id, currency: "CNY", amount: "5", requestId: randomUUID() });
+    const payload = { prompt: "积分验收图片" };
+    const run = async (actor: typeof customer | typeof admin) => {
+      const execution = await gateway.resolve("image", "multiTenant", paid.publicId, undefined, payload, { actor });
+      return gateway.run({ execution, context: { actor, requestId: randomUUID(), payload },
+        async execute() { return { value: "图片已生成", outcome: { kind: "usage", usage: { requests: 1 } } }; },
+        failure() { return { kind: "notSubmitted" }; },
+      });
+    };
+    expect(await run(customer)).toEqual({ value: "图片已生成", billing: { status: "settled", amount: "1.5", currency: "CNY", capped: false } });
+    const settled = await gateway.readBalance(user.id);
+    expect(settled.wallets).toContainEqual({ currency: "CNY", balance: "3.5", reserved: "0", available: "3.5" });
+    expect(settled.transactions.filter(entry => entry.kind === "model").map(entry => cnyToPoints(entry.amount))).toEqual(["1500"]);
+    expect(await run(admin)).toEqual({ value: "图片已生成", billing: undefined });
+    expect(await gateway.readBalance(user.id)).toEqual(settled);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("staff canvas generates images, analyzes and edits videos, and exports 100 authorized uploads", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "toonflowCanvasBrowser")));
   const project = { directory: join(root, "workspaces", "studio"), name: "既有画布", lastOpenedAt: Date.now() };
@@ -334,7 +409,10 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       { groups: [group], uncertain: [2] },
     ];
     let backgroundRequests = 0;
+    let ordinaryWeb = false;
+    let modelCatalogUnavailable = false;
     gateway.use((req, res, next) => {
+      if (ordinaryWeb) res.locals.multiTenantWeb = true;
       for (const { cookie, assertion } of staff.values()) {
         if (req.get("cookie")?.split("; ").includes(`fixtureAccess=${cookie}`)) req.headers["cf-access-jwt-assertion"] = assertion;
       }
@@ -347,9 +425,12 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       }
       next();
     });
-    gateway.get("/api/ai/models", (_request, response) => response.json({ code: 200, data: [{
-      providerId: "backgroundFixture", providerLabel: "验收", label: "背景模型", modelId: reviewModel, protocol: "openai-completions",
-    }] }));
+    gateway.get("/api/ai/models", (_request, response) => {
+      if (modelCatalogUnavailable) return response.status(503).json({ code: 503, message: "模型目录暂不可用" });
+      return response.json({ code: 200, data: [{
+        providerId: "backgroundFixture", providerLabel: "验收", label: "背景模型", modelId: reviewModel, protocol: "openai-completions",
+      }] });
+    });
     const sentReasoningBudgets: unknown[] = [];
     const { createApp } = await import("../../app");
     gateway.use(await createApp({ webRoot: join(build, "web"), nodesRoot: join(build, "nodes"), dataDirectory: root }));
@@ -691,6 +772,60 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     expect(prepareResponses).toEqual([200, 404]);
     expect(nativeDownloads).toEqual([200]);
     expect(await readdir(downloads)).toEqual(files);
+
+    const { createMultiTenant } = await import("@toonflow/multi-tenant-auth");
+    const { default: conf } = await import("../conf");
+    const tenants = createMultiTenant(root);
+    await tenants.setup("fixture-admin", randomUUID());
+    const customerPassword = randomUUID();
+    const customer = await tenants.createUser("fixture-customer", customerPassword);
+    const customerProject = { ...project, directory: join(root, "multiTenant", "workspaces", customer.id, "studio") };
+    await mkdir(join(customerProject.directory, "assets"), { recursive: true });
+    await writeFile(join(customerProject.directory, "旧画布.json"), JSON.stringify({
+      toonflowCanvas: true, nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 },
+    }));
+    await tenants.writeUserSettings(customer.id, {
+      ui: { language: "zh-CN", startupAnimation: false },
+      stores: { "toonflow.projectList": { project: customerProject, projectList: [customerProject] } },
+    }, 0);
+    conf.set("settings.multiTenantEnabled", true);
+    process.env.NODE_ENV = "dev";
+    delete process.env.TOONFLOW_TRUSTED_CANVAS_BETA;
+    ordinaryWeb = true;
+    const observed = [];
+    for (const simulateCatalogOutage of [false, true]) {
+      modelCatalogUnavailable = simulateCatalogOutage;
+      const context = await browser.createBrowserContext();
+      try {
+        const tenantPage = await context.newPage();
+        let agentRequests = 0;
+        tenantPage.on("request", request => {
+          if (new URL(request.url()).pathname === "/api/agent/list") agentRequests++;
+        });
+        await tenantPage.goto(`${origin}/#/workspace`, { waitUntil: "domcontentloaded" });
+        await tenantPage.locator('input[autocomplete="username"]').fill(customer.userName);
+        await tenantPage.locator('input[autocomplete="current-password"]').fill(customerPassword);
+        const catalogResponse = tenantPage.waitForResponse(response => new URL(response.url()).pathname === "/api/ai/models");
+        await tenantPage.locator('button[type="submit"]').click();
+        expect((await catalogResponse).status()).toBe(simulateCatalogOutage ? 503 : 200);
+        await tenantPage.waitForSelector(".workspacePage:not([inert]) .canvasPanel:not([inert]), .el-result", { visible: true, timeout: 15000 });
+        const result = await tenantPage.evaluate(async () => {
+          const headers = { "x-toonflow-workspace": "1" };
+          const balance = await fetch("/api/multiTenant/user/balance", { headers });
+          const providerKeys = await fetch("/api/multiTenant/user/providerKey", { headers });
+          const payload = await balance.json();
+          const points = payload && typeof payload === "object" && "data" in payload ? payload.data : null;
+          return { balanceStatus: balance.status, balanceFields: points && typeof points === "object" ? Object.keys(points).sort() : [],
+            keysStatus: providerKeys.status };
+        });
+        observed.push({ ...result, canvas: Boolean(await tenantPage.$(".workspacePage .canvasPanel")),
+          assistant: Boolean(await tenantPage.$("#agentPanel")), agentRequests });
+      } finally {
+        await context.close();
+      }
+    }
+    expect(observed).toEqual(Array(2).fill({ canvas: true, assistant: false, agentRequests: 0,
+      balanceStatus: 200, balanceFields: ["available", "balance", "reserved", "transactions"], keysStatus: 403 }));
   } finally {
     console.error = originalConsoleError;
     await browser?.close();

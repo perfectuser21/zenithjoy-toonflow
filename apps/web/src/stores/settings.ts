@@ -188,10 +188,10 @@ export async function loadSettings() {
   }
   settings.value = data.data;
   settingsRevision = headers["x-toonflow-settings-revision"] === undefined ? undefined : Number(headers["x-toonflow-settings-revision"]);
-  await refreshModelChoices();
   // 等初始化引发的监听执行完，再允许自动保存。
   await nextTick();
   settingsReady = true;
+  void refreshModelChoices().catch(() => {});
   void refreshToonflowProvider();
 }
 

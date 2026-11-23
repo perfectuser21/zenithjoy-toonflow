@@ -54,7 +54,7 @@
               <el-image class="brandLogo" :class="{ upstreamLogo: !isBrowserWeb }" :src="appBrand.logoUrl" fit="contain" alt="" />
               <h1>今天要做点什么？</h1>
             </div>
-            <div class="promptArea">
+            <div v-if="agentEnabled" class="promptArea">
               <el-card class="promptCard" :class="{ draggingAttachments }" shadow="never" @dragenter.capture="dragEnterAttachments" @dragover.capture="dragOverAttachments" @dragleave.capture="dragLeaveAttachments" @drop.capture="dropAttachments">
                 <div v-if="draggingAttachments" class="attachmentDropOverlay" role="status" aria-live="polite">
                   <icon-paperclip :size="20" aria-hidden="true" />
@@ -81,6 +81,7 @@
               </el-card>
               <p v-if="!workspaceDirectory" class="workspaceHint" role="status">请先选择一个空文件夹作为工作目录，画布和素材会保存在这里。</p>
             </div>
+            <el-button v-else type="primary" :loading="creating" :disabled="opening" @click="createProject(false)">新建或打开项目</el-button>
           </section>
           <section class="projectList" data-home-section="projects" aria-labelledby="projectListTitle">
             <h2 id="projectListTitle" class="projectTabs">
@@ -142,7 +143,7 @@ import type { AgentAttachment } from "@/components/agent/types";
 import type { HomeAdvertisement, HomeAdvertisements } from "@toonflow/server/channel";
 import { appBrand, isBrowserWeb } from "@/lib/branding";
 import { useWorkspaceStore, type Project } from "@/stores/workspace";
-import { currentUser, publicWeb } from "@/stores/multiTenant";
+import { agentEnabled, currentUser, publicWeb } from "@/stores/multiTenant";
 import { hasDesktopUpdate } from "@/stores/desktopUpdate";
 import { deviceHubEnabled, mobileConnection, mobileConnectionLabel } from "@/lib/mobile";
 import useWorkspaceFiles from "@/lib/workspaceFiles";
