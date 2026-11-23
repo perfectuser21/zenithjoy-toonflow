@@ -81,6 +81,15 @@ url=client.get_presigned_url(Method='GET',Bucket=os.environ['CANVAS_COS_BUCKET']
 request['transfer']={**transfer,'url':url}
 print(json.dumps(request))
 PY
+if [[ "$RELEASE_ENVIRONMENT" == production ]]; then
+  jq 'del(.transfer) | .operation = "preflight"' "$releaseTmp/request.json" > "$releaseTmp/preflight.json"
+  ssh -F "$releaseTmp/config" -T releaseTarget /usr/local/sbin/aivideo-release \
+    < "$releaseTmp/preflight.json" > "$releaseTmp/preflightReceipt.json"
+  jq -e --arg source "$RELEASE_SHA" --arg image "$RELEASE_IMAGE" \
+    '.environment == "production" and .sourceSha == $source and .image == $image
+     and .result == "ready" and .deployed == false and .productionCandidateGate == true' \
+    "$releaseTmp/preflightReceipt.json" > /dev/null
+fi
 ssh -F "$releaseTmp/config" -T releaseTarget /usr/local/sbin/aivideo-release \
   < "$releaseTmp/request.json" > "$releaseTmp/receipt.json"
 PYTHONPATH="$deliveryDirectory" python3 -B - "$releaseTmp/request.json" "$releaseTmp/receipt.json" <<'PY'

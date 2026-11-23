@@ -240,8 +240,12 @@ def main():
         require('/usr/bin/docker start -a ' + config['container'] in execution, '服务尚未接入固定容器启动模式')
         # preflight 无拉取、停机、创建事务或写入业务数据。
         if operation == 'preflight':
-            print(json.dumps({'environment':request['environment'], 'sourceSha':request['sourceSha'],
-                              'image':request['image'], 'result':'ready', 'deployed':False}))
+            preflight = {'environment':request['environment'], 'sourceSha':request['sourceSha'],
+                         'image':request['image'], 'result':'ready', 'deployed':False}
+            if request['environment'] == 'production':
+                rootFile(config.get('productionCandidateConfig', ''), private=True)
+                preflight['productionCandidateGate'] = True
+            print(json.dumps(preflight))
             return
         # 生产仅用完整本机缓存或独立香港只读见证中继，不再直接访问GHCR。
         diagnosticPhase = 'image_transfer'
