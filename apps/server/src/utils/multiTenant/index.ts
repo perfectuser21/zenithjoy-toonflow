@@ -174,7 +174,7 @@ export async function registerUser(req: Request, res: Response, userName: string
 export async function loginUser(req: Request, res: Response, userName: string, password: string) {
   assertUserRequest(req);
   const result = await accessControl(() => control.loginWeb(userName, password));
-  await ensureProjectQuota(result.user.id, "enroll");
+  if (result.user.role === "user") await ensureProjectQuota(result.user.id, "enroll");
   res.cookie("toonflowWebSession", result.token, { ...cookieOptions(req, "/"), maxAge: 8 * 60 * 60 * 1000 });
   return { user: result.user };
 }
