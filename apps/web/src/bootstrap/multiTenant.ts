@@ -6,7 +6,7 @@ import type { UserSession } from "@toonflow/multi-tenant-user-web/types";
 import { webBrand } from "@/lib/branding";
 import http from "@/lib/http";
 import { actualPlatform } from "@/lib/platform";
-import { currentUser, publicWeb, hostWeb } from "@/stores/multiTenant";
+import { agentEnabled, currentUser, publicWeb, hostWeb } from "@/stores/multiTenant";
 
 export async function initializeMultiTenant(): Promise<{ session: UserSession; app: App<Element> | undefined }> {
   const hostWindow = window as Window & { toonflowHostReady?: Promise<void> };
@@ -15,6 +15,7 @@ export async function initializeMultiTenant(): Promise<{ session: UserSession; a
   currentUser.value = session.user;
   publicWeb.value = session.publicWeb;
   hostWeb.value = session.host;
+  agentEnabled.value = session.agentEnabled ?? (!session.enabled || session.user?.role === "admin");
   let app: App<Element> | undefined;
 
   if (session.publicWeb && !session.user) {

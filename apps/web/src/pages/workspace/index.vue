@@ -1,5 +1,5 @@
 <template>
-  <main class="workspacePage" :inert="workspaceStore.projectLoadingVisible" :style="{ '--agentWidth': `${agentVisible ? agentWidth : 0}px` }">
+  <main class="workspacePage" :inert="workspaceStore.projectLoadingVisible" :style="{ '--agentWidth': `${agentEnabled && agentVisible ? agentWidth : 0}px` }">
     <canvasPanel
       :key="workspaceStore.project?.directory"
       v-model:selectedTool="selectedTool"
@@ -99,7 +99,7 @@
             </el-tooltip>
           </div>
         </el-card>
-        <el-tooltip v-if="!agentVisible" :content="agentLabel" placement="top" :showArrow="false" :hideAfter="0">
+        <el-tooltip v-if="agentEnabled && !agentVisible" :content="agentLabel" placement="top" :showArrow="false" :hideAfter="0">
           <el-button
             class="agentButton"
             :class="{ standalone: activePanel !== 'canvas' }"
@@ -110,7 +110,7 @@
         </el-tooltip>
       </div>
     </div>
-    <floatingAgent v-model="agentVisible" :inert="workspaceStore.projectLoadingVisible" @resize="agentWidth = $event" />
+    <floatingAgent v-if="agentEnabled" v-model="agentVisible" :inert="workspaceStore.projectLoadingVisible" @resize="agentWidth = $event" />
     <settings v-model="settingsVisible" />
     <el-dialog v-model="contactVisible" :title="contactInfo.title" width="min(360px, calc(100vw - 32px))" alignCenter appendToBody>
       <div class="contactContent">
@@ -138,6 +138,7 @@ import { IconVector, IconFileText, IconPointer, IconHandStop, IconPlus, IconSear
 import { ElMessage, ElMessageBox } from "element-plus";
 import { QRCode } from "tdesign-vue-next";
 import settings from "@/components/settings/index.vue";
+import { agentEnabled } from "@/stores/multiTenant";
 import { useWorkspaceStore } from "@/stores/workspace";
 import { appBrand, isBrowserWeb } from "@/lib/branding";
 import { registerWorkspaceControl, waitForControlValue } from "@/lib/mcpControl";
@@ -146,8 +147,7 @@ import { useProviderBalances } from "@/lib/providerBilling";
 import canvasPanel from "./panels/canvas/canvasHost.vue";
 import type { DocumentNodeOptions } from "./panels/canvas/canvasFiles";
 import workspaceMenu from "./components/workspaceMenu.vue";
-import floatingAgent from "./components/floatingAgent.vue";
-
+const floatingAgent = defineAsyncComponent(() => import("./components/floatingAgent.vue"));
 const documentPanel = defineAsyncComponent(() => import("./panels/document/index.vue"));
 
 const activePanel = ref<"canvas" | "document">("canvas");

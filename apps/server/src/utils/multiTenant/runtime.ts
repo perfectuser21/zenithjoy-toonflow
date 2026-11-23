@@ -156,6 +156,10 @@ export async function changeMultiTenantEnabled(app: Application, enabled: boolea
   });
 }
 
+export function canUseWorkspaceAgent(user: AuthIdentity | null) {
+  return user?.role === "admin" || (user?.role === "user" && process.env.TOONFLOW_TRUSTED_CANVAS_BETA === "1");
+}
+
 export function requestIdentity(req: Request): AuthIdentity | undefined {
   return req.res?.locals.multiTenantUser;
 }
@@ -201,7 +205,7 @@ export async function multiTenantAccess(req: Request, res: Response, next: NextF
   const fileRoute = path.startsWith("/api/workspaces/") && path !== "/api/workspaces/files/reveal";
   const settingsRoute = path === "/api/settings/get" && req.method === "GET" || path === "/api/settings/save" && req.method === "PUT";
   const isolatedTrim = canAccessTrimRoute(path, req.method);
-  const tenantAgent = process.env.TOONFLOW_TRUSTED_CANVAS_BETA === "1" && tenantAgentRoutes.has(`${req.method} ${path}`);
+  const tenantAgent = canUseWorkspaceAgent(user) && tenantAgentRoutes.has(`${req.method} ${path}`);
   const ownQianchuan = req.method === "POST" && qianchuanRoutes.has(path);
   if (fileRoute || settingsRoute || ownQianchuan || isolatedTrim || tenantAgent || backgroundBeta || backgroundProduction || backgroundReadOnly || req.method === "GET" && userReadRoutes.has(path)
     || req.method === "POST" && modelWriteRoutes.has(path) || communityReads.has(path) && ["GET", "POST"].includes(req.method)) return runWithIdentity(user, next);

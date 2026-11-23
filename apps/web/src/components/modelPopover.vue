@@ -21,6 +21,7 @@
         </el-button>
       </template>
       <el-form class="modelOptions" labelPosition="top">
+        <p v-if="modelsUnavailable" role="status">读取模型列表失败，请重新打开选择器重试。</p>
         <el-form-item label="模型">
           <el-select :modelValue="selectedModelChoice ? selectedModel : ''" filterable :disabled="disabled" :teleported="false" placeholder="选择模型" aria-label="选择模型" noDataText="请先在设置中添加模型" @update:modelValue="selectedModel = $event" @change="reasoningEffort = ''">
             <template #prefix><modelIcon v-if="selectedModelChoice" :model="selectedModelChoice.modelId" :size="18" /></template>
@@ -64,6 +65,7 @@ const selectedModel = defineModel<string>({ default: "" });
 const reasoningEffort = defineModel<string>("reasoningEffort", { default: "" });
 const props = withDefaults(defineProps<{ active?: boolean; disabled?: boolean }>(), { active: true, disabled: false });
 const visible = ref(false);
+const modelsUnavailable = ref(false);
 const reasoningId = useId();
 const reasoningLabels: Record<ThinkingLevel, string> = { off: "关闭", minimal: "最小", low: "低", medium: "中", high: "高", xhigh: "极高", max: "最高" };
 const selectedModelChoice = useNodeModelSelection(modelChoices, selectedModel);
@@ -87,7 +89,14 @@ watch([() => selectedModelChoice.value?.reasoningLevels, reasoningEffort], ([lev
   if (levels && effort && !levels.includes(effort as ThinkingLevel)) reasoningEffort.value = "";
 }, { immediate: true, flush: "post" });
 watch(() => !props.active || props.disabled, close => { if (close) visible.value = false; });
-watch(visible, value => { if (value) void refreshModelChoices().catch(() => {}); });
+watch(visible, async (value, _previous, onCleanup) => {
+  if (!value) return;
+  const controller = new AbortController();
+  onCleanup(() => controller.abort());
+  modelsUnavailable.value = false;
+  try { await refreshModelChoices(false, controller.signal); }
+  catch { if (!controller.signal.aborted) modelsUnavailable.value = true; }
+});
 </script>
 
 <style lang="scss">
