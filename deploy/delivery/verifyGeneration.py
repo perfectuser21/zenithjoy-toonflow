@@ -221,6 +221,24 @@ def readGenerationQuote(client, payload):
     return points
 
 
+def verifyPointsBudget(client, payload, studio=None):
+    client.request('GET', '/api/multiTenant/user/providerKey', expected=403, timeout=20)
+    startingPoints = readPoints(client)
+    quote = readGenerationQuote(client, payload)
+    require(not studio or quote <= asPoints(studio['maxPoints']), 'Mac Studio 验收报价超出积分上限')
+    require(asPoints(startingPoints['available']) >= quote, '专用发布验收账号积分低于本次报价')
+    return startingPoints, quote
+
+
+def studioGenerationCase(config):
+    studio = config['studioImageVerification']
+    workspace = config['accounts'][1]
+    payload = {'directory': workspace['directory'], 'mediaType': 'image', 'providerId': 'multiTenant',
+               'modelId': studio['modelId'], 'prompt': 'A blue glass cube on white, no people or text',
+               'size': '1K', 'ratio': '1:1', 'outputDirectory': 'assets/deliveryStudio'}
+    return payload, {'fileCount': 1, 'timeoutSeconds': 210, 'pollSeconds': 5}, workspace
+
+
 def verifyPointsSettlement(before, after, taskId, quote):
     matches = [row for row in after['transactions'] if row['id'] == taskId]
     require(len(matches) == 1 and matches[0]['kind'] == 'model' and matches[0]['status'] == 'settled',
@@ -283,15 +301,8 @@ def main():
     checkPoints = request['environment'] == 'staging'
     receipt = verifyGenerationCase(config, release, request, bootId, (payload, expected, workspace), checkPoints)
     if checkPoints:
-        studio = config['studioImageVerification']
-        studioWorkspace = config['accounts'][1]
-        studioPayload = {'directory': studioWorkspace['directory'], 'mediaType': 'image', 'providerId': 'multiTenant',
-                         'modelId': studio['modelId'], 'prompt': 'A blue glass cube on white, no people or text',
-                         'size': '1K', 'ratio': '1:1', 'outputDirectory': 'assets/deliveryStudio'}
-        studioExpected = {'fileCount': 1, 'timeoutSeconds': 210, 'pollSeconds': 5}
         studioReceipt = verifyGenerationCase(config, release, request, bootId,
-                                             (studioPayload, studioExpected, studioWorkspace), True,
-                                             studio=studio)
+                                             studioGenerationCase(config), True, studio=config['studioImageVerification'])
         require(studioReceipt.get('studioImageGatewayVerified') is True, 'Mac Studio 出图验收缺失')
         receipt['studioImageGatewayVerified'] = True
     print(json.dumps(receipt))
@@ -307,11 +318,7 @@ def verifyGenerationCase(config, release, request, bootId, case, checkPoints, st
     other = newPublicClient(config)
     other.login(next(account for account in config['accounts'] if account['userId'] != workspace['userId']))
     if checkPoints:
-        client.request('GET', '/api/multiTenant/user/providerKey', expected=403, timeout=20)
-        startingPoints = readPoints(client)
-        quote = readGenerationQuote(client, payload)
-        require(not studio or quote <= asPoints(studio['maxPoints']), 'Mac Studio 验收报价超出积分上限')
-        require(asPoints(startingPoints['available']) >= quote, '专用发布验收账号积分低于本次报价')
+        startingPoints, quote = verifyPointsBudget(client, payload, studio)
     # root账本与主发布事务共用受保护目录；原子独占创建杜绝相同run再次提交。
     state = Path(release['stateDirectory'])
     identity = rootJson(state / 'identity.json')
