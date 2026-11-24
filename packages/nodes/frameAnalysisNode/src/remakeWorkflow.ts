@@ -43,6 +43,8 @@ export const remakeAnalysisSchema = z.object({
   }
 });
 
+export const sourceMatchSchema = z.object({ matches: z.boolean() });
+
 const groupSchema = z.strictObject({
   id: shotId, prompt: z.string(), picture: mediaSchema.optional(), preview: mediaSchema.optional(), task: taskSchema.optional(),
 });
@@ -65,6 +67,7 @@ export const remakeStateSchema = z.strictObject({
   planApproved: z.boolean(),
   job: jobSchema.optional(),
 });
+export type RemakeAnalysis = z.infer<typeof remakeAnalysisSchema>;
 export type RemakeState = z.infer<typeof remakeStateSchema>;
 export type RemakeGroup = z.infer<typeof groupSchema>;
 export type RemakeTranscript = z.infer<typeof transcriptSchema>;
@@ -75,6 +78,17 @@ export const remakeJobSchema = z.object({
   parts: z.array(partSchema).min(1).max(24),
   resultPath: pathSchema.optional(),
 });
+
+export async function requiresScopedAnalysis(signal: AbortSignal) {
+  const response = await fetch("/api/multiTenant/user/session", { headers: { "x-toonflow-workspace": "1" }, signal });
+  const session = z.object({
+    code: z.literal(200),
+    data: z.object({ publicWeb: z.boolean(), user: z.object({ role: z.enum(["user", "admin"]) }).nullish() }),
+  }).safeParse(await response.json());
+  if (!response.ok || !session.success) throw new Error("无法确认当前账号");
+  if (session.data.data.publicWeb && !session.data.data.user) throw new Error("请先登录创作账号");
+  return session.data.data.publicWeb && session.data.data.user?.role === "user";
+}
 
 export async function callRemakeApi<T>(operation: "analyze" | "prepare" | "confirm" | "status" | "finish" | "retry", body: object, output: z.ZodType<T>, signal: AbortSignal) {
   const timeout = ["analyze", "prepare", "finish"].includes(operation) ? 1800000 : 30000;

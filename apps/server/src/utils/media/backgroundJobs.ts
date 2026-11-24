@@ -127,6 +127,14 @@ export async function planBackgroundJob(cwd: string, sourcePath: string, actor: 
   });
 }
 
+export async function checkBackgroundSource(cwd: string, sourcePath: string, expected: string, actor: AuthIdentity, signal: AbortSignal) {
+  return withBudget(cwd, actor, "plan", signal, async (_id, active, check) => {
+    await check();
+    const matches = await withVideoSource(cwd, sourcePath, actor, active, async (_path, version) => version === expected);
+    return { value: { matches } };
+  });
+}
+
 export async function analyzeGuidedBackground(cwd: string, sourcePath: string, actor: AuthIdentity, signal: AbortSignal) {
   const folderFor = (id: string) => `assets/generated/guided${id.replaceAll("-", "")}`;
   return withBudget(cwd, actor, "frame", signal, async (id, active, check) =>

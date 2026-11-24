@@ -25,6 +25,7 @@ export type AnalysisResult = {
   height: number;
   manifest: string;
   warning?: string;
+  sourceRevision?: string;
   sourceVideoOffset?: number;
   sourceVideoStreamIndex?: number;
   overview?: {
