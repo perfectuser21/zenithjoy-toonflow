@@ -258,7 +258,7 @@ export async function prepareBackgroundJob(cwd: string, sourcePath: string, acto
     if (!await createMediaLease(cwd, leaseId, taskId, actor)) invalid("媒体任务租约冲突，请重新准备", 409);
     parts.push({ ...file, fileRevision: await revision((await resolveWorkspacePath(cwd, file.path)).path), taskId, leaseId, state: "pending" });
   }
-  const payload: Payload = { version: 1, sourcePath, sourceRevision: initial, duration: timeline ? timeline.frameCount / timeline.fps : plan.duration, stage: "prepared", parts, timeline };
+  const payload: Payload = { version: 1, sourcePath, sourceRevision: initial, duration: timeline ? timeline.frameCount / timeline.fps : plan.duration, stage: "prepared", parts, ...(timeline ? { timeline } : {}) };
   await check();
   if (!await databaseAccess(async () => (await db()).createBackgroundJob({ ...key, payload }))) invalid("项目编号冲突，请重新准备", 409);
   // 完整预留持续覆盖后续生成片段、失败残留及最终合成，清理后再对账。
@@ -405,9 +405,14 @@ export async function retryGuidedBackgroundPart(cwd: string, jobId: string, acto
     const taskId = randomUUID();
     const leaseId = randomUUID();
     if (!await createMediaLease(cwd, leaseId, taskId, actor)) invalid("片段任务租约冲突", 409);
-    Object.assign(part, { taskId, leaseId, retryIds: [...(part.retryIds ?? []), requestId], state: "pending", resultPath: undefined, resultRevision: undefined });
+    part.taskId = taskId;
+    part.leaseId = leaseId;
+    part.retryIds = [...(part.retryIds ?? []), requestId];
+    part.state = "pending";
+    delete part.resultPath;
+    delete part.resultRevision;
     payload.stage = "confirmed";
-    payload.resultPath = undefined;
+    delete payload.resultPath;
     await save();
     return { jobId, ...payload };
   });
