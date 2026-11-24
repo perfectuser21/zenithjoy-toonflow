@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createSceneDetector } from "../../../../../packages/nodes/frameAnalysisNode/src/sceneDetector";
 import { combinationCount, combinationAt, renderBatch, type MashupClip } from "../../../../../packages/nodes/mashupNode/src/mashupBatch";
-import { initializeTrustedNodes, trustedNodeNames } from "./initialize";
+import { initializeHostedSharedCanvasNodes, initializeTrustedNodes, trustedNodeNames } from "./initialize";
 
 test("existing workspaces receive trusted nodes from each release", async () => {
   const root = await mkdtemp(join(tmpdir(), "toonflowTrustedNodes"));
@@ -38,6 +38,13 @@ test("existing workspaces receive trusted nodes from each release", async () => 
     }
     await writeFile(join(source, "videoNode.umd.js"), "next release");
     await initializeTrustedNodes(target, source);
+    expect(await readFile(join(target, "videoNode.umd.js"), "utf8")).toBe("next release");
+    expect(await readFile(join(target, "customNode.umd.js"), "utf8")).toBe("customized");
+    await writeFile(join(source, "frameAnalysisNode.umd.js"), "candidate:frameAnalysis");
+    await writeFile(join(target, "frameAnalysisNode.umd.js"), "old:frameAnalysis");
+    await writeFile(join(target, "videoNode.umd.js"), "old:video");
+    await initializeHostedSharedCanvasNodes(target, source);
+    expect(await readFile(join(target, "frameAnalysisNode.umd.js"), "utf8")).toBe("candidate:frameAnalysis");
     expect(await readFile(join(target, "videoNode.umd.js"), "utf8")).toBe("next release");
     expect(await readFile(join(target, "customNode.umd.js"), "utf8")).toBe("customized");
     expect(await readFile(join(target, "initialized"), "utf8")).toBe("existing workspace");
