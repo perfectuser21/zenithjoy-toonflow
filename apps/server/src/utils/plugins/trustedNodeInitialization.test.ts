@@ -423,6 +423,7 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       ],
       edges: [
         { id: "batch", source: "mashup", sourceHandle: "videos", target: "qianchuan", targetHandle: "videos" },
+        { id: "analysisInput", source: "backgroundSource", sourceHandle: "video", target: "analysis", targetHandle: "in" },
         { id: "wanImage", source: "imageGeneration", sourceHandle: "image", target: "wanGeneration", targetHandle: "in" },
         { id: "wanVideo", source: "backgroundSource", sourceHandle: "video", target: "wanGeneration", targetHandle: "in" },
         ...videoNodes.map(({ id }, index) => ({ id: "segment" + index, source: id, sourceHandle: "video", target: "concat", targetHandle: "segment" + index })),
@@ -725,17 +726,37 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     const generatedImage = await waitForSaved<string>(async () => (await savedNodeData("imageGeneration"))?.outputs?.image?.value.url);
     expect(await readFile(join(project.directory, generatedImage))).toEqual(png);
     const backgroundNode = '.vue-flow__node[data-id="backgroundSource"]';
+    const backgroundSubmissions: string[] = [];
+    generating.page.on("request", request => {
+      if (request.method() !== "POST" || new URL(request.url()).pathname !== "/api/ai/media/generate") return;
+      const submitted = z.object({ nodeId: z.string(), mediaType: z.string() }).safeParse(JSON.parse(request.postData() ?? "null"));
+      if (submitted.success && submitted.data.nodeId === "backgroundSource") backgroundSubmissions.push(submitted.data.mediaType);
+    });
     await generating.page.locator(`${backgroundNode} .titleBar`).setTimeout(5000).click();
-    await generating.page.locator(`${backgroundNode} button[title^="自动生成背景候选"]:not([disabled])`).setTimeout(5000).click().catch(async error => {
+    await generating.page.locator('xpath=//div[@data-id="backgroundSource"]//button[normalize-space(.)="换背景" and not(@disabled)]').setTimeout(5000).click().catch(async error => {
       throw Error(await generating.page.$eval(backgroundNode, node => Reflect.get(node, "innerText")), { cause: error });
     });
     const dialog = '.backgroundPanel';
+    const candidatesButton = 'xpath=//button[normalize-space(.)="生成 3 个候选" and not(@disabled)]';
+    await generating.page.waitForSelector(`${dialog} img[alt="提取的视频画面"]`, { visible: true });
+    await generating.page.waitForNetworkIdle({ idleTime: 500, timeout: 12000 });
+    expect(backgroundSubmissions).toEqual([]);
+    await generating.page.locator(candidatesButton).click();
+    const confirmImage = 'xpath=//div[contains(@class,"el-message-box")]//button[normalize-space(.)="确认出图"]';
+    await generating.page.waitForSelector(confirmImage, { visible: true });
+    expect(backgroundSubmissions).toEqual([]);
+    await generating.page.locator('xpath=//div[contains(@class,"el-message-box")]//button[normalize-space(.)="取消"]').click();
+    await generating.page.waitForSelector(confirmImage, { hidden: true });
+    expect(backgroundSubmissions).toEqual([]);
+    await generating.page.locator(candidatesButton).click();
+    await generating.page.locator(confirmImage).click();
     await generating.page.waitForFunction(selector => {
       const candidates = Array.from(Reflect.get(globalThis, "document").querySelectorAll(selector + " .candidateGrid img")) as { naturalWidth: number }[];
       return candidates.length === 3 && candidates.every(image => image.naturalWidth === 64);
     }, { timeout: 12000 }, dialog).catch(async error => {
       throw Error(await generating.page.$eval(dialog, node => Reflect.get(node, "innerText")), { cause: error });
     });
+    expect(backgroundSubmissions).toEqual(["image", "image", "image"]);
     await generating.page.locator(`${dialog} .candidateGrid button:nth-child(2)`).click();
     await generating.page.locator('xpath=//button[normalize-space(.)="确认生成" and not(@disabled)]').click();
     await generating.page.waitForFunction(() => {
@@ -746,13 +767,15 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     });
     const replacementPath = await waitForSaved<string>(async () => (await savedNodeData("backgroundSource"))?.backgroundState?.lastResult?.url);
     expect((await savedNodeData("backgroundSource")).backgroundState.candidates).toHaveLength(3);
+    expect(backgroundSubmissions).toEqual(["image", "image", "image", "video"]);
     expect(await readFile(join(project.directory, replacementPath))).toEqual(replacementVideo);
     expect(await readFile(join(project.directory, sceneSource))).toEqual(sourceVideoBytes);
     await generating.page.locator('xpath=//button[normalize-space(.)="关闭" and ancestor::*[@role="dialog"]]').click();
     const shotNode = '.vue-flow__node[data-id="analysis"]';
-    await generating.page.locator(`${shotNode} .titleBar`).setTimeout(5000).click();
-    await generating.page.locator('xpath=//div[@data-id="analysis"]//button[normalize-space(.)="视频翻拍" and not(@disabled)]').setTimeout(5000).click();
+    await generating.page.locator(`${backgroundNode} .titleBar`).setTimeout(5000).click();
+    await generating.page.locator('xpath=//div[@data-id="backgroundSource"]//button[normalize-space(.)="视频翻拍" and not(@disabled)]').setTimeout(5000).click();
     await generating.page.waitForSelector(".remakeStages button[aria-current=step]", { visible: true, timeout: 5000 });
+    expect(await generating.page.$$eval(".vue-flow__node-remote-frameAnalysisNode", nodes => nodes.map(node => node.getAttribute("data-id")))).toEqual(["analysis"]);
     expect(await generating.page.$$eval(".remakeStages button", buttons => buttons.map(button => ({
       label: button.textContent?.trim(), disabled: Reflect.get(button, "disabled"),
     })))).toEqual([
@@ -899,14 +922,23 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     const customerProject = { ...project, directory: join(root, "multiTenant", "workspaces", customer.id, "studio") };
     await mkdir(join(customerProject.directory, "assets"), { recursive: true });
     const customerCanvas = join(customerProject.directory, "旧画布.json");
+    const guidedSource = "assets/guidedFixture.mp4";
     trimReview = { request: { directory: customerProject.directory, operationId: randomUUID(), source: sceneSource, start: 0, end: 1 }, queued: false };
     const pendingTrim = { ...trimReview.request, ownerId: customer.id, canvasPath: "旧画布.json" };
     const customerVideo = join(customerProject.directory, sceneSource);
     await writeFile(customerVideo, sourceVideoBytes);
     await writeFile(customerCanvas, JSON.stringify({
-      toonflowCanvas: true, edges: [], viewport: { x: 0, y: 0, zoom: 1 },
-      nodes: [{ id: "staleTrim", type: "remote-videoNode", position: { x: 220, y: 200 },
-        data: { pendingTrim, outputs: { video: { dataType: "VIDEO", value: { url: sceneSource, mimeType: "video/mp4" } } } } }],
+      toonflowCanvas: true,
+      edges: [{ id: "handoff", source: "customerVideo", sourceHandle: "video", target: "customerAnalysis", targetHandle: "in" }],
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: "staleTrim", type: "remote-videoNode", position: { x: 130, y: 200 },
+          data: { pendingTrim, outputs: { video: { dataType: "VIDEO", value: { url: sceneSource, mimeType: "video/mp4" } } } } },
+        { id: "customerVideo", type: "remote-videoNode", position: { x: 450, y: 200 },
+          data: { outputs: { video: { dataType: "VIDEO", value: { url: guidedSource, mimeType: "video/mp4" } } } } },
+        { id: "customerAnalysis", type: "remote-frameAnalysisNode", position: { x: 730, y: 200 },
+          data: { frameAnalysis: { aiEnabled: false } } },
+      ],
     }));
     await tenants.writeUserSettings(customer.id, {
       ui: { language: "zh-CN", startupAnimation: false },
@@ -924,7 +956,6 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       await initializeBackgroundBudget(guidedDatabase);
     }
     finally { await guidedDatabase.close(); }
-    const guidedSource = "assets/guidedFixture.mp4";
     ffmpeg("-i", customerVideo, "-vf", "fps=30", "-c:v", "libx264", "-c:a", "copy", join(customerProject.directory, guidedSource));
     ordinaryWeb = true;
     const observed = [];
@@ -934,8 +965,12 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       try {
         const tenantPage = await context.newPage();
         let agentRequests = 0;
+        let fullScans = 0;
         tenantPage.on("request", request => {
-          if (new URL(request.url()).pathname === "/api/agent/list") agentRequests++;
+          const path = new URL(request.url()).pathname;
+          if (path === "/api/agent/list") agentRequests++;
+          if (path === "/api/ai/media/background/analyze" && request.method() === "POST"
+            && request.postData() && !request.postData()?.includes('"expectedSourceRevision"')) fullScans++;
         });
         await tenantPage.goto(`${origin}/#/workspace`, { waitUntil: "domcontentloaded" });
         await tenantPage.locator('input[autocomplete="username"]').fill(customer.userName);
@@ -948,20 +983,91 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
           const guided = await tenantPage.evaluate(async input => {
             const headers = { "Content-Type": "application/json", "x-toonflow-workspace": "1" };
             const post = (path: string, body: unknown) => fetch(path, { method: "POST", headers, body: JSON.stringify(body) });
-            const analysis = await post("/api/ai/media/background/analyze", { directory: input.own, videoPath: input.source });
-            const foreign = await post("/api/ai/media/background/analyze", { directory: input.foreign, videoPath: input.source });
+            const path = "/api/ai/media/background/analyze";
+            const scopedSource = { directory: input.own, videoPath: input.source };
+            const analysis = await post(path, scopedSource);
+            const payload = await analysis.json();
+            const data = payload && typeof payload === "object" && "data" in payload ? payload.data : undefined;
+            const version = data && typeof data === "object" && "sourceRevision" in data ? data.sourceRevision : undefined;
+            const check = await post(path, { ...scopedSource, expectedSourceRevision: version });
+            const stale = await post(path, { ...scopedSource, expectedSourceRevision: "outdated-workspace-version" });
+            const foreign = await post(path, { directory: input.foreign, videoPath: input.source, expectedSourceRevision: version });
             const raw = await post("/api/ffmpeg/execute", {});
-            return { status: analysis.status, payload: await analysis.json(), foreign: foreign.status, raw: raw.status };
+            return { status: analysis.status, payload, check: await check.json(), stale: await stale.json(), foreign: foreign.status, raw: raw.status };
           }, { own: customerProject.directory, foreign: project.directory, source: guidedSource });
           expect(guided.status).toBe(200);
           expect(guided.foreign).toBe(403);
           expect(guided.raw).toBe(403);
+          expect(guided.check).toMatchObject({ data: { matches: true } });
+          expect(guided.stale).toMatchObject({ data: { matches: false } });
           const { data: guidedResult } = z.object({ data: z.object({ scenes: z.array(z.object({ image: z.string() })) }) }).parse(guided.payload);
           expect(guidedResult.scenes).toHaveLength(3);
           for (const shot of guidedResult.scenes) {
             const preview = await readFile(join(customerProject.directory, shot.image));
             expect(preview.subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
           }
+          const firstScan = fullScans;
+          const customerAnalysis = '.vue-flow__node[data-id="customerAnalysis"]';
+          await tenantPage.locator(`${customerAnalysis} .titleBar`).setTimeout(5000).click();
+          await tenantPage.locator('xpath=//div[@data-id="customerAnalysis"]//button[normalize-space(.)="开始拉片" and not(@disabled)]').setTimeout(8000).click();
+          await tenantPage.waitForSelector(`${customerAnalysis} .resultSummary`, { visible: true, timeout: 15000 });
+          expect(fullScans).toBe(firstScan + 1);
+          async function readCustomerAnalysis() {
+            const saved = z.object({ nodes: z.array(z.object({ id: z.string(), data: z.record(z.string(), z.unknown()) })) })
+              .parse(JSON.parse(await readFile(customerCanvas, "utf8")));
+            return saved.nodes.find(({ id }) => id === "customerAnalysis")?.data;
+          }
+          const analysisSnapshot = z.object({ manifest: z.string(), scenes: z.array(z.object({ start: z.number(), end: z.number() })) });
+          const reportResult = analysisSnapshot.extend({
+            backgroundReview: z.object({ assignments: z.array(z.object({ referenceShot: z.number().nullable() })) }),
+          });
+          await tenantPage.locator('xpath=//div[@data-id="customerAnalysis"]//button[normalize-space(.)="查看结果" and not(@disabled)]').setTimeout(5000).click();
+          await tenantPage.locator('[role="dialog"] button[aria-label="查看镜头 S02"]').setTimeout(5000).click();
+          await tenantPage.locator('xpath=//button[normalize-space(.)="与上一镜头合并" and not(@disabled)]').setTimeout(5000).click();
+          await tenantPage.waitForFunction(() => Reflect.get(globalThis, "document").querySelectorAll('[role="dialog"] .sceneItem').length === 2);
+          await tenantPage.locator('[role="dialog"] button[aria-label="查看镜头 S01"]').setTimeout(5000).click();
+          await tenantPage.select('[role="dialog"] select[aria-label="修改镜头背景组"]', "1");
+          await waitForSaved(async () => {
+            const parsed = z.object({ lastResult: reportResult }).safeParse((await readCustomerAnalysis())?.frameAnalysis);
+            return parsed.success && parsed.data.lastResult.backgroundReview.assignments[0]?.referenceShot === 1 ? true : undefined;
+          });
+          await tenantPage.locator('[role="dialog"] button[aria-label="查看镜头 S02"]').setTimeout(5000).click();
+          await tenantPage.select('[role="dialog"] select[aria-label="修改镜头背景组"]', "1");
+          const sourceReport = await waitForSaved(async () => {
+            const parsed = z.object({ lastResult: reportResult }).safeParse((await readCustomerAnalysis())?.frameAnalysis);
+            return parsed.success && parsed.data.lastResult.backgroundReview.assignments[1]?.referenceShot === 1
+              ? analysisSnapshot.parse(parsed.data.lastResult) : undefined;
+          });
+          expect(sourceReport.scenes).toHaveLength(2);
+          const modelCallsBeforeReuse = sentReasoningBudgets.length;
+          await tenantPage.locator('[role="dialog"]:has(.sceneList) .el-dialog__headerbtn').click();
+          await tenantPage.waitForSelector('[role="dialog"] .sceneList', { hidden: true, timeout: 5000 });
+          await tenantPage.locator(`${customerAnalysis} .titleBar`).setTimeout(5000).click();
+          await tenantPage.locator('xpath=//div[@data-id="customerAnalysis"]//button[normalize-space(.)="视频翻拍" and not(@disabled)]').setTimeout(5000).click();
+          await tenantPage.waitForSelector(".remakeStages", { visible: true, timeout: 5000 });
+          await tenantPage.locator('xpath=//button[normalize-space(.)="沿用拉片结果" and not(@disabled)]').setTimeout(8000).click().catch(async error => {
+            const panel = await tenantPage.$eval(".remakeBody", element => Reflect.get(element, "innerText"));
+            throw Error(`旧拉片结果未能用于翻拍：${panel}`, { cause: error });
+          });
+          const carried = await waitForSaved(async () => {
+            const parsed = z.object({ analysis: analysisSnapshot, shots: z.array(z.object({ group: z.number().nullable() })) })
+              .safeParse((await readCustomerAnalysis())?.guidedRemake);
+            return parsed.success ? parsed.data : undefined;
+          });
+          expect(carried.analysis).toEqual(sourceReport);
+          expect(carried.shots.map(({ group }) => group)).toEqual([1, 1]);
+          expect(fullScans).toBe(firstScan + 1);
+          expect(sentReasoningBudgets).toHaveLength(modelCallsBeforeReuse);
+          await tenantPage.locator('[role="dialog"]:has(.remakeStages) .el-dialog__headerbtn').click();
+          await tenantPage.waitForSelector(".remakeStages", { hidden: true, timeout: 5000 });
+          await tenantPage.reload({ waitUntil: "domcontentloaded" });
+          await tenantPage.locator(`${customerAnalysis} .titleBar`).setTimeout(8000).click();
+          await tenantPage.locator('xpath=//div[@data-id="customerAnalysis"]//button[normalize-space(.)="视频翻拍" and not(@disabled)]').setTimeout(5000).click();
+          const persistedRemake = await tenantPage.waitForSelector(".remakeSummary", { visible: true, timeout: 8000 });
+          expect(await persistedRemake?.evaluate(element => element.textContent)).toContain("2 段 · 1 组背景");
+          expect(fullScans).toBe(firstScan + 1);
+          await tenantPage.locator('[role="dialog"]:has(.remakeStages) .el-dialog__headerbtn').click();
+          await tenantPage.waitForSelector(".remakeStages", { hidden: true, timeout: 5000 });
           await tenantPage.locator('.vue-flow__node[data-id="staleTrim"] .titleBar').click();
           await tenantPage.locator('xpath=//button[normalize-space(.)="截取片段"]').click();
           const check = tenantPage.locator('xpath=//button[normalize-space(.)="检查并恢复" and not(@disabled)]');

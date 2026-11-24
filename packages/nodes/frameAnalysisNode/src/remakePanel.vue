@@ -14,8 +14,9 @@
           <el-select v-model="analysisModelKey" placeholder="选择视觉分析模型" aria-label="视觉分析模型" :disabled="!!activity || !!current?.job">
             <el-option v-for="model in analysisModels" :key="getNodeModelKey(model)" :value="getNodeModelKey(model)" :label="model.label" />
           </el-select>
-          <el-button type="primary" :loading="activity === 'analysis'" :disabled="!source || !analysisModel || !!activity || locked" @click="analyze">
-            {{ current ? "重新分析原片" : "分析原片" }}
+          <el-button v-if="savedToReuse" type="primary" :loading="activity === 'analysis'" :disabled="!!activity || locked" @click="reuseAnalysis">沿用拉片结果</el-button>
+          <el-button :type="savedToReuse ? 'default' : 'primary'" :loading="activity === 'analysis'" :disabled="!source || !analysisModel || !!activity || locked" @click="analyze">
+            {{ current || savedToReuse ? "重新分析原片" : "分析原片" }}
           </el-button>
         </div>
         <template v-if="current">
@@ -127,11 +128,13 @@ import { ElButton, ElDialog, ElMessageBox, ElOption, ElSelect } from "element-pl
 import { findNodeModel, getNodeModelIdentity, getNodeModelKey, useNode, type NodeAiModel, type NodeMediaModel, type NodeMediaResult, type NodeMediaValue } from "@toonflow/nodes-scaffold/runtime";
 import { useNodePersistence } from "@toonflow/nodes-scaffold/nodeDocument";
 import { reviewBackgrounds } from "./backgroundReview";
+import { restoreBackgroundReview } from "./backgroundAssignments";
+import type { AnalysisResult } from "./videoAnalysis";
 import { formatSceneTime } from "./resultNodes";
 import { runRemakeMovie } from "./remakeMovie";
-import { callRemakeApi, rebuildRemakeGroups, remakeAnalysisSchema, remakeImageType, remakeStateSchema, writeRemakePrompts, type RemakeGroup, type RemakeState, type RemakeTranscript } from "./remakeWorkflow";
+import { callRemakeApi, rebuildRemakeGroups, remakeAnalysisSchema, remakeImageType, remakeStateSchema, sourceMatchSchema, writeRemakePrompts, type RemakeAnalysis, type RemakeGroup, type RemakeState, type RemakeTranscript } from "./remakeWorkflow";
 
-const props = defineProps<{ source?: NodeMediaValue }>();
+const props = defineProps<{ source?: NodeMediaValue; savedAnalysis?: AnalysisResult }>();
 const visible = defineModel<boolean>({ required: true });
 const { id, node, ai, asr, files } = useNode();
 const { addNodes, findNode, nodeTypes } = useVueFlow();
@@ -140,6 +143,13 @@ const nodeData = node.data as typeof node.data & { guidedRemake?: unknown };
 const initial = remakeStateSchema.safeParse(nodeData.guidedRemake);
 const state = ref<RemakeState | undefined>(initial.success ? initial.data : undefined);
 const current = computed(() => state.value?.source === props.source?.url ? state.value : undefined);
+const savedToReuse = computed(() => {
+  const candidate = remakeAnalysisSchema.safeParse(props.savedAnalysis);
+  if (!candidate.success || current.value?.analysis.manifest === candidate.data.manifest
+    || current.value?.planApproved || current.value?.groups.some(group => group.prompt.trim() || group.picture || group.task)
+    || current.value?.shots.some(shot => shot.caption || shot.productPrompt)) return;
+  return candidate.data;
+});
 const stage = ref(current.value?.job ? 2 : current.value?.planApproved ? 1 : 0);
 const message = ref("");
 const failure = ref("");
@@ -279,6 +289,50 @@ async function save(view: RemakeState, signal?: AbortSignal) {
   await context.save(signal);
 }
 
+function draftFromAnalysis(source: string, binding: { directory: string; canvasPath: string }, analysis: RemakeAnalysis) {
+  return remakeStateSchema.parse({
+    source, directory: binding.directory, canvasPath: binding.canvasPath, analysis,
+    transcript: { kind: "missing", reason: "尚未转录原片文案" },
+    shots: analysis.scenes.map(scene => ({ id: scene.index, group: null, evidence: "待复核", caption: "", productPrompt: "" })),
+    groups: [], product: "", style: "", planApproved: false,
+  });
+}
+
+function reuseAnalysis() {
+  const source = props.source;
+  const analysis = savedToReuse.value;
+  const saved = props.savedAnalysis;
+  if (!source || !analysis || !saved || locked.value) return;
+  void run("analysis", async signal => {
+    const binding = persistence(source.url);
+    const { matches } = await callRemakeApi("analyze", {
+      directory: binding.directory, videoPath: source.url, expectedSourceRevision: analysis.sourceRevision,
+    }, sourceMatchSchema, signal);
+    if (!matches) throw new Error("原视频已变化，请重新分析原片");
+    if (saved !== props.savedAnalysis) throw new Error("拉片结果已变化，请重新确认");
+    const view = draftFromAnalysis(source.url, binding, analysis);
+    const previous = state.value;
+    if (current.value?.analysis.sourceRevision === analysis.sourceRevision) {
+      view.transcript = current.value.transcript;
+      view.product = current.value.product;
+      view.style = current.value.style;
+    }
+    const assignments = restoreBackgroundReview(saved).backgroundReview?.assignments;
+    view.shots = view.shots.map((shot, index) => ({
+      ...shot,
+      group: assignments ? assignments[index]?.referenceShot ?? null : shot.id,
+      evidence: assignments?.[index]?.evidence ?? "已沿用拉片切点",
+    }));
+    rebuildRemakeGroups(view);
+    persistence(source.url);
+    state.value = view;
+    const imported = current.value!;
+    try { await save(imported, signal); }
+    catch (error) { if (state.value === imported) state.value = previous; throw error; }
+    message.value = assignments ? "已沿用拉片切点与背景分组" : "已沿用拉片切点，请确认背景分组";
+  });
+}
+
 function analyze() {
   const source = props.source;
   const model = analysisModel.value;
@@ -288,12 +342,7 @@ function analyze() {
     message.value = "提取镜头切点和代表帧";
     const analysis = await callRemakeApi("analyze", { directory: binding.directory, videoPath: source.url }, remakeAnalysisSchema, signal);
     signal.throwIfAborted();
-    const view = remakeStateSchema.parse({
-      source: source.url, directory: binding.directory, canvasPath: binding.canvasPath, analysis,
-      transcript: { kind: "missing", reason: "尚未转录原片文案" },
-      shots: analysis.scenes.map(scene => ({ id: scene.index, group: null, evidence: "待复核", caption: "", productPrompt: "" })),
-      groups: [], product: "", style: "", planApproved: false,
-    });
+    const view = draftFromAnalysis(source.url, binding, analysis);
     persistence(source.url);
     state.value = view;
     const saved = current.value!;

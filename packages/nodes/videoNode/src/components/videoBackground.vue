@@ -14,13 +14,13 @@
           <p v-else-if="tooLong && batch?.phase === 'preparing'" role="status">分段结果尚未确认，请复查原任务。</p>
           <p v-else-if="tooLong && batch?.cleaned">临时分段已清理；原视频、背景和最终视频保留。</p>
           <p v-else-if="tooLong && batch">已分为 {{ batch.parts.length }} 段，将按顺序使用同一个背景。</p>
-          <el-button v-if="tooLong && !batchPreparing && (batch?.cleaned || batch?.phase === 'preparing' || batchError && !batch)" :disabled="busy || !!pending" @click="prepareBatch">{{ batch?.phase === 'preparing' ? '复查分段' : batch?.cleaned ? '重新准备分段' : '重试分段' }}</el-button>
+          <el-button v-if="tooLong && !batchPreparing && (!batch || batch.cleaned || batch.phase === 'preparing')" :disabled="busy || !!pending" @click="prepareBatch">{{ batch?.phase === 'preparing' ? '复查分段' : batch?.cleaned ? '重新准备分段' : batchError ? '重试分段' : '准备分段' }}</el-button>
         </template>
         <el-button v-if="frameError" @click="extractFrame">重新提取</el-button>
       </section>
       <section aria-labelledby="backgroundChoicesTitle">
         <h3 id="backgroundChoicesTitle">2. 选择背景</h3>
-        <p>自动推荐 3 张背景图会调用图片模型，费用由您的阿里云账号承担。</p>
+        <p>生成候选图会调用图片模型并产生费用。</p>
         <p v-if="modelsLoaded && !imageModels.length">未找到支持图片参考的图片模型，请联系管理员配置。</p>
         <div class="candidateGrid">
           <button v-for="(candidate, index) in candidates" :key="candidate.path" type="button" :class="{ selected: selectedPath === candidate.path }" :aria-pressed="selectedPath === candidate.path" :disabled="busy || !!pending || batchLocked" @click="selectedPath = candidate.path">
@@ -35,7 +35,7 @@
         <p v-if="modelsLoaded && !videoModels.length">未找到支持视频和图片参考的模型，请联系管理员配置。</p>
         <p v-if="tooLong && selectedVideoModel && selectedVideoModel.providerId !== 'multiTenant'">长视频需要使用平台配置的视频模型。</p>
         <p v-else-if="selectedVideoModel && !durations.length">该模型未提供可用的生成时长。</p>
-        <p>生成视频会调用视频模型并产生费用，原视频会保留；费用由您的阿里云账号承担。</p>
+        <p>生成视频会调用视频模型并产生费用，原视频会保留。</p>
         <p class="reviewHint">AI 生成可能改变或新增画面，请播放预览并核对成品。</p>
         <p v-if="tooLong && batch && !batchLocked">确认后将分别生成 {{ batch.parts.length }} 段，逐段产生费用，全部成功后合成为一个视频。</p>
         <p v-if="tooLong && batchProgress" role="status" aria-live="polite">{{ batchProgress }}</p>
@@ -196,10 +196,9 @@ let taskController: AbortController | undefined;
 let capturedFrame: Blob | undefined;
 let framePreparation: Promise<void> | undefined;
 const lifetime = new AbortController();
-let automaticHandled = false;
 
 function modelKey(model: NodeMediaModel) { return JSON.stringify(getNodeModelIdentity(model)); }
-function modelLabel(model: NodeMediaModel) { return model.providerId === "multiTenant" ? `${model.label}（平台费用；阿里云另计）` : model.label; }
+function modelLabel(model: NodeMediaModel) { return model.providerId === "multiTenant" ? `${model.label}（平台积分）` : model.label; }
 function onAdvancedToggle(event: Event) {
   if ((event.target as HTMLDetailsElement).open) void loadReservations();
 }
@@ -463,13 +462,6 @@ watch([durations, duration], ([values, sourceDuration]) => {
   outputDuration.value = values.includes(outputDuration.value!) ? outputDuration.value : values.reduce<number | undefined>((best, value) => best === undefined || Math.abs(value - sourceDuration) < Math.abs(best - sourceDuration) ? value : best, undefined);
 }, { immediate: true });
 
-watch([frameUrl, modelsLoaded], ([frame, loaded]) => {
-  if (automaticHandled || !frame || !loaded || invalidDuration.value) return;
-  automaticHandled = true;
-  if (imageModel.value && !pending.value && !batchLocked.value && state.value?.source !== props.file?.url) void generateCandidates();
-  if (tooLong.value && !batch.value && !pending.value) void prepareBatch();
-});
-
 async function saveState() {
   const context = getPersistence?.();
   if (!context || findNode(id) !== node) throw new Error("画布已关闭或节点已变化，无法保存任务");
@@ -560,19 +552,23 @@ async function submitTask(kind: "image" | "video", input: Parameters<typeof ai.g
 
 async function generateCandidates() {
   if (!props.file || !backgroundPrompt.value || !imageModel.value || invalidDuration.value || busy.value || pending.value || batchLocked.value) return;
+  const source = props.file.url;
+  const targetCount = candidates.value.length < 3 ? 3 : candidates.value.length + 3;
+  const count = targetCount - candidates.value.length;
   busy.value = true; taskKind.value = "image"; taskError.value = "";
   try {
+    const confirmed = await ElMessageBox.confirm(`将生成 ${count} 张背景候选图并产生费用。`, "确认付费出图", {
+      confirmButtonText: "确认出图", cancelButtonText: "取消", type: "warning",
+    }).then(() => true, () => false);
+    if (!confirmed || lifetime.signal.aborted || props.file?.url !== source) return;
     const context = getPersistence?.();
     if (!context) throw new Error("画布尚未就绪");
-    if (!state.value || state.value.source !== props.file.url) node.data.backgroundState = { source: props.file.url, candidates: [] } satisfies BackgroundState;
+    if (!state.value || state.value.source !== source) node.data.backgroundState = { source, candidates: [] } satisfies BackgroundState;
     if (!state.value!.frame) {
       statusText.value = "正在提取用于生成的画面…";
-      const source = props.file.url;
       await ensureBackgroundFrame(context, source);
     }
-    if (tooLong.value && !batch.value && !batchPreparing.value) void prepareBatch();
     const identity = JSON.parse(imageModel.value) as ReturnType<typeof getNodeModelIdentity>;
-    const targetCount = candidates.value.length < 3 ? 3 : candidates.value.length + 3;
     while (candidates.value.length < targetCount) {
       lifetime.signal.throwIfAborted();
       statusText.value = `正在生成第 ${candidates.value.length + 1} 张候选图…`;
