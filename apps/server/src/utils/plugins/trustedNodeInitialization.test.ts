@@ -911,7 +911,10 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     const { openDatabase, initializeBackgroundBudget } = await import("@toonflow/multi-tenant-db");
     const guidedDatabase = await openDatabase(root, false);
     if (!guidedDatabase) throw new Error("缺少验收数据库");
-    try { await initializeBackgroundBudget(guidedDatabase); }
+    try {
+      await guidedDatabase.initializeBackgroundJobs();
+      await initializeBackgroundBudget(guidedDatabase);
+    }
     finally { await guidedDatabase.close(); }
     const guidedSource = "assets/guidedFixture.mp4";
     ffmpeg("-i", customerVideo, "-vf", "fps=30", "-c:v", "libx264", "-c:a", "copy", join(customerProject.directory, guidedSource));

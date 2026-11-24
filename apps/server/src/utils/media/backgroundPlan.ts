@@ -82,7 +82,7 @@ export async function inspectBackgroundVideo(source: string, signal: AbortSignal
       && Number.isSafeInteger(frameCount) && frameCount > 0 && Math.abs(duration * fps - frameCount) < 0.15;
     if (!detect) return { duration, fps, width, height, displayWidth, displayHeight, audioCodec, frameRate, frameCount, constantRate, videoStartsAtOrigin, timestamps: [] as number[], segments: [] as TimeSegment[] };
     const command = Bun.spawn([paths.ffmpeg, "-hide_banner", "-nostdin", "-protocol_whitelist", "file", "-f", "mov", "-format_whitelist", "mov",
-      "-enable_drefs", "0", "-use_absolute_path", "0", "-i", source, "-an", "-vf", "setpts=PTS-STARTPTS,select=gt(scene\\,0.3),showinfo", "-f", "null", "-"],
+      "-enable_drefs", "0", "-use_absolute_path", "0", "-i", source, "-map", "0:V:0", "-an", "-vf", "setpts=PTS-STARTPTS,select=gt(scene\\,0.3),showinfo", "-f", "null", "-"],
       { ...options, stdout: "ignore" });
     const timestamps: number[] = [];
     const decoder = new TextDecoder();
