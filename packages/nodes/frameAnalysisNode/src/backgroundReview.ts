@@ -10,7 +10,7 @@ const shotsPerBoard = 12;
 type ReviewOptions = {
   ai: { generate(input: NodeAiRequest): Promise<NodeAiResult> };
   model: Pick<NodeAiModel, "providerId" | "modelId" | "routeId">;
-  ffmpeg: BrowserFfmpegFactory;
+  ffmpeg?: BrowserFfmpegFactory;
   workspace: WorkspaceFiles;
   source: string;
   result: AnalysisResult;
@@ -37,6 +37,8 @@ export async function reviewBackgrounds({ ai, model, ffmpeg, workspace, source, 
       || scene.start < 0 || scene.start >= scene.end || scene.end > result.duration + 0.001) {
       throw new Error("镜头时间或编号无效，请重新拉片");
     }
+    if (!ffmpeg && !scene.image) throw new Error("缺少复核用的代表帧，请重新分析原片");
+    if (!ffmpeg) return [(scene.start + scene.end) / 2];
     const times = scene.sampleTimes;
     if (!times?.length) return [(scene.start + scene.end) / 2];
     if (times.length > 3 || times.some((time, sample) => !Number.isFinite(time) || time < scene.start || time >= scene.end
@@ -76,15 +78,22 @@ export async function reviewBackgrounds({ ai, model, ffmpeg, workspace, source, 
         const x = index % 3 * 3 * width;
         const y = Math.floor(index / 3) * height;
         for (const [column, time] of times.entries()) {
-          const framePath = `${scratch}/shot${shot}Frame${column + 1}.jpg`;
-          const command = ffmpeg(sourcePath).seekInput(Math.max(0, offset + time - 0.000001));
-          await runFfmpeg(command.noAudio().videoFilters(`scale=${width - 8}:${imageHeight}:force_original_aspect_ratio=decrease`)
-            .outputOptions("-map", stream === undefined ? "0:v:0" : `0:${stream}`, "-q:v", "4")
-            .frames(1).output(framePath), signal);
-          const bitmap = await createImageBitmap(new Blob([await workspace.read(framePath)], { type: "image/jpeg" }));
+          let framePath = result.scenes[shot - 1]?.image;
+          if (ffmpeg) {
+            framePath = `${scratch}/shot${shot}Frame${column + 1}.jpg`;
+            const command = ffmpeg(sourcePath).seekInput(Math.max(0, offset + time - 0.000001));
+            await runFfmpeg(command.noAudio().videoFilters(`scale=${width - 8}:${imageHeight}:force_original_aspect_ratio=decrease`)
+              .outputOptions("-map", stream === undefined ? "0:v:0" : `0:${stream}`, "-q:v", "4")
+              .frames(1).output(framePath), signal);
+          }
+          if (!framePath) throw new Error(`缺少第 ${shot} 个镜头的代表帧`);
+          const bitmap = await createImageBitmap(new Blob([await workspace.read(framePath)], { type: /\.png$/i.test(framePath) ? "image/png" : "image/jpeg" }));
           try {
             signal.throwIfAborted();
-            context.drawImage(bitmap, x + column * width + (width - bitmap.width) / 2, y + (imageHeight - bitmap.height) / 2);
+            const scale = Math.min((width - 8) / bitmap.width, imageHeight / bitmap.height);
+            const imageWidth = bitmap.width * scale;
+            const scaledHeight = bitmap.height * scale;
+            context.drawImage(bitmap, x + column * width + (width - imageWidth) / 2, y + (imageHeight - scaledHeight) / 2, imageWidth, scaledHeight);
           } finally { bitmap.close(); }
         }
         context.fillStyle = "#161616";

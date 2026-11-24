@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } fr
 import type { ModelMap, ModelType } from "@toonflow/multi-tenant-gateway";
 import express from "express";
 import { unzipSync } from "fflate";
+import { z } from "zod";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { createHash, generateKeyPairSync, randomUUID, sign } from "node:crypto";
@@ -45,6 +46,7 @@ test("existing workspaces receive trusted nodes from each release", async () => 
     await rm(root, { recursive: true, force: true });
   }
 });
+
 
 function group(prefix: string, count: number): MashupClip[] {
   return Array.from({ length: count }, (_, index) => ({ name: prefix + index, url: prefix + index, mimeType: "video/mp4" }));
@@ -312,7 +314,7 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
   const originalFetch = globalThis.fetch;
   const originalConsoleError = console.error;
   const previousEnvironment = Object.fromEntries([
-    "NODE_ENV", "TOONFLOW_DATA_DIR", "TOONFLOW_PROJECT_QUOTA_ROOT", "TOONFLOW_TRUSTED_CANVAS_BETA",
+    "NODE_ENV", "TOONFLOW_DATA_DIR", "TOONFLOW_PROJECT_QUOTA_ROOT", "TOONFLOW_TRUSTED_CANVAS_BETA", "TOONFLOW_BACKGROUND_BETA",
     "TOONFLOW_STAFF_ACCESS_ORIGIN", "TOONFLOW_STAFF_ACCESS_ISSUER", "TOONFLOW_STAFF_ACCESS_AUDIENCE",
   ].map(key => [key, process.env[key]]));
   let server: ReturnType<typeof createServer> | undefined;
@@ -741,6 +743,18 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     await generating.page.locator('xpath=//button[normalize-space(.)="关闭" and ancestor::*[@role="dialog"]]').click();
     const shotNode = '.vue-flow__node[data-id="analysis"]';
     await generating.page.locator(`${shotNode} .titleBar`).setTimeout(5000).click();
+    await generating.page.locator('xpath=//div[@data-id="analysis"]//button[normalize-space(.)="视频翻拍" and not(@disabled)]').setTimeout(5000).click();
+    await generating.page.waitForSelector(".remakeStages button[aria-current=step]", { visible: true, timeout: 5000 });
+    expect(await generating.page.$$eval(".remakeStages button", buttons => buttons.map(button => ({
+      label: button.textContent?.trim(), disabled: Reflect.get(button, "disabled"),
+    })))).toEqual([
+      { label: "1. 分析原片", disabled: false },
+      { label: "2. 生成样张", disabled: true },
+      { label: "3. 生成成片", disabled: true },
+    ]);
+    await generating.page.locator('[role="dialog"]:has(.remakeStages) .el-dialog__headerbtn').click();
+    await generating.page.waitForSelector(".remakeStages", { hidden: true, timeout: 5000 });
+    await generating.page.locator(`${shotNode} .titleBar`).setTimeout(5000).click();
     await generating.page.locator('xpath=//button[normalize-space(.)="开始拉片" and not(@disabled)]').setTimeout(5000).click();
     const shotResult = await generating.page.waitForSelector(
       `${shotNode} :is(.resultSummary, [role="alert"])`, { visible: true, timeout: 10000 }).catch(async error => {
@@ -893,6 +907,14 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     conf.set("settings.multiTenantEnabled", true);
     process.env.NODE_ENV = "dev";
     delete process.env.TOONFLOW_TRUSTED_CANVAS_BETA;
+    process.env.TOONFLOW_BACKGROUND_BETA = "1";
+    const { openDatabase, initializeBackgroundBudget } = await import("@toonflow/multi-tenant-db");
+    const guidedDatabase = await openDatabase(root, false);
+    if (!guidedDatabase) throw new Error("缺少验收数据库");
+    try { await initializeBackgroundBudget(guidedDatabase); }
+    finally { await guidedDatabase.close(); }
+    const guidedSource = "assets/guidedFixture.mp4";
+    ffmpeg("-i", customerVideo, "-vf", "fps=30", "-c:v", "libx264", "-c:a", "copy", join(customerProject.directory, guidedSource));
     ordinaryWeb = true;
     const observed = [];
     for (const simulateCatalogOutage of [false, true]) {
@@ -912,6 +934,23 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
         expect((await catalogResponse).status()).toBe(simulateCatalogOutage ? 503 : 200);
         await tenantPage.waitForSelector(".workspacePage:not([inert]) .canvasPanel:not([inert]), .el-result", { visible: true, timeout: 15000 });
         if (!simulateCatalogOutage) {
+          const guided = await tenantPage.evaluate(async input => {
+            const headers = { "Content-Type": "application/json", "x-toonflow-workspace": "1" };
+            const post = (path: string, body: unknown) => fetch(path, { method: "POST", headers, body: JSON.stringify(body) });
+            const analysis = await post("/api/ai/media/background/analyze", { directory: input.own, videoPath: input.source });
+            const foreign = await post("/api/ai/media/background/analyze", { directory: input.foreign, videoPath: input.source });
+            const raw = await post("/api/ffmpeg/execute", {});
+            return { status: analysis.status, payload: await analysis.json(), foreign: foreign.status, raw: raw.status };
+          }, { own: customerProject.directory, foreign: project.directory, source: guidedSource });
+          expect(guided.status).toBe(200);
+          expect(guided.foreign).toBe(403);
+          expect(guided.raw).toBe(403);
+          const { data: guidedResult } = z.object({ data: z.object({ scenes: z.array(z.object({ image: z.string() })) }) }).parse(guided.payload);
+          expect(guidedResult.scenes).toHaveLength(3);
+          for (const shot of guidedResult.scenes) {
+            const preview = await readFile(join(customerProject.directory, shot.image));
+            expect(preview.subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
+          }
           await tenantPage.locator('.vue-flow__node[data-id="staleTrim"] .titleBar').click();
           await tenantPage.locator('xpath=//button[normalize-space(.)="截取片段"]').click();
           const check = tenantPage.locator('xpath=//button[normalize-space(.)="检查并恢复" and not(@disabled)]');
@@ -1046,3 +1085,37 @@ test("short, overlong and delayed AAC each stay inside their own video segment",
     await rm(root, { recursive: true, force: true });
   }
 }, 30000);
+
+test("guided remake restores fast cuts and keeps the source audio packets", async () => {
+  const { inspectBackgroundVideo, mergeBackgroundVideo, planGuidedSegments, splitBackgroundVideo } = await import("../media/backgroundPlan");
+  const root = await realpath(await mkdtemp(join(tmpdir(), "toonflowGuidedRemake")));
+  try {
+    const source = join(root, "source.mp4");
+    execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "color=red:s=64x96:r=30:d=0.1", "-f", "lavfi", "-i",
+      "color=green:s=64x96:r=30:d=0.3", "-f", "lavfi", "-i", "color=blue:s=64x96:r=30:d=0.6", "-f", "lavfi", "-i",
+      "sine=frequency=440:duration=1", "-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0[v]",
+      "-map", "[v]", "-map", "3:a", "-c:v", "libx264", "-c:a", "aac", source]);
+    const signal = AbortSignal.timeout(40000);
+    const media = await inspectBackgroundVideo(source, signal, false);
+    const timeline = { frameRate: media.frameRate, fps: media.fps, frameCount: media.frameCount };
+    const segments = planGuidedSegments(media, [0.1, 0.4]);
+    expect(() => planGuidedSegments(media, [0.1, 0.11])).toThrow("严格递增");
+    const parts = await splitBackgroundVideo(root, source, randomUUID(), segments, signal, undefined, timeline);
+    expect(parts.map(part => part.duration)).toEqual([2, 2, 2]);
+    const merged = await mergeBackgroundVideo(root, source, parts.map(part => part.path), randomUUID(), signal,
+      segments.map(part => part.endSeconds - part.startSeconds), "assets/generated", 512 * 1024 * 1024, timeline);
+    const output = join(root, merged.path);
+    expect((await inspectBackgroundVideo(output, signal, false)).frameCount).toBe(30);
+    const hashAudio = (file: string) => execFileSync("ffmpeg", ["-v", "error", "-i", file,
+      "-map", "0:a", "-c", "copy", "-f", "hash", "-hash", "sha256", "-"], { encoding: "utf8" });
+    expect(hashAudio(output)).toBe(hashAudio(source));
+    const decoded = execFileSync("ffmpeg", ["-v", "error", "-i", output, "-an", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"]);
+    const firstPixel = (frame: number) => [...decoded.subarray(frame * 64 * 96 * 3, frame * 64 * 96 * 3 + 3)];
+    expect([2, 3, 11, 12].map(frame => {
+      const pixel = firstPixel(frame);
+      return pixel.indexOf(Math.max(...pixel));
+    })).toEqual([0, 1, 1, 2]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 45000);

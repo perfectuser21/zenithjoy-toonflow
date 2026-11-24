@@ -11,6 +11,7 @@
         <el-button :icon="IconTransfer" text :disabled="busy || connected" @click="fileInput?.click()">替换视频</el-button>
         <el-button :icon="IconMaximize" text :disabled="!player?.ready" @click="player?.enterFullscreen()">全屏</el-button>
         <el-button :icon="IconFileText" text :disabled="!lastResultMatches" @click="openReport">查看结果</el-button>
+        <el-button text :disabled="!source || busy" @click="remakeVisible = true">视频翻拍</el-button>
       </el-card>
     </template>
     <div class="analysisContent">
@@ -87,6 +88,7 @@
     </template>
   </nodeSkeleton>
   <analysisReport v-if="lastResultMatches && lastResult" v-model="reportVisible" :result="lastResult" />
+  <remakePanel v-if="remakeVisible" v-model="remakeVisible" :source="source" />
 </template>
 
 <script setup lang="ts">
@@ -103,6 +105,7 @@ import { analyzeSceneDescriptions } from "./aiAnalysis";
 import { restoreBackgroundReview } from "./backgroundAssignments";
 import { reviewBackgrounds } from "./backgroundReview";
 import analysisReport from "./analysisReport.vue";
+import remakePanel from "./remakePanel.vue";
 import videoPlayer from "@toonflow/node-video/videoPlayer";
 import promptInput from "@toonflow/node-shared/promptInput";
 import { groupNodeModels } from "@toonflow/node-shared/groupNodeModels";
@@ -134,7 +137,7 @@ const { id, node, nodeProps, outputs, ai, nodeEvent, files, ffmpeg: loadFfmpeg, 
 // ACT: 拉片结果由独立素材节点承载，本节点仅保留视频输入；迁移旧版遗留输出。
 outputs.value = {};
 node.data.outputs = outputs.value;
-const nodeData = node.data as typeof node.data & { frameAnalysis?: AnalysisState };
+const nodeData = node.data as typeof node.data & { frameAnalysis?: AnalysisState; openGuidedRemake?: boolean };
 const saved = nodeData.frameAnalysis;
 const settings = reactive<AnalysisSettings>({
   method: saved?.method === "content" ? "content" : "adaptive",
@@ -176,6 +179,8 @@ const hasDimensions = computed(() => settings.frames || settings.clips || settin
 const lastResultMatches = computed(() => !!lastResult.value && resultSource.value === source.value?.url);
 const nodeWidth = computed(() => metadata.width && metadata.height ? Math.max(180, 240 * metadata.width / metadata.height) + 18 : 240);
 const reportVisible = ref(false);
+const remakeVisible = ref(nodeData.openGuidedRemake === true);
+if (nodeData.openGuidedRemake === true) delete nodeData.openGuidedRemake;
 const models = ref<NodeAiModel[]>([]);
 const modelsLoading = ref(false);
 const modelError = ref("");

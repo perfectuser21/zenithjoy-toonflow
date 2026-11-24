@@ -232,7 +232,7 @@ function open(value: keyof typeof actionLabels) {
   if (value !== "trim") run();
 }
 
-async function createFrameAnalysis() {
+async function createFrameAnalysis(guided = false) {
   if (processing.value || creatingAnalysis.value || props.disabled || !props.file) return;
   const type = "remote-frameAnalysisNode";
   const canvasId = getCanvas?.()?.id;
@@ -255,7 +255,7 @@ async function createFrameAnalysis() {
     await batchHistory(async () => {
       try {
         // 组内视频使用绝对坐标，新拉片节点直接放到画布，不继承父组的相对位置。
-        addNodes({ id: nodeId, type, position: { x, y }, data: { label: `${node.data.label || "视频"} · 逐帧拉片` } });
+        addNodes({ id: nodeId, type, position: { x, y }, data: { label: `${node.data.label || "视频"} · ${guided ? "视频翻拍" : "逐帧拉片"}`, ...(guided ? { openGuidedRemake: true } : {}) } });
         await nextTick();
         if (getCanvas?.()?.id !== canvasId || findNode(node.id) !== node || props.file?.url !== source
           || !nodeTypes?.value?.[type] || !findNode(nodeId)) throw new Error("画布或视频已变化，请重新操作");

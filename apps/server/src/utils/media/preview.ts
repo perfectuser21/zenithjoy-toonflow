@@ -40,7 +40,7 @@ function acquirePreview(signal: AbortSignal) {
 }
 
 // 大视频按文件流读取，FFmpeg 仅允许自包含 MOV/MP4 及本地文件协议。
-export async function createVideoFrame(source: string, timeSeconds: number, signal: AbortSignal, operationId?: string) {
+export async function createVideoFrame(source: string, timeSeconds: number, signal: AbortSignal, operationId?: string, maxSide?: 480) {
   if (!Number.isFinite(timeSeconds) || timeSeconds < 0 || timeSeconds > 86400) throw Object.assign(new Error("视频时间无效"), { status: 400 });
   if (operationId !== undefined && !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(operationId)) throw Object.assign(new Error("抽帧编号无效"), { status: 400 });
   const release = await acquirePreview(signal);
@@ -60,7 +60,7 @@ export async function createVideoFrame(source: string, timeSeconds: number, sign
     await withFileAccess([source], "read", async () => {
       const child = Bun.spawn([paths.ffmpeg, "-hide_banner", "-v", "error", "-nostdin", "-n", "-protocol_whitelist", "file", "-max_streams", "32",
         "-f", "mov", "-format_whitelist", "mov", "-enable_drefs", "0", "-use_absolute_path", "0", "-ss", String(timeSeconds), "-i", source,
-        "-map", "0:V:0", "-frames:v", "1", "-c:v", "png", "-f", "image2", "-update", "1", "-map_metadata", "-1", "-fs", String(10 * 1024 * 1024), output], {
+        "-map", "0:V:0", ...(maxSide ? ["-vf", `scale=${maxSide}:${maxSide}:force_original_aspect_ratio=decrease`] : []), "-frames:v", "1", "-c:v", "png", "-f", "image2", "-update", "1", "-map_metadata", "-1", "-fs", String(10 * 1024 * 1024), output], {
         cwd: directory, stdin: "ignore", stdout: "ignore", stderr: "ignore", windowsHide: true, signal: active,
         env: Object.fromEntries(Object.entries(process.env).filter(([key]) => !["FFREPORT", "TOONFLOW_TRIM_TOKEN", "TOONFLOW_TRIM_STORE_TOKEN"].includes(key.toUpperCase()))),
       });

@@ -13,6 +13,7 @@
       <el-button :icon="IconScissors" text :disabled="!outputFile || uploading || exporting || actions?.processing" @click.stop="actions?.open('trim')">截取片段</el-button>
       <el-button text title="自动生成背景候选，调用图片模型的费用由您的阿里云账号承担" :disabled="!outputFile || !previewUrl || uploading || exporting || actions?.processing" @click.stop="backgroundVisible = true">换背景</el-button>
       <el-button :icon="IconMovie" text :loading="actions?.creatingAnalysis" :disabled="!outputFile || uploading || exporting || actions?.processing || actions?.creatingAnalysis" @click.stop="actions?.createFrameAnalysis()">逐帧拉片</el-button>
+      <el-button text :disabled="!outputFile || uploading || exporting || actions?.processing || actions?.creatingAnalysis" @click.stop="actions?.createFrameAnalysis(true)">视频翻拍</el-button>
       <el-button
         :icon="IconTransfer"
         :loading="uploading"
