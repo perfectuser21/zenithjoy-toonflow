@@ -17,6 +17,8 @@ export const userListSchema = z.object({
   status: z.enum(["all", "enabled", "disabled"]),
 });
 export type AuthIdentity = { id: string; userName: string; role: "admin" | "user" };
+export const adminWebSessionLifetimeMs = 8 * 60 * 60 * 1000;
+const browserSessionExpiry = -1;
 
 function digest(value: string) { return createHash("sha256").update(value).digest("hex"); }
 function fail(message: string, status: number): never { throw Object.assign(new Error(message), { status }); }
@@ -49,7 +51,8 @@ export function createMultiTenant(dataDirectory: string) {
   }
   async function createWebSession(db: AdminDatabase, user: AuthIdentity, authVersion = 0) {
     const token = randomBytes(32).toString("hex");
-    await db.createWebSession({ tokenHash: digest(token), userId: user.id, role: user.role, expiresAt: Date.now() + 8 * 60 * 60 * 1000, authVersion });
+    const expiresAt = user.role === "user" ? browserSessionExpiry : Date.now() + adminWebSessionLifetimeMs;
+    await db.createWebSession({ tokenHash: digest(token), userId: user.id, role: user.role, expiresAt, authVersion });
     return { token, user };
   }
   async function addUser(db: AdminDatabase, account: string, password: string, selfRegistration = false) {
@@ -239,7 +242,9 @@ export function createMultiTenant(dataDirectory: string) {
       // ACT: 单实例阶段在已有 Cookie 首次鉴权时只做幂等建表、补列，保证旧会话升级后仍能读取。
       await db.initialize();
       const session = await db.getWebSession(digest(token));
-      if (!session || session.expiresAt <= Date.now()) return null;
+      if (!session) return null;
+      const isBrowserSession = session.role === "user" && session.expiresAt === browserSessionExpiry;
+      if (!isBrowserSession && session.expiresAt <= Date.now()) return null;
       if (session.role === "admin" && session.userId === "admin") {
         const admin = await db.getAdmin();
         return admin ? { id: "admin", userName: admin.userName, role: "admin" } : null;
