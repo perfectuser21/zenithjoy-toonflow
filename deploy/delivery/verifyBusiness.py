@@ -7,7 +7,7 @@ businessConfig，指向 root:root 0600 JSON：
   accounts（恰好两个：credentialFile/userId/directory/canvasPath）
   trim（source/start/end，source 为首账号工作区已有的专用视频）
 businessMode 固定为tenant。专用已有seed画布必须有deliveryAcceptance=true。
-香港验收前后核对公网逐帧拉片节点与候选容器构建包 SHA-256。
+两地验收前后核对普通账号逐帧拉片节点与候选容器构建包 SHA-256。
 accessCredentialFile 可指向root:root 0600 JSON（clientId/clientSecret），
 仅向固定HTTPS publicOrigin附加CF Access服务凭据，回环请求不附加。
 credentialFile 为 root:root 0600 JSON，只有 userName/password；仅可使用专用账号。
@@ -495,9 +495,10 @@ def main():
         verifyNode(client, 'mashupNode', '批量混剪')
         _, seed = snapshot(client, account)
         require(seed.get('deliveryAcceptance') is True, '账号画布未明确标记为专用验收seed，禁止写入')
-    frameNodeDigest = None
-    if request['environment'] == 'staging':
-        frameNodeDigest = verifyFrameNode(clients[0], containerId)
+    frameNodeDigest = verifyFrameNode(clients[0], containerId)
+    if request['environment'] == 'production':
+        require(frameNodeDigest == request.get('stagingReceipt', {}).get('frameAnalysisNodeSha256'),
+                '杭州普通账号逐帧拉片构建包与香港验收不一致')
     denyCrossAccount(clients[0], accounts[1])
     denyCrossAccount(clients[1], accounts[0])
     for client, account in zip(clients, accounts):
@@ -523,10 +524,8 @@ def main():
                'result': 'passed', 'businessVerified': True, 'runningImage': request['image'],
                'businessMode': 'tenant', 'trimVerified': True, 'generationVerified': True,
                'generationMediaType': mediaType, 'bootId': bootId, 'crossAccountIsolationVerified': True,
-               'passedJourneys': passedJourneys}
-    if frameNodeDigest is not None:
-        require(verifyFrameNode(fresh, containerId) == frameNodeDigest, '验收期间逐帧拉片构建包变化')
-        receipt['frameAnalysisNodeSha256'] = frameNodeDigest
+               'passedJourneys': passedJourneys, 'frameAnalysisNodeSha256': frameNodeDigest}
+    require(verifyFrameNode(fresh, containerId) == frameNodeDigest, '验收期间逐帧拉片构建包变化')
     print(json.dumps(receipt))
 
 

@@ -24,6 +24,7 @@ test("existing workspaces receive trusted nodes from each release", async () => 
     await mkdir(target);
     const nodeFiles = Object.keys(trustedNodeNames).map(name => `${name}.umd.js`);
     expect(trustedNodeNames.videoConcatNode).toBe("合成成片");
+    expect(trustedNodeNames.frameAnalysisNode).toBe("逐帧拉片");
     for (const file of nodeFiles) {
       await writeFile(join(source, file), `candidate:${file}`);
       await writeFile(join(target, file), `old:${file}`);
