@@ -297,6 +297,8 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=3", "-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0[v]",
       "-map", "[v]", "-map", "3:a", "-c:a", "aac", "-c:v", "libx264", "-bf", "0", join(project.directory, sceneSource));
     const png = ffmpeg("-f", "lavfi", "-i", "color=red:size=64x64", "-frames:v", "1", "-c:v", "png", "-threads", "1", "-f", "image2pipe", "pipe:1");
+    const referenceImages = ["referenceImageA", "referenceImageB"];
+    for (const id of referenceImages) await writeFile(join(project.directory, "assets", id + ".png"), png);
     const sourceVideoBytes = await readFile(join(project.directory, sceneSource));
     const replacementVideo = ffmpeg("-f", "lavfi", "-i", "color=purple:size=64x64:rate=12:duration=3",
       "-c:v", "libx264", "-bf", "0", "-movflags", "frag_keyframe+empty_moov", "-f", "mp4", "pipe:1");
@@ -305,12 +307,15 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       export default {
         id: "fixtureMedia", label: "离线模型",
         models: [
-          { id: "fixture-image", label: "离线图片", type: "image", mode: ["text", "singleImage"], imageSizes: ["1K"], imageRatios: ["1:1"] },
+          { id: "fixture-image", label: "离线图片", type: "image", mode: ["text", "singleImage"], imageSizes: ["1K"], imageRatios: ["1:1"], maxReferenceImages: 1 },
+          { id: "fixture-image-two", label: "双图验收模型", type: "image", mode: ["text", "multiReference"], imageSizes: ["1K"], imageRatios: ["1:1"], maxReferenceImages: 2 },
           { id: "fixture-video", label: "离线视频", type: "video", mode: [["imageReference:1", "videoReference:1"]],
             durationResolutionMap: [{ duration: [3], resolution: ["720P"] }] }
         ],
         async generateImage(request) {
-          if (request.model !== "fixture-image") throw Error("图片模型不匹配");
+          if (request.model === "fixture-image-two") {
+            if (request.images?.length !== 2 || request.images.some(image => image.mimeType !== "image/png")) throw Error("未收到两张参考图");
+          } else if (request.model !== "fixture-image") throw Error("图片模型不匹配");
           if (request.prompt !== "一张红色背景图" && (!request.prompt.includes("设计新的场景背景") || request.images?.[0]?.mimeType !== "image/png")) throw Error("缺少用于换背景的参考帧");
           return [{ type: "base64", data: "${png.toString("base64")}", mimeType: "image/png", mediaType: "image" }];
         },
@@ -338,6 +343,10 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
         } } },
         { id: "qianchuan", type: "remote-qianchuanUploadNode", position: { x: 480, y: 90 }, data: {} },
         ...videoNodes,
+        ...referenceImages.map((id, index) => ({
+          id, type: "remote-imageNode", position: { x: 1550 + 200 * index, y: 650 },
+          data: { outputs: { image: { dataType: "IMAGE", value: { url: "assets/" + id + ".png", mimeType: "image/png" } } } },
+        })),
         { id: "concat", type: "remote-videoConcatNode", position: { x: 850, y: 550 }, data: { videoConcat: { segmentCount: 2 } } },
         { id: "backgroundSource", type: "remote-videoNode", position: { x: 1240, y: 570 },
           data: { outputs: { video: { dataType: "VIDEO", value: { url: sceneSource, mimeType: "video/mp4" } } } } },
@@ -350,6 +359,7 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       edges: [
         { id: "batch", source: "mashup", sourceHandle: "videos", target: "qianchuan", targetHandle: "videos" },
         ...videoNodes.map(({ id }, index) => ({ id: "segment" + index, source: id, sourceHandle: "video", target: "concat", targetHandle: "segment" + index })),
+        ...referenceImages.map(id => ({ id: "link" + id, source: id, sourceHandle: "image", target: "imageGeneration", targetHandle: "in" })),
       ],
       viewport: { x: 0, y: 0, zoom: 0.8 },
     }));
@@ -606,7 +616,17 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     await generating.page.waitForSelector('.videoConcatNode a[download="合成成片.mp4"]');
     const imageNode = '.vue-flow__node[data-id="imageGeneration"]';
     await generating.page.locator(`${imageNode} .imageContent`).setTimeout(5000).click();
-    await generating.page.locator('button[aria-label="生成图片"]:not([disabled])').setTimeout(5000).click();
+    const generateImageButton = imageNode + ' button[aria-label="生成图片"]';
+    const referenceLimit = await generating.page.waitForSelector(imageNode + ' .referenceLimit', { visible: true, timeout: 5000 });
+    expect(await referenceLimit?.evaluate(element => element.textContent)).toContain("参考图 2 / 1 张");
+    const referenceError = await generating.page.waitForSelector(imageNode + ' [role="alert"]', { visible: true, timeout: 5000 });
+    expect(await referenceError?.evaluate(element => element.textContent)).toContain("最多支持 1 张参考图");
+    await generating.page.waitForSelector(generateImageButton + '[disabled]', { timeout: 5000 });
+    await generating.page.locator(imageNode + " .modelSelect").setTimeout(5000).click();
+    await generating.page.locator('xpath=//li[@role="option" and normalize-space(.)="双图验收模型"]').setTimeout(5000).click();
+    await generating.page.waitForFunction(selector => Reflect.get(globalThis, "document").querySelector(selector)?.textContent.includes("参考图 2 / 2 张"),
+      { timeout: 5000 }, imageNode + " .referenceLimit");
+    await generating.page.locator(generateImageButton + ':not([disabled])').setTimeout(5000).click();
     await generating.page.waitForFunction(selector => {
       const image = Reflect.get(globalThis, "document").querySelector(selector + ' img[alt="生成图片"]');
       return image?.naturalWidth === 64 && image.naturalHeight === 64;
