@@ -4,7 +4,7 @@ import { createReadStream, mkdir, open, readFile, readlink, realpath, stat, stat
 import { join, relative } from "node:path";
 import { constants } from "node:fs";
 import { createHash } from "node:crypto";
-import { mediaProviders, type Provider, type ProviderTaskData } from "@toonflow/providers";
+import { getImageReferenceLimit, mediaProviders, type Provider, type ProviderTaskData } from "@toonflow/providers";
 import type { GeneratedMedia, MediaGenerationRequest, MediaModel, MediaReference } from "@toonflow/tools-scaffold/runtime";
 import conf from "@/utils/conf";
 import { getAccountProvider } from "@/utils/ai/provider";
@@ -182,6 +182,7 @@ export async function listMediaModels(): Promise<MediaModel[]> {
       mode: model.mode, durationResolutionMap: model.durationResolutionMap, audio: model.audio,
       ...(model.type === "audio" ? { voices: model.voices } : {}),
       ...(model.type === "image" ? {
+        maxReferenceImages: getImageReferenceLimit(provider.id, model),
         imageSizes: imageOptions(Array.isArray(model.imageSizes) ? model.imageSizes : builtIn?.imageSizes, /^[^\u0000-\u001f\u007f]+$/),
         imageRatios: imageOptions(Array.isArray(model.imageRatios) ? model.imageRatios : builtIn?.imageRatios, /^[1-9]\d{0,3}:[1-9]\d{0,3}$/),
       } : {}),

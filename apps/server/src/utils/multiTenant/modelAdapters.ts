@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { getImageReferenceLimit } from "@toonflow/providers";
 import type { ModelAdapter, ModelExecution, ModelType } from "@toonflow/multi-tenant-gateway/types";
 import { modelRouteSchema } from "@toonflow/multi-tenant-models/config";
 import type { ModelPrice, ModelRoute } from "@toonflow/multi-tenant-models/config";
@@ -34,7 +35,10 @@ const legacyMediaSchema = mediaUpstreamSchema.extend({
   kind: z.literal("multiTenantMediaRoute"), route: modelRouteSchema,
   revision: z.number().int().min(1).max(2147483647),
 });
-const requestSchema = z.object({ other: z.unknown().optional(), duration: z.number().finite().positive().optional() });
+const requestSchema = z.object({
+  other: z.unknown().optional(), duration: z.number().finite().positive().optional(),
+  images: z.array(z.unknown()).optional(),
+});
 const secretField = /^keys?$|^host(?:name)?$|^port$|^protocol$|^proxy$|^model(?:Id)?$|^provider(?:Id)?$|api.?key|token|secret|password|auth|bearer|headers|cookie|credential|private.?key|access.?key|signature|url|endpoint|source|config/i;
 
 function fail(message: string, status = 400): never { throw Object.assign(new Error(message), { status }); }
@@ -187,10 +191,14 @@ function restoreMedia(value: unknown, route: ModelRoute): MediaUpstream {
     secretValues: [...new Set([...parsed.data.secretValues, ...secretsFrom(parsed.data.config, metadata.rules)])] };
 }
 
-function validateMedia({ upstream }: ModelExecution<MediaUpstream>, request: unknown) {
+function validateMedia({ route, upstream }: ModelExecution<MediaUpstream>, request: unknown) {
   const parsed = requestSchema.safeParse(request);
   if (!parsed.success) fail("模型参数不在平台允许的范围内");
-  const { other } = parsed.data;
+  const { images, other } = parsed.data;
+  if (route.type === "image" && images?.length) {
+    const limit = getImageReferenceLimit(route.providerId, upstream.model);
+    if (limit !== undefined && images.length > limit) fail(`${route.label}最多支持 ${limit} 张参考图，当前 ${images.length} 张，请减少 ${images.length - limit} 张。`);
+  }
   if (other === undefined) return;
   function invalid(): never { fail("模型参数不在平台允许的范围内"); }
   if (!other || typeof other !== "object" || Array.isArray(other)
@@ -235,8 +243,12 @@ function mediaCapabilities({ route, upstream: { model, secretValues } }: ModelEx
     durationResolutionMap: z.array(z.object({ duration: z.array(z.number().positive()).max(100), resolution: z.array(safeString).max(100) })).max(100).optional(),
     audio: z.union([z.boolean(), z.literal("optional")]).optional(),
     imageSizes: z.array(safeString).max(100).optional(), imageRatios: z.array(z.string().regex(/^[1-9]\d{0,3}:[1-9]\d{0,3}$/)).max(100).optional(),
+    maxReferenceImages: mediaModelsSchema.element.shape.maxReferenceImages,
     voices: z.array(z.object({ title: safeString, voice: safeString })).max(1000).optional(),
-  }).safeParse(model);
+  }).safeParse({
+    ...model,
+    maxReferenceImages: route.type === "image" ? getImageReferenceLimit(route.providerId, model) : undefined,
+  });
   if (!safe.success || containsSecret(safe.data, secretValues)) fail("平台模型能力配置无效", 503);
   return { type: mediaTypeSchema.parse(route.type), supportsPrice: true, ...safe.data, rules: publicRules(model.rules, secretValues) };
 }
