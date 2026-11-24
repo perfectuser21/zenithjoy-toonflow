@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 
 export const trustedNodeNames: Readonly<Record<string, string>> = {
   videoNode: "视频",
+  frameAnalysisNode: "逐帧拉片",
   textNode: "文本",
   videoGenerationNode: "视频生成",
   imageNode: "图片",
