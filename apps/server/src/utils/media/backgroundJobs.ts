@@ -2,14 +2,14 @@ import { createHash, randomUUID } from "node:crypto";
 import { assertPreparedCleanupReservation } from "@/utils/media/backgroundCleanupGuard";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import { lstat, mkdir, readdir, realpath, rmdir, stat, unlink } from "@toonflow/file";
+import { lstat, mkdir, readdir, realpath, rm, rmdir, stat, unlink } from "@toonflow/file";
 import { acquireBackgroundBudget, finishBackgroundBudget, listBackgroundReservations, openDatabase, reconcileBackgroundReservation, renewBackgroundBudget } from "@toonflow/multi-tenant-db";
 import type { BackgroundBudgetLease, AdminDatabase } from "@toonflow/multi-tenant-db";
 import type { AuthIdentity } from "@toonflow/multi-tenant-auth";
 import { z } from "zod";
 import conf from "@/utils/conf";
 import { resolveWorkspacePath } from "@/utils/workspace/files";
-import { inspectBackgroundVideo, mergeBackgroundVideo, splitBackgroundVideo } from "@/utils/media/backgroundPlan";
+import { inspectBackgroundVideo, mergeBackgroundVideo, planGuidedSegments, splitBackgroundVideo } from "@/utils/media/backgroundPlan";
 import * as mediaTasks from "@/utils/media/tasks";
 import { acquireMediaLease, createMediaLease, readMediaLease, releaseMediaLease, renewMediaLease, type MediaLease } from "@/utils/media/mediaLease";
 import { modelGateway } from "@/utils/multiTenant/gateway";
@@ -19,12 +19,16 @@ import { backgroundMediaPolicy } from "@/utils/multiTenant/backgroundAdmission";
 import { withManagedTrim } from "@/utils/media/trimVideo";
 import { withSealedMedia } from "@/utils/media/sealedMedia";
 
+const backgroundImageSchema = z.strictObject({ path: z.string().min(1), mimeType: z.string().regex(/^image\//) });
+const shotGuidanceSchema = z.strictObject({ image: backgroundImageSchema, revision: z.string().min(1), prompt: z.string().trim().min(1).max(4000) });
+const timelineSchema = z.strictObject({ fps: z.number().finite().min(16).max(120), frameRate: z.string().regex(/^\d{1,8}\/\d{1,8}$/), frameCount: z.number().int().positive() });
 const partSchema = z.strictObject({ path: z.string().min(1), mimeType: z.literal("video/mp4"), duration: z.number().positive(),
   startSeconds: z.number().nonnegative(), endSeconds: z.number().positive(), fileRevision: z.string().min(1), taskId: z.uuid(), leaseId: z.uuid(),
-  state: z.enum(["pending", "submitting", "submitted", "succeeded", "failed", "unknown", "cancelled"]), resultPath: z.string().optional(), resultRevision: z.string().optional() });
+  retryIds: z.array(z.uuid()).max(32).optional(), state: z.enum(["pending", "submitting", "submitted", "succeeded", "failed", "unknown", "cancelled"]), resultPath: z.string().optional(), resultRevision: z.string().optional() });
 const payloadSchema = z.strictObject({ version: z.literal(1), sourcePath: z.string().min(1), sourceRevision: z.string().min(1), duration: z.number().positive(),
   stage: z.enum(["prepared", "confirmed", "cancelling", "cancelled", "completed", "cleaned"]), parts: z.array(partSchema).min(1).max(100),
-  image: z.strictObject({ path: z.string().min(1), mimeType: z.string().regex(/^image\//) }).optional(), imageRevision: z.string().optional(),
+  timeline: timelineSchema.optional(), shots: z.array(shotGuidanceSchema).min(1).max(24).optional(),
+  image: backgroundImageSchema.optional(), imageRevision: z.string().optional(),
   modelId: z.string().min(1).max(256).optional(), mode: z.array(z.string()).min(1).max(3).optional(), prompt: z.string().min(1).max(100000).optional(), resultPath: z.string().optional() });
 type Payload = z.infer<typeof payloadSchema>;
 type Access = { jobId: string; ownerId: string; workspaceHash: string };
@@ -123,6 +127,50 @@ export async function planBackgroundJob(cwd: string, sourcePath: string, actor: 
   });
 }
 
+export async function analyzeGuidedBackground(cwd: string, sourcePath: string, actor: AuthIdentity, signal: AbortSignal) {
+  const folderFor = (id: string) => `assets/generated/guided${id.replaceAll("-", "")}`;
+  return withBudget(cwd, actor, "frame", signal, async (id, active, check) =>
+    withVideoSource(cwd, sourcePath, actor, active, async (path, sourceRevision) => {
+      await check();
+      const source = await inspectBackgroundVideo(path, active);
+      const segments = planGuidedSegments(source, source.timestamps, true);
+      const folder = folderFor(id);
+      const directory = await resolveWorkspacePath(cwd, folder, true);
+      await mkdir(directory.path, { recursive: true });
+      let bytes = 0;
+      try {
+        const scenes = [];
+        for (const [index, segment] of segments.entries()) {
+          await check();
+          const middle = Math.floor((segment.startSeconds + segment.endSeconds) * source.fps / 2) / source.fps;
+          const frame = await createVideoFrame(path, Math.max(segment.startSeconds, middle - 0.00001), active, undefined, 480);
+          const image = `${folder}/shot${index + 1}.png`;
+          const target = await resolveWorkspacePath(cwd, image);
+          bytes += frame.data.length;
+          if (bytes > 8 * 1024 * 1024) invalid("分镜图片超过单次空间上限", 413);
+          await writeWorkspaceFile(target.path, frame.data, true);
+          scenes.push({ index: index + 1, start: segment.startSeconds, end: segment.endSeconds, image });
+        }
+        const manifest = `${folder}/analysis.json`;
+        if (!sourceRevision.startsWith("sha256:") && await revision(path) !== sourceRevision) invalid("原视频在分析时已改变", 409);
+        const result = { scenes, sourceRevision, duration: source.frameCount / source.fps, width: source.displayWidth, height: source.displayHeight, manifest };
+        const content = JSON.stringify(result);
+        await check();
+        await writeWorkspaceFile((await resolveWorkspacePath(cwd, manifest)).path, content, true);
+        return { value: result, bytes: bytes + Buffer.byteLength(content) };
+      } catch (error) {
+        await rm(directory.path, { recursive: true, force: true });
+        throw error;
+      }
+    }), async id => {
+    const folder = await resolveWorkspacePath(cwd, folderFor(id), true);
+    return !await lstat(folder.path).then(() => true, (error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return false;
+      throw error;
+    });
+  });
+}
+
 export async function createBackgroundFrame(cwd: string, sourcePath: string, timeSeconds: number, actor: AuthIdentity, signal: AbortSignal) {
   return withBudget(cwd, actor, "frame", signal, async (operationId, active, check) => {
     await check();
@@ -173,12 +221,15 @@ export async function cleanupBackgroundFrame(cwd: string, operationId: string, a
   });
 }
 
-export async function prepareBackgroundJob(cwd: string, sourcePath: string, actor: AuthIdentity, signal: AbortSignal, jobId: string) {
+export async function prepareBackgroundJob(cwd: string, sourcePath: string, actor: AuthIdentity, signal: AbortSignal, jobId: string, guided?: { cuts: number[]; sourceRevision: string }) {
   const key = access(cwd, jobId, actor);
   const existing = await databaseAccess(async () => (await db()).getBackgroundJob(key));
   if (existing) {
     const payload = payloadSchema.parse(existing.payload);
     if (payload.sourcePath !== sourcePath) invalid("相同项目编号不能用于不同的视频", 409);
+    if (Boolean(guided) !== Boolean(payload.timeline) || guided && payload.timeline && (guided.sourceRevision !== payload.sourceRevision
+      || guided.cuts.length + 1 !== payload.parts.length || guided.cuts.some((cut, index) =>
+        Math.round(cut * payload.timeline!.fps) !== Math.round(payload.parts[index]!.endSeconds * payload.timeline!.fps)))) invalid("项目编号与已保存的分镜不一致", 409);
     await verifySource(cwd, payload, actor, signal);
     return withBudget(cwd, actor, "plan", signal, async (_id, _active, check, lease, database) => {
       const reservations = await databaseAccess(() => listBackgroundReservations(database, lease));
@@ -195,9 +246,11 @@ export async function prepareBackgroundJob(cwd: string, sourcePath: string, acto
   return withBudget(cwd, actor, "prepare", signal, async (jobId, active, check) => {
   return withVideoSource(cwd, sourcePath, actor, active, async (sourceFile, initial) => {
   await check();
-  const plan = await inspectBackgroundVideo(sourceFile, active);
-  if (plan.segments.length > 100) invalid("分段超过 100 段，请先缩短视频", 400);
-  const files = await splitBackgroundVideo(cwd, sourceFile, jobId, plan.segments, active, check);
+  if (guided && guided.sourceRevision !== initial) invalid("原视频已改变，请重新分析原片", 409);
+  const plan = await inspectBackgroundVideo(sourceFile, active, !guided);
+  const segments = guided ? planGuidedSegments(plan, guided.cuts) : plan.segments;
+  const timeline = guided ? timelineSchema.parse({ fps: plan.fps, frameRate: plan.frameRate, frameCount: plan.frameCount }) : undefined;
+  const files = await splitBackgroundVideo(cwd, sourceFile, jobId, segments, active, check, timeline);
   if (!initial.startsWith("sha256:") && await revision(sourceFile) !== initial) invalid("原视频在切分过程中改变，请重新准备", 409);
   const parts: Payload["parts"] = [];
   for (const file of files) {
@@ -205,7 +258,7 @@ export async function prepareBackgroundJob(cwd: string, sourcePath: string, acto
     if (!await createMediaLease(cwd, leaseId, taskId, actor)) invalid("媒体任务租约冲突，请重新准备", 409);
     parts.push({ ...file, fileRevision: await revision((await resolveWorkspacePath(cwd, file.path)).path), taskId, leaseId, state: "pending" });
   }
-  const payload: Payload = { version: 1, sourcePath, sourceRevision: initial, duration: plan.duration, stage: "prepared", parts };
+  const payload: Payload = { version: 1, sourcePath, sourceRevision: initial, duration: timeline ? timeline.frameCount / timeline.fps : plan.duration, stage: "prepared", parts, ...(timeline ? { timeline } : {}) };
   await check();
   if (!await databaseAccess(async () => (await db()).createBackgroundJob({ ...key, payload }))) invalid("项目编号冲突，请重新准备", 409);
   // 完整预留持续覆盖后续生成片段、失败残留及最终合成，清理后再对账。
@@ -242,7 +295,7 @@ async function leased<T>(cwd: string, jobId: string, actor: AuthIdentity, operat
 }
 
 export async function confirmBackgroundJob(cwd: string, jobId: string, actor: AuthIdentity,
-  options: { image: { path: string; mimeType: string }; modelId: string; prompt: string }) {
+  options: { image: z.infer<typeof backgroundImageSchema>; modelId: string; prompt: string; shots?: Omit<z.infer<typeof shotGuidanceSchema>, "revision">[] }) {
   return leased(cwd, jobId, actor, async ({ payload, save }) => {
     if (payload.stage !== "prepared") invalid("该项目已确认，不能更换模型或背景", 409);
     await verifySource(cwd, payload, actor, AbortSignal.timeout(30000));
@@ -259,6 +312,21 @@ export async function confirmBackgroundJob(cwd: string, jobId: string, actor: Au
     const mode = selected?.mode?.find(value => Array.isArray(value) && value.some(item => /^imageReference:[1-9]/.test(item))
       && value.some(item => /^videoReference:[1-9]/.test(item)));
     if (!Array.isArray(mode)) invalid("所选模型不支持同时参考视频和图片", 400);
+    if (payload.timeline ? options.shots?.length !== payload.parts.length : options.shots !== undefined) invalid("逐镜头方案与准备的分段不一致");
+    if (options.shots) {
+      const revisions = new Map<string, string>();
+      payload.shots = [];
+      for (const shot of options.shots) {
+        let imageRevision = revisions.get(shot.image.path);
+        if (!imageRevision) {
+          const file = await resolveWorkspacePath(cwd, shot.image.path);
+          if (!(await lstat(file.path)).isFile()) invalid("请选择工作区中的背景图片");
+          imageRevision = await revision(file.path);
+          revisions.set(shot.image.path, imageRevision);
+        }
+        payload.shots.push({ ...shot, revision: imageRevision });
+      }
+    }
     payload.image = options.image;
     payload.imageRevision = await revision(image.path);
     payload.modelId = options.modelId;
@@ -282,18 +350,21 @@ export async function advanceBackgroundJob(cwd: string, jobId: string, actor: Au
     const imageFile = await resolveWorkspacePath(cwd, payload.image.path);
     if (await revision(imageFile.path) !== payload.imageRevision) invalid("所选背景已变化，请重新准备项目", 409);
     await verifySource(cwd, payload, actor, AbortSignal.timeout(30000));
-    for (const part of payload.parts) {
+    for (const [index, part] of payload.parts.entries()) {
       if (part.state === "pending") {
         if (!allowNew) break;
         if (await jobBytes(cwd, jobId) > 312 * 1024 * 1024) invalid("剩余空间不足以安全生成下一段并合成", 413);
         if (await revision((await resolveWorkspacePath(cwd, part.path)).path) !== part.fileRevision) invalid("视频片段已变化，请重新准备项目", 409);
+        const shot = payload.shots?.[index];
+        if (shot && await revision((await resolveWorkspacePath(cwd, shot.image.path)).path) !== shot.revision) invalid("所选背景已变化，请重新准备项目", 409);
         // ACT: 提交前先落库不确定状态；进程失联后若任务不存在，不能自动再发上游。
         part.state = "submitting";
         await save();
         try {
+          const requestedDuration = payload.timeline ? part.endSeconds - part.startSeconds : part.duration;
           await mediaTasks.start(cwd, part.taskId, "video", { providerId: "multiTenant", modelId: payload.modelId,
-            prompt: payload.prompt, videos: [{ path: part.path, mimeType: part.mimeType }], images: [payload.image],
-            duration: Math.max(2, Math.min(15, Math.ceil(part.duration))), mode: payload.mode as (`${"video" | "image" | "audio"}Reference:${number}`)[],
+            prompt: shot?.prompt ?? payload.prompt, videos: [{ path: part.path, mimeType: part.mimeType }], images: [shot?.image ?? payload.image],
+            duration: Math.max(2, Math.min(15, Math.ceil(requestedDuration - 1e-8))), mode: payload.mode as (`${"video" | "image" | "audio"}Reference:${number}`)[],
             outputDirectory: `${jobFolder(jobId)}/outputs` }, { executionLeaseId: part.leaseId }, actor);
           part.state = "submitted";
         } catch { part.state = "unknown"; }
@@ -323,6 +394,30 @@ export async function advanceBackgroundJob(cwd: string, jobId: string, actor: Au
   });
 }
 
+export async function retryGuidedBackgroundPart(cwd: string, jobId: string, actor: AuthIdentity, partIndex: number, requestId: string) {
+  return leased(cwd, jobId, actor, async ({ payload, save }) => {
+    const part = payload.parts[partIndex];
+    if (!payload.timeline || !payload.shots || !part || !["confirmed", "completed"].includes(payload.stage)) invalid("找不到可重做的片段", 409);
+    if (part.retryIds?.includes(requestId)) return { jobId, ...payload };
+    if ((part.retryIds?.length ?? 0) >= 32) invalid("此片段已达到重做次数上限", 409);
+    if (part.state !== "failed" && part.state !== "succeeded") invalid("片段的供应商状态尚未确认，不能重发", 409);
+    await verifySource(cwd, payload, actor, AbortSignal.timeout(30000));
+    const taskId = randomUUID();
+    const leaseId = randomUUID();
+    if (!await createMediaLease(cwd, leaseId, taskId, actor)) invalid("片段任务租约冲突", 409);
+    part.taskId = taskId;
+    part.leaseId = leaseId;
+    part.retryIds = [...(part.retryIds ?? []), requestId];
+    part.state = "pending";
+    delete part.resultPath;
+    delete part.resultRevision;
+    payload.stage = "confirmed";
+    delete payload.resultPath;
+    await save();
+    return { jobId, ...payload };
+  });
+}
+
 export async function finishBackgroundJob(cwd: string, jobId: string, actor: AuthIdentity, signal: AbortSignal) {
   return leased(cwd, jobId, actor, async ({ payload, save }) => {
     if (payload.stage === "completed") return { jobId, ...payload };
@@ -335,8 +430,10 @@ export async function finishBackgroundJob(cwd: string, jobId: string, actor: Aut
       await check();
       const result = await withVideoSource(cwd, payload.sourcePath, actor, active, async (original, version) => {
         if (version !== payload.sourceRevision) invalid("原视频已改变，请重新准备项目", 409);
-        return mergeBackgroundVideo(cwd, original, payload.parts.map(part => part.resultPath!), randomUUID(), active,
-          payload.parts.map(part => part.endSeconds - part.startSeconds), jobFolder(jobId), remaining);
+        const merged = await mergeBackgroundVideo(cwd, original, payload.parts.map(part => part.resultPath!), randomUUID(), active,
+          payload.parts.map(part => part.endSeconds - part.startSeconds), jobFolder(jobId), remaining, payload.timeline);
+        if (payload.timeline && !version.startsWith("sha256:") && await revision(original) !== version) invalid("原视频在合成时改变，无法交付该结果", 409);
+        return merged;
       });
       await check();
       payload.resultPath = result.path;
