@@ -53,7 +53,16 @@
           @preview="setReferencePreview"
           @remove="removeReference" />
         <div v-if="frameMode" class="referenceHint">
-          {{ selectedMode === "startFrameOptional" ? "仅一张图片时作为尾帧；两张图片按顺序作为首帧、尾帧" : "图片引用按顺序作为首帧、尾帧" }}
+          首尾帧图片 {{ mediaCounts.image }}/2 张。
+          {{ selectedMode === "startFrameOptional" ? "单张作为尾帧，两张按顺序作为首帧和尾帧" : "按顺序作为首帧和尾帧" }}，不能与参考素材混用。
+        </div>
+        <div v-if="referenceLimits.length" class="referenceHint">
+          <span>混合参考</span>
+          <span v-for="{ type, label, unit, limit } in referenceLimits" :key="type" :class="{ overLimit: !frameMode && mediaCounts[type] > limit }">
+            {{ label }} {{ frameMode ? `最多 ${limit}` : `${mediaCounts[type]}/${limit}` }} {{ unit }}
+          </span>
+          <span>合计最多 {{ referenceTotalLimit }} 个</span>
+          <span v-if="wanReferenceDurationHint && !frameMode">视频、音频各合计最多 15 秒</span>
         </div>
         <promptInput v-model="data.promptModel" v-model:text="data.prompt" :references="referenceMentions" :materials="materialMentions" :selectMaterial="selectMaterialReference" :selectAsset="selectAssetReference" expandable />
         <div class="promptFooter">
@@ -187,13 +196,33 @@ const mediaCounts = computed(() => ({
   video: refList.value.filter((item) => item.dataType === "VIDEO").length,
   audio: refList.value.filter((item) => item.dataType === "AUDIO").length,
 }));
+const referenceTypes = [
+  { type: "image", label: "图片", unit: "张" },
+  { type: "video", label: "视频", unit: "段" },
+  { type: "audio", label: "音频", unit: "段" },
+] as const;
+const referenceLimits = computed(() => {
+  const mode = Array.isArray(selectedMode.value) ? selectedMode.value : selectedModel.value?.mode?.find(Array.isArray);
+  if (!mode) return [];
+  return referenceTypes.map(entry => ({ ...entry, limit: getReferenceLimit(mode, entry.type) }))
+    .filter(({ type, limit }) => limit > 0 || (!frameMode.value && mediaCounts.value[type] > 0));
+});
+const referenceTotalLimit = computed(() => referenceLimits.value.reduce((sum, { limit }) => sum + limit, 0));
+const wanReferenceDurationHint = computed(() => {
+  const modelId = selectedModel.value?.modelId;
+  return modelId === "wan3.0-video" || modelId === "wan3.0-video-prime";
+});
 const matchingModes = computed(() => getMatchingModes(selectedModel.value));
+
+function getReferenceLimit(mode: string[], type: keyof typeof mediaCounts.value) {
+  return Number(mode.find(item => item.startsWith(`${type}Reference:`))?.split(":")[1] ?? 0);
+}
 
 function getMatchingModes(choice?: NodeMediaModel) {
   return (choice?.mode ?? []).filter((mode) => {
     const { image, video, audio } = mediaCounts.value;
-    if (Array.isArray(mode)) return image + video + audio > 0 && Object.entries(mediaCounts.value).every(([type, count]) =>
-      count <= Number(mode.find((item) => item.startsWith(`${type}Reference:`))?.split(":")[1] ?? 0)
+    if (Array.isArray(mode)) return image + video + audio > 0 && referenceTypes.every(({ type }) =>
+      mediaCounts.value[type] <= getReferenceLimit(mode, type)
     );
     if (mode === "text") return image + video + audio === 0;
     if (video || audio) return false;
@@ -560,9 +589,14 @@ nodeTools.register({
 
 .promptCard {
   .referenceHint {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
     margin: 8px 0;
     color: var(--el-text-color-secondary);
     font-size: 12px;
+
+    .overLimit { color: var(--el-color-danger); }
   }
 
   .promptFooter {

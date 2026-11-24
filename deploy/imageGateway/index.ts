@@ -2,7 +2,8 @@ import { timingSafeEqual } from "node:crypto";
 
 const modelId = "gpt-image-2.5-sunburst";
 const upstreamOrigin = "https://api.openai.com";
-const maxImageBytes = 20 * 1024 * 1024;
+const maxReferenceImages = 16;
+const maxEncodedImageBytes = 20 * 1024 * 1024;
 const generations = "/v1/images/generations";
 const edits = "/v1/images/edits";
 const validDimensions = new Set(["1024x1024", "1536x1024", "1024x1536", "1536x864", "864x1536",
@@ -40,11 +41,11 @@ function parseImageRequest(value: unknown, edit: boolean) {
     || !("n" in value) || value.n !== 1) throw new Error("图片请求参数无效");
   let images: ReturnType<typeof readImageUrl>[] | undefined;
   if (edit) {
-    if (!("images" in value) || !Array.isArray(value.images) || value.images.length < 1 || value.images.length > 4) {
-      throw new Error("图片编辑需要一至四张参考图");
+    if (!("images" in value) || !Array.isArray(value.images) || value.images.length < 1 || value.images.length > maxReferenceImages) {
+      throw new Error(`图片编辑需要 1 至 ${maxReferenceImages} 张参考图`);
     }
     images = value.images.map(readImageUrl);
-    if (images.reduce((size, input) => size + input.image_url.length, 0) > maxImageBytes) throw new Error("参考图编码后的总大小不得超过 20 MB");
+    if (images.reduce((size, input) => size + input.image_url.length, 0) > maxEncodedImageBytes) throw new Error("参考图编码后的总大小不得超过 20 MiB");
   } else if ("images" in value) throw new Error("文生图请求不能包含参考图");
   return { model: modelId, prompt: value.prompt, size: value.size, quality: value.quality, output_format: value.output_format,
     n: value.n, ...(images ? { images } : {}) };
@@ -53,7 +54,7 @@ function parseImageRequest(value: unknown, edit: boolean) {
 Bun.serve({
   hostname: "127.0.0.1",
   port,
-  maxRequestBodySize: maxImageBytes + 256 * 1024,
+  maxRequestBodySize: maxEncodedImageBytes + 256 * 1024,
   idleTimeout: 210,
   async fetch(request) {
     const { pathname, search } = new URL(request.url);

@@ -18,3 +18,17 @@ export type { FfmpegFactory, FfmpegCommand } from "@toonflow/ffmpeg/types";
 
 export const languageProviders = [deepSeek] as const;
 export const mediaProviders = [apiMart, metaso, compshare, openaiImage] as const;
+
+const imageReferenceLimits = new Map<string, ReadonlyMap<string, number>>([
+  ["aliyun", new Map([
+    ["qwen-image-3.0-pro", 3],
+    ["qwen-image-3.0", 3],
+    ["qwen-image-2.1-pro", 10],
+    ["qwen-image-2.1-turbo", 10],
+  ])],
+  ["openaiImage", new Map([["gpt-image-2.5-sunburst", 4]])],
+]);
+
+export function getImageReferenceLimit(providerId: string, model: Pick<ProviderModel, "id" | "maxReferenceImages">) {
+  return model.maxReferenceImages ?? imageReferenceLimits.get(providerId)?.get(model.id);
+}

@@ -21,6 +21,7 @@ interface ProviderModel<TRules extends readonly ProviderFormRule[] = readonly Pr
   audio?: "optional" | boolean;
   imageSizes?: string[];
   imageRatios?: string[];
+  maxReferenceImages?: number;
   durationResolutionMap?: { duration: number[]; resolution: string[] }[];
   voices?: { title: string; voice: string }[];
   /** 模型专属的 form-create JSON 规则，节点表单值作为 request.other 传入。 */
@@ -211,7 +212,7 @@ interface ProviderDefinition<TRules extends readonly ProviderFormRule[] = readon
   /**
    * 媒体模型列表 GET 地址，使用配置的 apiKey 作为 Bearer 凭据，返回 { data: 模型数组 }。
    * 模型须含 id，type 可由 URL 的 type 参数或同名已有模型补全。
-   * 可选 modelInfo 对象提供模型能力（如 mode、audio、durationResolutionMap、imageSizes、imageRatios），获取时合并至模型顶层。
+   * 可选 modelInfo 对象提供模型能力（如 mode、audio、durationResolutionMap、imageSizes、imageRatios、maxReferenceImages），获取时合并至模型顶层。
    * 提供此字段后可手动获取模型列表。
    */
   modelsUrl?: string;

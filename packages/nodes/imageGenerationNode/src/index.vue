@@ -53,6 +53,10 @@
           @remove="removeReference" />
         <promptInput v-if="editor?.mode === 'inpaint'" v-model="data.inpaintPromptModel" v-model:text="data.inpaintPrompt" :references="referenceMentions" :materials="materialMentions" :selectMaterial="selectMaterialReference" :selectAsset="selectAssetReference" expandable />
         <promptInput v-else v-model="data.promptModel" v-model:text="data.prompt" :references="referenceMentions" :materials="materialMentions" :selectMaterial="selectMaterialReference" :selectAsset="selectAssetReference" expandable />
+        <template v-if="editor?.mode !== 'inpaint' && referenceLimit !== undefined">
+          <div class="referenceLimit">参考图 {{ referenceCount }} / {{ referenceLimit }} 张</div>
+          <div v-if="referenceLimitError" class="referenceLimitError" role="alert">{{ referenceLimitError }}</div>
+        </template>
         <div class="promptFooter">
           <el-select
             v-if="editor?.mode !== 'inpaint'"
@@ -90,12 +94,12 @@
             :disabled="generating || deleting || !selectedModel" />
           <el-button v-if="editor?.mode === 'inpaint'" class="confirmButton" type="primary" :icon="IconCheck" :loading="editor.busy" :disabled="deleting || uploading || !generationPrompt" @click="confirmInpaint().catch(error => showNodeError(error, '重绘节点创建失败'))">确认</el-button>
           <div v-else class="generationActions">
-            <mediaPrice v-if="priceInput" :input="{ ...priceInput, mediaType: 'image' }" :supported="selectedModel?.supportsPrice === true" />
+            <mediaPrice v-if="priceInput && !referenceLimitError" :input="{ ...priceInput, mediaType: 'image' }" :supported="selectedModel?.supportsPrice === true" />
             <el-button v-if="pendingRecovery" class="sendButton" :icon="IconPlayerStop" :loading="cancelling" :disabled="deleting || uploading" title="放弃任务" aria-label="放弃任务" @click="generationState.cancel().catch(error => showNodeError(error, '停止生成失败'))" />
             <el-button
               class="sendButton"
               :icon="generating ? IconPlayerStop : IconArrowUp"
-              :disabled="cancelling || deleting || uploading || (!generating && (editor?.busy || (!pendingRecovery && (!generationPrompt || !selectedModel))))"
+              :disabled="cancelling || deleting || uploading || (!generating && (editor?.busy || (!pendingRecovery && (!generationPrompt || !selectedModel || !!referenceLimitError))))"
               :title="generating ? '停止生成' : pendingRecovery ? '复查任务' : '生成图片'"
               :aria-label="generating ? '停止生成' : pendingRecovery ? '复查任务' : '生成图片'"
               @click="generating ? generationState.cancel().catch(error => showNodeError(error, '停止生成失败')) : startGeneration().catch((error) => showNodeError(error, '图片生成失败'))" />
@@ -237,6 +241,14 @@ const priceInput = computed(() => {
   if (!input || inpaint && !Array.isArray(inpaint.images)) return;
   return inpaint ? buildInpaintRequest(input, inpaint) : input;
 });
+const referenceLimit = computed(() => selectedModel.value?.maxReferenceImages);
+const referenceCount = computed(() => priceInput.value?.images?.length ?? 0);
+const referenceLimitError = computed(() => {
+  const limit = referenceLimit.value;
+  const count = referenceCount.value;
+  if (limit === undefined || count <= limit) return "";
+  return `${selectedModel.value?.label}最多支持 ${limit} 张参考图，当前 ${count} 张，请减少 ${count - limit} 张。`;
+});
 const outputFile = computed(() => outputs.value.image?.dataType === "IMAGE" ? outputs.value.image.value : undefined);
 const inpaintGuideUrl = files.useFileUrl(
   () => data.value.inpaint?.guide ? { url: data.value.inpaint.guide, mimeType: "image/png" } : undefined,
@@ -345,6 +357,7 @@ async function startGeneration() {
   const references = refList.value.filter(item => !data.value.inpaint || item.dataType !== "IMAGE" || item.value?.url !== data.value.inpaint.source);
   if (references.some(item => item.value === undefined)) throw new Error("引用节点暂无内容，请先补充引用内容");
   if (!input) throw new Error("请先选择图片模型");
+  if (referenceLimitError.value) throw new Error(referenceLimitError.value);
   const workspace = files.getWorkspaceFiles();
   const controller = new AbortController();
   const inpaintData = data.value.inpaint;
@@ -548,6 +561,17 @@ nodeTools.register({
 
 .promptCard {
   .inpaintInfo { margin-bottom: 8px; }
+  .referenceLimit,
+  .referenceLimitError {
+    margin-top: 8px;
+    color: var(--el-text-color-secondary);
+    font-size: 12px;
+  }
+
+  .referenceLimitError {
+    color: var(--el-color-danger);
+  }
+
   .promptFooter {
     display: flex;
     align-items: center;

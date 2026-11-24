@@ -253,6 +253,57 @@ test("platform image routes charge customer points and exempt administrators", a
   }
 });
 
+test("OpenAI image editing forwards sixteen references and rejects seventeen", () => {
+  const workspace = fileURLToPath(new URL("../../../../../", import.meta.url));
+  const output = execFileSync(process.execPath, ["-e", `
+    const token = "local-gateway-fixture-token-at-least-32";
+    process.env.OPENAI_IMAGE_GATEWAY_TOKEN = token;
+    process.env.OPENAI_API_KEY = "local-upstream-fixture";
+    const nativeServe = Bun.serve;
+    let gateway;
+    Bun.serve = options => gateway = nativeServe({ ...options, port: 0 });
+    const nativeFetch = globalThis.fetch;
+    const received = [];
+    globalThis.fetch = async (input, options) => {
+      if (String(input) !== "https://api.openai.com/v1/images/edits") throw Error("unexpected upstream endpoint");
+      received.push(JSON.parse(options.body).images.length);
+      return Response.json({ data: [{ b64_json: "iVBORw0KGgoAAAAB" }] }, { headers: { "x-request-id": "req_fixture" } });
+    };
+    await import("./deploy/imageGateway/index.ts");
+    const { default: adapter } = await import("./packages/providers/src/media/openaiImage.ts");
+    const image = { type: "base64", data: "iVBORw0KGgoAAAAB", mimeType: "image/png" };
+    const request = { model: "gpt-image-2.5-sunburst", prompt: "参考图验收", size: "1K", ratio: "1:1" };
+    const requestGateway = (path, options) => {
+      const headers = new Headers(options.headers);
+      headers.set("x-client-request-id", crypto.randomUUID());
+      return nativeFetch(new URL(path, gateway.url), { ...options, headers });
+    };
+    const context = {
+      config: { gatewayUrl: "https://gateway.example.test/", apiKey: token },
+      tool: { fetch: (url, options) => requestGateway(url.pathname, options) },
+    };
+    try {
+      const result = await adapter.generateImage.call(context, { ...request, images: Array(16).fill(image) });
+      if (result[0]?.mimeType !== "image/png") throw Error("未收到图片结果");
+      const tooMany = Array(17).fill({ image_url: "data:image/png;base64," + image.data });
+      const rejected = await requestGateway("/v1/images/edits", {
+        method: "POST",
+        headers: { authorization: "Bearer " + token, "content-type": "application/json" },
+        body: JSON.stringify({ model: request.model, prompt: request.prompt, size: "1024x1024", quality: "medium", output_format: "png", n: 1, images: tooMany }),
+      });
+      if (rejected.status !== 400 || !JSON.stringify(await rejected.json()).includes("16")) throw Error("网关没有明确拒绝第十七张图");
+      let error = "";
+      try { await adapter.generateImage.call(context, { ...request, images: Array(17).fill(image) }); }
+      catch (cause) { error = cause.message; }
+      if (!error.includes("16")) throw Error("适配器没有明确拒绝第十七张图");
+      console.log(JSON.stringify(received));
+    } finally {
+      gateway.stop(true);
+    }
+  `], { cwd: workspace, encoding: "utf8", timeout: 10000 });
+  expect(output.trim().split("\n").at(-1)).toBe("[16]");
+});
+
 test("staff canvas generates images, analyzes and edits videos, and exports 100 authorized uploads", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "toonflowCanvasBrowser")));
   const project = { directory: join(root, "workspaces", "studio"), name: "既有画布", lastOpenedAt: Date.now() };
@@ -297,6 +348,8 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=3", "-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0[v]",
       "-map", "[v]", "-map", "3:a", "-c:a", "aac", "-c:v", "libx264", "-bf", "0", join(project.directory, sceneSource));
     const png = ffmpeg("-f", "lavfi", "-i", "color=red:size=64x64", "-frames:v", "1", "-c:v", "png", "-threads", "1", "-f", "image2pipe", "pipe:1");
+    const referenceImages = ["referenceImageA", "referenceImageB"];
+    for (const id of referenceImages) await writeFile(join(project.directory, "assets", id + ".png"), png);
     const sourceVideoBytes = await readFile(join(project.directory, sceneSource));
     const replacementVideo = ffmpeg("-f", "lavfi", "-i", "color=purple:size=64x64:rate=12:duration=3",
       "-c:v", "libx264", "-bf", "0", "-movflags", "frag_keyframe+empty_moov", "-f", "mp4", "pipe:1");
@@ -305,12 +358,17 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       export default {
         id: "fixtureMedia", label: "离线模型",
         models: [
-          { id: "fixture-image", label: "离线图片", type: "image", mode: ["text", "singleImage"], imageSizes: ["1K"], imageRatios: ["1:1"] },
+          { id: "fixture-image", label: "离线图片", type: "image", mode: ["text", "singleImage"], imageSizes: ["1K"], imageRatios: ["1:1"], maxReferenceImages: 1 },
+          { id: "fixture-image-two", label: "双图验收模型", type: "image", mode: ["text", "multiReference"], imageSizes: ["1K"], imageRatios: ["1:1"], maxReferenceImages: 2 },
           { id: "fixture-video", label: "离线视频", type: "video", mode: [["imageReference:1", "videoReference:1"]],
-            durationResolutionMap: [{ duration: [3], resolution: ["720P"] }] }
+            durationResolutionMap: [{ duration: [3], resolution: ["720P"] }] },
+          { id: "wan3.0-video", label: "离线万相 3.0", type: "video",
+            mode: ["text", "endFrameOptional", ["imageReference:10", "videoReference:5", "audioReference:5"]] }
         ],
         async generateImage(request) {
-          if (request.model !== "fixture-image") throw Error("图片模型不匹配");
+          if (request.model === "fixture-image-two") {
+            if (request.images?.length !== 2 || request.images.some(image => image.mimeType !== "image/png")) throw Error("未收到两张参考图");
+          } else if (request.model !== "fixture-image") throw Error("图片模型不匹配");
           if (request.prompt !== "一张红色背景图" && (!request.prompt.includes("设计新的场景背景") || request.images?.[0]?.mimeType !== "image/png")) throw Error("缺少用于换背景的参考帧");
           return [{ type: "base64", data: "${png.toString("base64")}", mimeType: "image/png", mediaType: "image" }];
         },
@@ -338,6 +396,10 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
         } } },
         { id: "qianchuan", type: "remote-qianchuanUploadNode", position: { x: 480, y: 90 }, data: {} },
         ...videoNodes,
+        ...referenceImages.map((id, index) => ({
+          id, type: "remote-imageNode", position: { x: 1550 + 200 * index, y: 650 },
+          data: { outputs: { image: { dataType: "IMAGE", value: { url: "assets/" + id + ".png", mimeType: "image/png" } } } },
+        })),
         { id: "concat", type: "remote-videoConcatNode", position: { x: 850, y: 550 }, data: { videoConcat: { segmentCount: 2 } } },
         { id: "backgroundSource", type: "remote-videoNode", position: { x: 1240, y: 570 },
           data: { outputs: { video: { dataType: "VIDEO", value: { url: sceneSource, mimeType: "video/mp4" } } } } },
@@ -346,10 +408,15 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
         { id: "imageGeneration", type: "remote-imageGenerationNode", position: { x: 850, y: 90 },
           data: { prompt: "一张红色背景图", promptModel: [[{ type: "Write", text: "一张红色背景图" }]],
             model: JSON.stringify(["fixtureMedia", "fixture-image"]), ratio: "1:1" } },
+        { id: "wanGeneration", type: "remote-videoGenerationNode", position: { x: 1700, y: 300 },
+          data: { model: JSON.stringify(["fixtureMedia", "wan3.0-video"]) } },
       ],
       edges: [
         { id: "batch", source: "mashup", sourceHandle: "videos", target: "qianchuan", targetHandle: "videos" },
+        { id: "wanImage", source: "imageGeneration", sourceHandle: "image", target: "wanGeneration", targetHandle: "in" },
+        { id: "wanVideo", source: "backgroundSource", sourceHandle: "video", target: "wanGeneration", targetHandle: "in" },
         ...videoNodes.map(({ id }, index) => ({ id: "segment" + index, source: id, sourceHandle: "video", target: "concat", targetHandle: "segment" + index })),
+        ...referenceImages.map(id => ({ id: "link" + id, source: id, sourceHandle: "image", target: "imageGeneration", targetHandle: "in" })),
       ],
       viewport: { x: 0, y: 0, zoom: 0.8 },
     }));
@@ -411,6 +478,9 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     let backgroundRequests = 0;
     let ordinaryWeb = false;
     let modelCatalogUnavailable = false;
+    let trimReview: { request: { directory: string; operationId: string; source: string; start: number; end: number }; queued: boolean } | undefined;
+    let trimChecks = 0;
+    let trimSubmissions = 0;
     gateway.use((req, res, next) => {
       if (ordinaryWeb) res.locals.multiTenantWeb = true;
       for (const { cookie, assertion } of staff.values()) {
@@ -419,11 +489,18 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       if (req.method === "POST" && req.path === "/api/workspaces/files/prepareMashupZip") {
         res.once("finish", () => prepareResponses.push(res.statusCode));
       }
+      if (ordinaryWeb && req.method === "POST" && req.path === "/api/ffmpeg/trim") trimSubmissions++;
       if (req.method === "GET" && req.path === "/api/workspaces/files/mashupZip") {
         const index = nativeDownloads.push(0) - 1;
         res.once("finish", () => { nativeDownloads[index] = res.statusCode; });
       }
       next();
+    });
+    gateway.post("/api/ffmpeg/trim/status", express.json(), (request, response, next) => {
+      if (!ordinaryWeb || !trimReview) return next();
+      if (!Object.entries(trimReview.request).every(([key, value]) => request.body?.[key] === value)) return response.sendStatus(409);
+      trimChecks++;
+      return response.json({ code: 200, data: trimReview.queued ? { status: "pending", phase: "queued" } : { status: "notFound" } });
     });
     gateway.get("/api/ai/models", (_request, response) => {
       if (modelCatalogUnavailable) return response.status(503).json({ code: 503, message: "模型目录暂不可用" });
@@ -606,11 +683,29 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     await generating.page.waitForSelector('.videoConcatNode a[download="合成成片.mp4"]');
     const imageNode = '.vue-flow__node[data-id="imageGeneration"]';
     await generating.page.locator(`${imageNode} .imageContent`).setTimeout(5000).click();
-    await generating.page.locator('button[aria-label="生成图片"]:not([disabled])').setTimeout(5000).click();
+    const generateImageButton = imageNode + ' button[aria-label="生成图片"]';
+    const referenceLimit = await generating.page.waitForSelector(imageNode + ' .referenceLimit', { visible: true, timeout: 5000 });
+    expect(await referenceLimit?.evaluate(element => element.textContent)).toContain("参考图 2 / 1 张");
+    const referenceError = await generating.page.waitForSelector(imageNode + ' [role="alert"]', { visible: true, timeout: 5000 });
+    expect(await referenceError?.evaluate(element => element.textContent)).toContain("最多支持 1 张参考图");
+    await generating.page.waitForSelector(generateImageButton + '[disabled]', { timeout: 5000 });
+    await generating.page.locator(imageNode + " .modelSelect").setTimeout(5000).click();
+    await generating.page.locator('xpath=//li[@role="option" and normalize-space(.)="双图验收模型"]').setTimeout(5000).click();
+    await generating.page.waitForFunction(selector => Reflect.get(globalThis, "document").querySelector(selector)?.textContent.includes("参考图 2 / 2 张"),
+      { timeout: 5000 }, imageNode + " .referenceLimit");
+    await generating.page.locator(generateImageButton + ':not([disabled])').setTimeout(5000).click();
     await generating.page.waitForFunction(selector => {
       const image = Reflect.get(globalThis, "document").querySelector(selector + ' img[alt="生成图片"]');
       return image?.naturalWidth === 64 && image.naturalHeight === 64;
     }, {}, imageNode);
+
+    const wanNode = '.vue-flow__node[data-id="wanGeneration"]';
+    await generating.page.locator(`${wanNode} .titleBar`).setTimeout(5000).click();
+    await generating.page.waitForFunction(selector => {
+      const hint = Reflect.get(globalThis, "document").querySelector(`${selector} .referenceHint`);
+      return ["混合参考", "图片 1/10 张", "视频 1/5 段", "音频 0/5 段", "合计最多 20 个", "视频、音频各合计最多 15 秒"]
+        .every(label => hint?.textContent.includes(label));
+    }, { timeout: 5000 }, wanNode);
 
     const concatPath = join(project.directory, (await savedNodeData("concat")).videoConcat.result.url);
     const readPixel = (path: string, seconds: string) => ffmpeg("-ss", seconds, "-i", path, "-vf", "crop=4:4:28:28,scale=1:1",
@@ -781,8 +876,15 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     const customer = await tenants.createUser("fixture-customer", customerPassword);
     const customerProject = { ...project, directory: join(root, "multiTenant", "workspaces", customer.id, "studio") };
     await mkdir(join(customerProject.directory, "assets"), { recursive: true });
-    await writeFile(join(customerProject.directory, "旧画布.json"), JSON.stringify({
-      toonflowCanvas: true, nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 },
+    const customerCanvas = join(customerProject.directory, "旧画布.json");
+    trimReview = { request: { directory: customerProject.directory, operationId: randomUUID(), source: sceneSource, start: 0, end: 1 }, queued: false };
+    const pendingTrim = { ...trimReview.request, ownerId: customer.id, canvasPath: "旧画布.json" };
+    const customerVideo = join(customerProject.directory, sceneSource);
+    await writeFile(customerVideo, sourceVideoBytes);
+    await writeFile(customerCanvas, JSON.stringify({
+      toonflowCanvas: true, edges: [], viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [{ id: "staleTrim", type: "remote-videoNode", position: { x: 220, y: 200 },
+        data: { pendingTrim, outputs: { video: { dataType: "VIDEO", value: { url: sceneSource, mimeType: "video/mp4" } } } } }],
     }));
     await tenants.writeUserSettings(customer.id, {
       ui: { language: "zh-CN", startupAnimation: false },
@@ -809,6 +911,32 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
         await tenantPage.locator('button[type="submit"]').click();
         expect((await catalogResponse).status()).toBe(simulateCatalogOutage ? 503 : 200);
         await tenantPage.waitForSelector(".workspacePage:not([inert]) .canvasPanel:not([inert]), .el-result", { visible: true, timeout: 15000 });
+        if (!simulateCatalogOutage) {
+          await tenantPage.locator('.vue-flow__node[data-id="staleTrim"] .titleBar').click();
+          await tenantPage.locator('xpath=//button[normalize-space(.)="截取片段"]').click();
+          const check = tenantPage.locator('xpath=//button[normalize-space(.)="检查并恢复" and not(@disabled)]');
+          const clear = tenantPage.locator('xpath=//button[normalize-space(.)="清除未提交记录"]');
+          const savedTrim = async () => JSON.parse(await readFile(customerCanvas, "utf8")).nodes[0].data.pendingTrim;
+          await check.click();
+          await clear.wait();
+          expect(await savedTrim()).toEqual(pendingTrim);
+          expect(trimChecks).toBe(1);
+
+          trimReview.queued = true;
+          await clear.click();
+          await check.wait();
+          expect(await savedTrim()).toEqual(pendingTrim);
+          expect(trimChecks).toBe(2);
+
+          trimReview.queued = false;
+          await check.click();
+          await clear.click();
+          await tenantPage.waitForSelector('.videoActionPanel', { hidden: true });
+          expect(await savedTrim()).toBeUndefined();
+          expect(await readFile(customerVideo)).toEqual(sourceVideoBytes);
+          expect(trimChecks).toBe(4);
+          expect(trimSubmissions).toBe(0);
+        }
         const result = await tenantPage.evaluate(async () => {
           const headers = { "x-toonflow-workspace": "1" };
           const balance = await fetch("/api/multiTenant/user/balance", { headers });

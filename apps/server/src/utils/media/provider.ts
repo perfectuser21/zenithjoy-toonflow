@@ -31,6 +31,7 @@ export const mediaModelsSchema = z.array(z.object({
   rules: providerRulesSchema.optional(),
   imageSizes: z.array(z.string()).optional(),
   imageRatios: z.array(z.string()).optional(),
+  maxReferenceImages: z.number().int().min(0).max(256).optional(),
   durationResolutionMap: z.array(z.object({
     duration: z.array(z.number()),
     resolution: z.array(z.string()),
@@ -500,6 +501,7 @@ export async function refreshMediaProviderModels(fileName: string, revision: str
       durationResolutionMap: z.array(z.object({ duration: z.array(z.number().positive()), resolution: z.array(z.string().min(1)) })).optional(),
       imageSizes: z.array(z.string().min(1)).optional(),
       imageRatios: z.array(z.string().min(1)).optional(),
+      maxReferenceImages: mediaModelsSchema.element.shape.maxReferenceImages,
     }).catchall(z.json()).optional(),
   })).max(2000) }).parse(await response.json());
   if (!result.data.length) throw new Error("未获取到媒体模型，保留原有列表");
