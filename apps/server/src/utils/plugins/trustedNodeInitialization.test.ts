@@ -253,6 +253,57 @@ test("platform image routes charge customer points and exempt administrators", a
   }
 });
 
+test("OpenAI image editing forwards sixteen references and rejects seventeen", () => {
+  const workspace = fileURLToPath(new URL("../../../../../", import.meta.url));
+  const output = execFileSync(process.execPath, ["-e", `
+    const token = "local-gateway-fixture-token-at-least-32";
+    process.env.OPENAI_IMAGE_GATEWAY_TOKEN = token;
+    process.env.OPENAI_API_KEY = "local-upstream-fixture";
+    const nativeServe = Bun.serve;
+    let gateway;
+    Bun.serve = options => gateway = nativeServe({ ...options, port: 0 });
+    const nativeFetch = globalThis.fetch;
+    const received = [];
+    globalThis.fetch = async (input, options) => {
+      if (String(input) !== "https://api.openai.com/v1/images/edits") throw Error("unexpected upstream endpoint");
+      received.push(JSON.parse(options.body).images.length);
+      return Response.json({ data: [{ b64_json: "iVBORw0KGgoAAAAB" }] }, { headers: { "x-request-id": "req_fixture" } });
+    };
+    await import("./deploy/imageGateway/index.ts");
+    const { default: adapter } = await import("./packages/providers/src/media/openaiImage.ts");
+    const image = { type: "base64", data: "iVBORw0KGgoAAAAB", mimeType: "image/png" };
+    const request = { model: "gpt-image-2.5-sunburst", prompt: "参考图验收", size: "1K", ratio: "1:1" };
+    const requestGateway = (path, options) => {
+      const headers = new Headers(options.headers);
+      headers.set("x-client-request-id", crypto.randomUUID());
+      return nativeFetch(new URL(path, gateway.url), { ...options, headers });
+    };
+    const context = {
+      config: { gatewayUrl: "https://gateway.example.test/", apiKey: token },
+      tool: { fetch: (url, options) => requestGateway(url.pathname, options) },
+    };
+    try {
+      const result = await adapter.generateImage.call(context, { ...request, images: Array(16).fill(image) });
+      if (result[0]?.mimeType !== "image/png") throw Error("未收到图片结果");
+      const tooMany = Array(17).fill({ image_url: "data:image/png;base64," + image.data });
+      const rejected = await requestGateway("/v1/images/edits", {
+        method: "POST",
+        headers: { authorization: "Bearer " + token, "content-type": "application/json" },
+        body: JSON.stringify({ model: request.model, prompt: request.prompt, size: "1024x1024", quality: "medium", output_format: "png", n: 1, images: tooMany }),
+      });
+      if (rejected.status !== 400 || !JSON.stringify(await rejected.json()).includes("16")) throw Error("网关没有明确拒绝第十七张图");
+      let error = "";
+      try { await adapter.generateImage.call(context, { ...request, images: Array(17).fill(image) }); }
+      catch (cause) { error = cause.message; }
+      if (!error.includes("16")) throw Error("适配器没有明确拒绝第十七张图");
+      console.log(JSON.stringify(received));
+    } finally {
+      gateway.stop(true);
+    }
+  `], { cwd: workspace, encoding: "utf8", timeout: 10000 });
+  expect(output.trim().split("\n").at(-1)).toBe("[16]");
+});
+
 test("staff canvas generates images, analyzes and edits videos, and exports 100 authorized uploads", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "toonflowCanvasBrowser")));
   const project = { directory: join(root, "workspaces", "studio"), name: "既有画布", lastOpenedAt: Date.now() };
