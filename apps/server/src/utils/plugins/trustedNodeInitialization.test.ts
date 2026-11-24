@@ -361,7 +361,9 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
           { id: "fixture-image", label: "离线图片", type: "image", mode: ["text", "singleImage"], imageSizes: ["1K"], imageRatios: ["1:1"], maxReferenceImages: 1 },
           { id: "fixture-image-two", label: "双图验收模型", type: "image", mode: ["text", "multiReference"], imageSizes: ["1K"], imageRatios: ["1:1"], maxReferenceImages: 2 },
           { id: "fixture-video", label: "离线视频", type: "video", mode: [["imageReference:1", "videoReference:1"]],
-            durationResolutionMap: [{ duration: [3], resolution: ["720P"] }] }
+            durationResolutionMap: [{ duration: [3], resolution: ["720P"] }] },
+          { id: "wan3.0-video", label: "离线万相 3.0", type: "video",
+            mode: ["text", "endFrameOptional", ["imageReference:10", "videoReference:5", "audioReference:5"]] }
         ],
         async generateImage(request) {
           if (request.model === "fixture-image-two") {
@@ -406,9 +408,13 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
         { id: "imageGeneration", type: "remote-imageGenerationNode", position: { x: 850, y: 90 },
           data: { prompt: "一张红色背景图", promptModel: [[{ type: "Write", text: "一张红色背景图" }]],
             model: JSON.stringify(["fixtureMedia", "fixture-image"]), ratio: "1:1" } },
+        { id: "wanGeneration", type: "remote-videoGenerationNode", position: { x: 1700, y: 300 },
+          data: { model: JSON.stringify(["fixtureMedia", "wan3.0-video"]) } },
       ],
       edges: [
         { id: "batch", source: "mashup", sourceHandle: "videos", target: "qianchuan", targetHandle: "videos" },
+        { id: "wanImage", source: "imageGeneration", sourceHandle: "image", target: "wanGeneration", targetHandle: "in" },
+        { id: "wanVideo", source: "backgroundSource", sourceHandle: "video", target: "wanGeneration", targetHandle: "in" },
         ...videoNodes.map(({ id }, index) => ({ id: "segment" + index, source: id, sourceHandle: "video", target: "concat", targetHandle: "segment" + index })),
         ...referenceImages.map(id => ({ id: "link" + id, source: id, sourceHandle: "image", target: "imageGeneration", targetHandle: "in" })),
       ],
@@ -682,6 +688,14 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       const image = Reflect.get(globalThis, "document").querySelector(selector + ' img[alt="生成图片"]');
       return image?.naturalWidth === 64 && image.naturalHeight === 64;
     }, {}, imageNode);
+
+    const wanNode = '.vue-flow__node[data-id="wanGeneration"]';
+    await generating.page.locator(`${wanNode} .titleBar`).setTimeout(5000).click();
+    await generating.page.waitForFunction(selector => {
+      const hint = Reflect.get(globalThis, "document").querySelector(`${selector} .referenceHint`);
+      return ["混合参考", "图片 1/10 张", "视频 1/5 段", "音频 0/5 段", "合计最多 20 个", "视频、音频各合计最多 15 秒"]
+        .every(label => hint?.textContent.includes(label));
+    }, { timeout: 5000 }, wanNode);
 
     const concatPath = join(project.directory, (await savedNodeData("concat")).videoConcat.result.url);
     const readPixel = (path: string, seconds: string) => ffmpeg("-ss", seconds, "-i", path, "-vf", "crop=4:4:28:28,scale=1:1",
