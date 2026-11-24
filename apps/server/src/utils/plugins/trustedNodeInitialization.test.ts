@@ -478,6 +478,9 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     let backgroundRequests = 0;
     let ordinaryWeb = false;
     let modelCatalogUnavailable = false;
+    let trimReview: { request: { directory: string; operationId: string; source: string; start: number; end: number }; queued: boolean } | undefined;
+    let trimChecks = 0;
+    let trimSubmissions = 0;
     gateway.use((req, res, next) => {
       if (ordinaryWeb) res.locals.multiTenantWeb = true;
       for (const { cookie, assertion } of staff.values()) {
@@ -486,11 +489,18 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       if (req.method === "POST" && req.path === "/api/workspaces/files/prepareMashupZip") {
         res.once("finish", () => prepareResponses.push(res.statusCode));
       }
+      if (ordinaryWeb && req.method === "POST" && req.path === "/api/ffmpeg/trim") trimSubmissions++;
       if (req.method === "GET" && req.path === "/api/workspaces/files/mashupZip") {
         const index = nativeDownloads.push(0) - 1;
         res.once("finish", () => { nativeDownloads[index] = res.statusCode; });
       }
       next();
+    });
+    gateway.post("/api/ffmpeg/trim/status", express.json(), (request, response, next) => {
+      if (!ordinaryWeb || !trimReview) return next();
+      if (!Object.entries(trimReview.request).every(([key, value]) => request.body?.[key] === value)) return response.sendStatus(409);
+      trimChecks++;
+      return response.json({ code: 200, data: trimReview.queued ? { status: "pending", phase: "queued" } : { status: "notFound" } });
     });
     gateway.get("/api/ai/models", (_request, response) => {
       if (modelCatalogUnavailable) return response.status(503).json({ code: 503, message: "模型目录暂不可用" });
@@ -866,8 +876,15 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     const customer = await tenants.createUser("fixture-customer", customerPassword);
     const customerProject = { ...project, directory: join(root, "multiTenant", "workspaces", customer.id, "studio") };
     await mkdir(join(customerProject.directory, "assets"), { recursive: true });
-    await writeFile(join(customerProject.directory, "旧画布.json"), JSON.stringify({
-      toonflowCanvas: true, nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 },
+    const customerCanvas = join(customerProject.directory, "旧画布.json");
+    trimReview = { request: { directory: customerProject.directory, operationId: randomUUID(), source: sceneSource, start: 0, end: 1 }, queued: false };
+    const pendingTrim = { ...trimReview.request, ownerId: customer.id, canvasPath: "旧画布.json" };
+    const customerVideo = join(customerProject.directory, sceneSource);
+    await writeFile(customerVideo, sourceVideoBytes);
+    await writeFile(customerCanvas, JSON.stringify({
+      toonflowCanvas: true, edges: [], viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [{ id: "staleTrim", type: "remote-videoNode", position: { x: 220, y: 200 },
+        data: { pendingTrim, outputs: { video: { dataType: "VIDEO", value: { url: sceneSource, mimeType: "video/mp4" } } } } }],
     }));
     await tenants.writeUserSettings(customer.id, {
       ui: { language: "zh-CN", startupAnimation: false },
@@ -894,6 +911,32 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
         await tenantPage.locator('button[type="submit"]').click();
         expect((await catalogResponse).status()).toBe(simulateCatalogOutage ? 503 : 200);
         await tenantPage.waitForSelector(".workspacePage:not([inert]) .canvasPanel:not([inert]), .el-result", { visible: true, timeout: 15000 });
+        if (!simulateCatalogOutage) {
+          await tenantPage.locator('.vue-flow__node[data-id="staleTrim"] .titleBar').click();
+          await tenantPage.locator('xpath=//button[normalize-space(.)="截取片段"]').click();
+          const check = tenantPage.locator('xpath=//button[normalize-space(.)="检查并恢复" and not(@disabled)]');
+          const clear = tenantPage.locator('xpath=//button[normalize-space(.)="清除未提交记录"]');
+          const savedTrim = async () => JSON.parse(await readFile(customerCanvas, "utf8")).nodes[0].data.pendingTrim;
+          await check.click();
+          await clear.wait();
+          expect(await savedTrim()).toEqual(pendingTrim);
+          expect(trimChecks).toBe(1);
+
+          trimReview.queued = true;
+          await clear.click();
+          await check.wait();
+          expect(await savedTrim()).toEqual(pendingTrim);
+          expect(trimChecks).toBe(2);
+
+          trimReview.queued = false;
+          await check.click();
+          await clear.click();
+          await tenantPage.waitForSelector('.videoActionPanel', { hidden: true });
+          expect(await savedTrim()).toBeUndefined();
+          expect(await readFile(customerVideo)).toEqual(sourceVideoBytes);
+          expect(trimChecks).toBe(4);
+          expect(trimSubmissions).toBe(0);
+        }
         const result = await tenantPage.evaluate(async () => {
           const headers = { "x-toonflow-workspace": "1" };
           const balance = await fetch("/api/multiTenant/user/balance", { headers });
