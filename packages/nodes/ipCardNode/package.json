@@ -1,0 +1,32 @@
+{
+  "name": "@toonflow/node-ip-card",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite build --watch",
+    "typecheck": "vue-tsc --noEmit"
+  },
+  "peerDependencies": {
+    "vue": "^3.5.42",
+    "@vue-flow/core": "^1.48.2",
+    "element-plus": "^2.14.5"
+  },
+  "dependencies": {
+    "@resvg/resvg-wasm": "2.6.2",
+    "@toonflow/file": "workspace:*",
+    "@tabler/icons-vue": "^3.46.0",
+    "zod": "^4.6.2"
+  },
+  "devDependencies": {
+    "@toonflow/nodes-scaffold": "workspace:*",
+    "typescript": "~6.0.3",
+    "vite": "^8.2.2",
+    "vue-tsc": "^3.3.11"
+  },
+  "exports": {
+    "./render": "./src/render.ts",
+    "./preset": "./src/preset.ts"
+  }
+}
