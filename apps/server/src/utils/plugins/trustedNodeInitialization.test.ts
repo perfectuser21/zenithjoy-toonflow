@@ -349,10 +349,12 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     ].map(({ name, color, duration }) => {
       const files = Array.from({ length: 10 }, (_, index) => {
         const path = join(root, `${name}${String(index + 1).padStart(2, "0")}.mp4`);
-        const codec = name === "A" && index === 0
+        const hevc = name === "A" && index === 0;
+        const codec = hevc
           ? ["-c:v", "libx265", "-tag:v", "hvc1", "-x265-params", "log-level=error:pools=none:frame-threads=1"]
           : ["-c:v", "libx264"];
-        ffmpeg("-f", "lavfi", "-i", `color=${color}:size=64x64:rate=12`, "-vf",
+        const audio = hevc ? ["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-c:a", "aac"] : [];
+        ffmpeg("-f", "lavfi", "-i", `color=${color}:size=64x64:rate=12`, ...audio, "-vf",
           `drawbox=x=${index * 4}:y=0:w=4:h=12:color=white:t=fill`, "-t", duration, ...codec, "-bf", "0", path);
         return path;
       });
@@ -399,7 +401,7 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     `);
     const videoNodes = await Promise.all(groups.map(async ({ name, files }, index) => {
       const url = `assets/${name}.mp4`;
-      await writeFile(join(project.directory, url), await readFile(files[0]!));
+      await writeFile(join(project.directory, url), await readFile(files[name === "A" ? 1 : 0]!));
       return { id: name, type: "remote-videoNode", position: { x: 350 + index * 320, y: 1000 },
         data: { label: name, outputs: { video: { dataType: "VIDEO", value: { url, mimeType: "video/mp4" } } } } };
     }));
@@ -667,6 +669,10 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       throw Error("画布未保存验收产物");
     }
     const generating = await openCanvas();
+    let normalizations = 0;
+    generating.page.on("request", request => {
+      if (request.method() === "POST" && new URL(request.url()).pathname === "/api/workspaces/files/normalizeVideo") normalizations++;
+    });
     for (const { name, files } of groups) {
       const input = await generating.page.waitForSelector(`input[type=file][aria-label="${name} 组视频"]`, { timeout: 10000 });
       if (!input) throw Error(`找不到 ${name} 组视频入口`);
@@ -691,6 +697,7 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     const clips = saved.nodes.find(node => node.id === "mashup")?.data.mashup?.batch.results;
     if (!clips) throw Error("已保存画布缺少成片");
     expect(clips.map(clip => clip.name)).toEqual(names);
+    expect(normalizations).toBe(1);
     const originals = new Map(await Promise.all(clips.map(async clip => [clip.name, await readFile(join(project.directory, clip.url))] as const)));
     for (const index of [0, 49, 99]) {
       const path = join(project.directory, clips[index]!.url);
@@ -731,7 +738,20 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     const concatPath = join(project.directory, (await savedNodeData("concat")).videoConcat.result.url);
     const readPixel = (path: string, seconds: string) => ffmpeg("-ss", seconds, "-i", path, "-vf", "crop=4:4:28:28,scale=1:1",
       "-frames:v", "1", "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1");
-    expect(readPixel(concatPath, "0.1")).toEqual(readPixel(groups[0]!.files[0]!, "0.1"));
+    const mixed = join(project.directory, clips[0]!.url);
+    const [red, redGreen, redBlue] = readPixel(mixed, "0.1");
+    const [blueRed, blueGreen, blue] = readPixel(mixed, "0.4");
+    expect(red).toBeGreaterThan(220);
+    expect(Math.max(redGreen!, redBlue!)).toBeLessThan(40);
+    expect(blue).toBeGreaterThan(220);
+    expect(Math.max(blueRed!, blueGreen!)).toBeLessThan(40);
+    const originalMashup = z.object({ groups: z.array(z.object({ clips: z.array(z.object({ url: z.string() })) })) }).parse((await savedNodeData("mashup")).mashup);
+    expect(await readFile(join(project.directory, originalMashup.groups[0]!.clips[0]!.url))).toEqual(await readFile(groups[0]!.files[0]!));
+    const pcm = ffmpeg("-i", mixed, "-vn", "-ar", "8000", "-ac", "1", "-f", "s16le", "pipe:1");
+    expect(pcm.length).toBeGreaterThanOrEqual(12000);
+    expect(pcm.subarray(1600, 3200).some(value => value !== 0)).toBe(true);
+    expect(pcm.subarray(6400, 11200).every(value => value === 0)).toBe(true);
+    expect(readPixel(concatPath, "0.1")).toEqual(readPixel(groups[0]!.files[1]!, "0.1"));
     expect(readPixel(concatPath, "0.4")).toEqual(readPixel(groups[1]!.files[0]!, "0.1"));
     const generatedImage = await waitForSaved<string>(async () => (await savedNodeData("imageGeneration"))?.outputs?.image?.value.url);
     expect(await readFile(join(project.directory, generatedImage))).toEqual(png);
@@ -975,6 +995,10 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     }
     finally { await guidedDatabase.close(); }
     ffmpeg("-i", customerVideo, "-vf", "fps=30", "-c:v", "libx264", "-c:a", "copy", join(customerProject.directory, guidedSource));
+    const hevcSource = "assets/concatHevc.mp4";
+    await writeFile(join(customerProject.directory, hevcSource), await readFile(groups[0]!.files[0]!));
+    const longSource = "assets/concatOverLimit.mp4";
+    ffmpeg("-f", "lavfi", "-i", "color=red:size=64x64:rate=1:duration=121", "-c:v", "libx264", join(customerProject.directory, longSource));
     ordinaryWeb = true;
     const observed = [];
     for (const simulateCatalogOutage of [false, true]) {
@@ -1011,11 +1035,23 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
             const stale = await post(path, { ...scopedSource, expectedSourceRevision: "outdated-workspace-version" });
             const foreign = await post(path, { directory: input.foreign, videoPath: input.source, expectedSourceRevision: version });
             const raw = await post("/api/ffmpeg/execute", {});
-            return { status: analysis.status, payload, check: await check.json(), stale: await stale.json(), foreign: foreign.status, raw: raw.status };
-          }, { own: customerProject.directory, foreign: project.directory, source: guidedSource });
+            const normalizePath = "/api/workspaces/files/normalizeVideo";
+            const normalized = await post(normalizePath, { directory: input.own, path: input.hevc });
+            const normalizeForeign = await post(normalizePath, { directory: input.foreign, path: "assets/A.mp4" });
+            const normalizeEscape = await post(normalizePath, { directory: input.own, path: "../studio/assets/A.mp4" });
+            const normalizeLong = await post(normalizePath, { directory: input.own, path: input.long });
+            return {
+              status: analysis.status, payload, check: await check.json(), stale: await stale.json(), foreign: foreign.status, raw: raw.status,
+              normalized: { status: normalized.status, type: normalized.headers.get("Content-Type"), size: (await normalized.arrayBuffer()).byteLength },
+              normalizeDenied: [normalizeForeign.status, normalizeEscape.status, normalizeLong.status],
+            };
+          }, { own: customerProject.directory, foreign: project.directory, source: guidedSource, hevc: hevcSource, long: longSource });
           expect(guided.status).toBe(200);
           expect(guided.foreign).toBe(403);
           expect(guided.raw).toBe(403);
+          expect(guided.normalized).toEqual({ status: 200, type: "video/mp4", size: expect.any(Number) });
+          expect(guided.normalized.size).toBeGreaterThan(500);
+          expect(guided.normalizeDenied).toEqual([403, 400, 413]);
           expect(guided.check).toMatchObject({ data: { matches: true } });
           expect(guided.stale).toMatchObject({ data: { matches: false } });
           const { data: guidedResult } = z.object({ data: z.object({ scenes: z.array(z.object({ image: z.string() })) }) }).parse(guided.payload);

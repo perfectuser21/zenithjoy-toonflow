@@ -32,7 +32,7 @@ import { computed, onScopeDispose, ref, shallowRef, watchEffect } from "vue";
 import { IconMovie } from "@tabler/icons-vue";
 import { nodeSkeleton, uploadNodeFile, useNode, useNodeInputs, type NodeHandle, type NodeMediaValue } from "@toonflow/nodes-scaffold/runtime";
 import { useNodePersistence } from "@toonflow/nodes-scaffold/nodeDocument";
-import { concatVideo, maxConcatClips } from "@toonflow/node-shared/concatVideo";
+import { concatVideo, maxConcatClips, prepareConcatClip } from "@toonflow/node-shared/concatVideo";
 
 defineOptions({ inheritAttrs: false, icon: IconMovie });
 
@@ -119,7 +119,8 @@ async function run() {
       signal.throwIfAborted();
       progress.value = "正在读取第 " + (index + 1) + " 段";
       const bytes = await workspace.read(clip.url);
-      clips.push(new Blob([bytes], { type: clip.mimeType }));
+      const blob = new Blob([bytes], { type: clip.mimeType });
+      clips.push(await prepareConcatClip({ blob, directory, path: clip.url }, signal));
     }
     progress.value = "正在合成";
     const output = await concatVideo(clips, signal);

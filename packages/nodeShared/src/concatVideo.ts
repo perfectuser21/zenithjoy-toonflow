@@ -8,6 +8,33 @@ import {
 const workspaceFileLimit = 100 * 1024 * 1024;
 export const maxConcatClips = 6;
 
+export async function prepareConcatClip(
+  { blob, directory, path }: { blob: Blob; directory: string; path: string },
+  signal: AbortSignal,
+) {
+  signal.throwIfAborted();
+  if (!blob.size || blob.size > workspaceFileLimit) throw new Error("每个视频须为不超过 100 MB 的非空文件");
+  const input = new Input({ source: new BlobSource(blob), formats: [MP4, QTFF] });
+  try {
+    if (await input.canRead()) {
+      const [videos, audios] = await Promise.all([input.getVideoTracks(), input.getAudioTracks()]);
+      if (videos.length === 1 && await videos[0]?.getCodec() === "avc"
+        && (audios.length === 0 || audios.length === 1 && await audios[0]?.getCodec() === "aac")) return blob;
+    }
+  } finally { input.dispose(); }
+
+  const response = await fetch("/api/workspaces/files/normalizeVideo", {
+    method: "POST", headers: { "Content-Type": "application/json", "x-toonflow-workspace": "1" },
+    body: JSON.stringify({ directory, path }), signal,
+  });
+  if (!response.ok) {
+    const reason: unknown = await response.json().catch(() => null);
+    const message = reason && typeof reason === "object" && "message" in reason && typeof reason.message === "string" ? reason.message : "";
+    throw new Error(message || "无法转换素材编码");
+  }
+  return response.blob();
+}
+
 async function inspectClip(input: Input, position: number) {
   const label = `第 ${position} 段`;
   if (!await input.canRead()) throw new Error(`${label} 无法读取，请使用 MP4 或 MOV`);

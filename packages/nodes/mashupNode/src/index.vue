@@ -43,7 +43,7 @@ import { nodeSkeleton, uploadNodeFile, useNode, useNodeInputs, type NodeHandle }
 import { useNodePersistence } from "@toonflow/nodes-scaffold/nodeDocument";
 import { getMediaMimeType } from "@toonflow/node-shared/mediaTypes";
 import { combinationCount, groupNames, renderBatch, type MashupClip, type MashupGroup } from "./mashupBatch";
-import { concatVideo } from "@toonflow/node-shared/concatVideo";
+import { concatVideo, prepareConcatClip } from "@toonflow/node-shared/concatVideo";
 import { downloadZip } from "./mashupDownload";
 
 defineOptions({
@@ -161,6 +161,8 @@ async function run(first: boolean) {
     if (first || selectedIndex.value >= target) selectedIndex.value = 0;
     await saved.save(signal);
     const lastClip: { url: string; blob: Blob }[] = [];
+    const normalized = new Map<string, Blob>();
+    let normalizedBytes = 0;
     await renderBatch(snapshot, target, batch.results.length, async (clips, index) => {
       signal.throwIfAborted(); ensureCurrent(saved);
       progress.value = '正在生成 ' + (index + 1) + ' / ' + target;
@@ -168,7 +170,16 @@ async function run(first: boolean) {
       for (const [slot, clip] of clips.entries()) {
         signal.throwIfAborted();
         if (lastClip[slot]?.url !== clip.url) {
-          lastClip[slot] = { url: clip.url, blob: new Blob([await workspace.read(clip.url)], { type: clip.mimeType }) };
+          let blob = normalized.get(clip.url);
+          if (!blob) {
+            const original = new Blob([await workspace.read(clip.url)], { type: clip.mimeType });
+            blob = await prepareConcatClip({ blob: original, directory: saved.directory, path: clip.url }, signal);
+            if (blob !== original && normalizedBytes + blob.size <= 100 * 1024 * 1024) {
+              normalized.set(clip.url, blob);
+              normalizedBytes += blob.size;
+            }
+          }
+          lastClip[slot] = { url: clip.url, blob };
         }
         blobs.push(lastClip[slot].blob);
       }
