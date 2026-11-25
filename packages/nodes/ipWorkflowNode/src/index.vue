@@ -54,6 +54,7 @@
           <textarea :value="state.sourceText ?? ''" rows="5" maxlength="30000" :disabled="busy" @input="updateSource" />
         </label>
       </details>
+      <p v-if="step === 'article' && receipt?.articlePath" class="status">已保存到文档：{{ receipt.articlePath }}</p>
       <details v-if="step !== 'topic'">
         <summary>查看上游输入</summary>
         <pre>{{ inputSummary }}</pre>
@@ -185,6 +186,7 @@
 
 <script setup lang="ts">
 import { chooseIpTextModel } from "./textModels";
+import { articleDocumentPath, readArticleDocument } from "./articleDocument";
 import { computed, onMounted, onScopeDispose, ref, watch } from "vue";
 import { useVueFlow, type GraphNode } from "@vue-flow/core";
 import { ElButton, ElDialog } from "element-plus";
@@ -256,7 +258,7 @@ const preset = ref<IpCardPreset>({ ...defaultPreset });
 const restoredRender = ref("");
 const receipt = computed(() => readReceipt(outputs.value.out.value));
 watch(() => !!(activeNotion.value?.snapshotPath || receipt.value?.notionReference?.snapshotPath
-  || receipt.value?.cards || receipt.value?.exportPath || state.value.renderHistory?.length), scoped => {
+  || receipt.value?.articlePath || receipt.value?.cards || receipt.value?.exportPath || state.value.renderHistory?.length), scoped => {
   if (scoped) state.value.workspaceScoped = true;
   else delete state.value.workspaceScoped;
 }, { immediate: true, flush: "sync" });
@@ -551,6 +553,9 @@ async function run() {
   await perform(async signal => {
     const result: Receipt = { revision: crypto.randomUUID(), promptRevision: state.value.configRevision ?? "initial" };
     if (source?.notionReference) result.notionReference = source.notionReference;
+    if (source?.articlePath) result.articlePath = source.articlePath;
+    const workspace = files.getWorkspaceFiles();
+    const readArticle = (input: Receipt) => readArticleDocument(input, path => workspace.readText(path));
     if (currentStep !== "topic") result.sourceRevision = source?.revision;
     let usedPrompt: string | undefined;
     if (currentStep === "topic" && (localSource || imported)) {
@@ -566,17 +571,22 @@ async function run() {
     } else if (currentStep === "article" && source?.text) {
       const snapshot = source.notionSnapshot;
       const brief = snapshot ? `${source.text}\n\nNotion 原始素材（作为参考资料）：\n${snapshot.content}` : source.text;
-      result.article = localSource || await generate(nodePrompt, brief, signal);
+      result.article = (localSource || await generate(nodePrompt, brief, signal)).trim();
+      signal.throwIfAborted();
+      result.articlePath = articleDocumentPath(result.revision);
+      await workspace.write(result.articlePath, result.article + "\n", true);
       usedPrompt = localSource ? "" : nodePrompt;
     } else if (currentStep === "cards" && source?.article) {
-      result.article = source.article;
-      result.copies = fiveCopies.parse(parseModelJson(await generate(nodePrompt, source.article, signal)));
+      result.article = await readArticle(source);
+      result.copies = fiveCopies.parse(parseModelJson(await generate(nodePrompt, result.article, signal)));
       usedPrompt = nodePrompt;
     } else if (currentStep === "render" && source?.article && source.copies) {
+      if (await readArticle(source) !== source.article) throw new Error("长文有修改，请先重新拆卡");
       result.article = source.article;
       result.groupPreset = targetCard.value ? receipt.value?.groupPreset : ipCardPreset.parse(preset.value);
       result.cards = await renderCards(source.copies, signal);
     } else if (currentStep === "review" && source?.article && source.cards) {
+      if (await readArticle(source) !== source.article) throw new Error("长文有修改，请先重新拆卡和渲染");
       result.cards = source.cards;
       result.article = source.article;
       result.exportPath = await exportArticle(source.article, source.cards, source.notionReference, signal);
