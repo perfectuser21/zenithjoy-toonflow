@@ -162,7 +162,10 @@ export async function createApp({
     if (!info?.isFile() || info.size > 50 * 1024 * 1024) return res.sendStatus(404);
     const bytes = await readFile(file);
     if (bytes.byteLength > 50 * 1024 * 1024 || createHash("sha256").update(bytes).digest("hex") !== trustedWebHashes[name]) return res.sendStatus(404);
-    return res.set("Cache-Control", "no-store").type(extname(name)).send(bytes);
+    const cacheControl = /^assets\/[^/]+-[A-Za-z0-9_-]{8}\.(?:js|css)$/.test(name)
+      ? "public, max-age=31536000, immutable"
+      : "no-store";
+    return res.set("Cache-Control", cacheControl).type(extname(name)).send(bytes);
   });
   app.use(express.static(webRoot));
 
