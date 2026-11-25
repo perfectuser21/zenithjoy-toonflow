@@ -62,8 +62,9 @@
       <label v-if="canUseAi">文字模型
         <select v-model="modelKey" :disabled="busy">
           <option value="">选择模型</option>
-          <option v-for="model in models" :key="getNodeModelKey(model)" :value="getNodeModelKey(model)">{{ model.label }}</option>
+          <option v-for="model in models" :key="getNodeModelKey(model)" :value="getNodeModelKey(model)">{{ model.modelId }} · {{ model.label }}</option>
         </select>
+        <span v-if="!models.length" class="status">当前账号暂无可用的 GPT 文字模型</span>
       </label>
       <template v-if="step === 'render'">
         <label>改动范围
@@ -183,6 +184,7 @@
 </template>
 
 <script setup lang="ts">
+import { chooseIpTextModel } from "./textModels";
 import { computed, onMounted, onScopeDispose, ref, watch } from "vue";
 import { useVueFlow, type GraphNode } from "@vue-flow/core";
 import { ElButton, ElDialog } from "element-plus";
@@ -342,8 +344,10 @@ function showError(cause: unknown) {
 async function loadModels() {
   if (!executable.value || step.value === "review") return;
   try {
-    models.value = await ai.getModels();
-    if (!modelKey.value && models.value[0]) modelKey.value = getNodeModelKey(models.value[0]);
+    const catalog = (await ai.getModels()).map(model => ({ ...model, selectionKey: getNodeModelKey(model) }));
+    const { available, selected } = chooseIpTextModel(catalog, modelKey.value);
+    models.value = available;
+    if (selected !== modelKey.value) modelKey.value = selected;
   } catch (cause) {
     showError(cause);
   }
