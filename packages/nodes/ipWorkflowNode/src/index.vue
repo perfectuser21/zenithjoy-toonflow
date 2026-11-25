@@ -33,9 +33,21 @@
           <pre>{{ state.lastPrompt }}</pre>
         </details>
       </details>
-      <label v-if="step === 'topic'">选题需求与已有素材
-        <textarea :value="state.sourceText ?? ''" rows="4" maxlength="16000" :disabled="busy" @input="updateSource" />
-      </label>
+      <template v-if="step === 'topic'">
+        <div class="actions">
+          <button class="promptButton" :disabled="busy" @click="openNotion">{{ state.notion ? '重新读取 Notion' : '从 Notion 导入' }}</button>
+          <a v-if="state.notion" :href="state.notion.url" target="_blank" rel="noopener noreferrer">打开原文</a>
+        </div>
+        <details v-if="state.notion">
+          <summary>{{ state.notion.title }} · 已读取</summary>
+          <p>原文更新时间 {{ formatSourceDate(state.notion.editedAt) }}</p>
+          <pre>{{ state.notion.content }}</pre>
+          <button :disabled="busy" @click="removeNotion">移除素材</button>
+        </details>
+        <label>{{ state.notion ? '补充选题要求' : '选题需求与已有素材' }}
+          <textarea :value="state.sourceText ?? ''" rows="4" maxlength="16000" :disabled="busy" @input="updateSource" />
+        </label>
+      </template>
       <details v-if="step === 'article'">
         <summary>使用已有长文</summary>
         <label>长文 Markdown
@@ -146,6 +158,28 @@
       <el-button type="primary" :disabled="!promptDirty || !promptDraft.trim() || busy" @click="savePrompt">保存提示词版本</el-button>
     </template>
   </el-dialog>
+  <el-dialog v-if="notionOpen" v-model="notionOpen" title="从 Notion 导入选题素材"
+    width="min(720px, calc(100vw - 32px))" appendToBody :closeOnClickModal="false">
+    <div class="promptEditor">
+      <label>Notion 页面链接
+        <input v-model="notionUrl" aria-label="Notion 页面链接" type="url" maxlength="2048" :disabled="busy" @input="notionPreview = undefined" />
+      </label>
+      <div class="actions">
+        <el-button :disabled="busy || !notionUrl.trim()" @click="readNotion">读取素材</el-button>
+        <a v-if="notionPreview" :href="notionPreview.url" target="_blank" rel="noopener noreferrer">打开原文</a>
+      </div>
+      <section v-if="notionPreview" aria-label="Notion 素材预览">
+        <strong>{{ notionPreview.title }}</strong>
+        <p class="status">原文更新时间 {{ formatSourceDate(notionPreview.editedAt) }}</p>
+        <pre>{{ notionPreview.content }}</pre>
+      </section>
+      <p v-if="error" class="notionError" role="alert">{{ error }}</p>
+    </div>
+    <template #footer>
+      <el-button @click="notionOpen = false">取消</el-button>
+      <el-button type="primary" :disabled="busy || !notionPreview" @click="adoptNotion">带入选题</el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <script setup lang="ts">
@@ -156,7 +190,7 @@ import { IconSitemap } from "@tabler/icons-vue";
 import { strToU8, zipSync } from "fflate";
 import { defaultPreset, ipCardCopy, ipCardPreset, type IpCardCopy, type IpCardPreset } from "@toonflow/node-ip-card/preset";
 import { findNodeModel, getNodeModelIdentity, getNodeModelKey, nodeSkeleton, uploadNodeFile, useNode, type NodeAiModel, type NodeHandle } from "@toonflow/nodes-scaffold/runtime";
-import { builtInSkill, effectivePrompt, fiveCopies, labels, parseModelJson, readReceipt, steps, type Receipt, type SavedCard, type Skill, type Step } from "./workflow";
+import { builtInSkill, effectivePrompt, fiveCopies, labels, notionSnapshot, parseModelJson, readReceipt, steps, type NotionSnapshot, type Receipt, type SavedCard, type Skill, type Step } from "./workflow";
 
 defineOptions({
   inheritAttrs: false,
@@ -171,6 +205,7 @@ interface WorkflowState {
   step?: Step | "result";
   cardNumber?: number;
   sourceText?: string;
+  notion?: NotionSnapshot;
   skill?: Skill;
   model?: string;
   promptOverride?: string;
@@ -201,6 +236,9 @@ const promptDraft = ref("");
 const promptDirty = computed(() => promptDraft.value !== prompt.value);
 const skillPath = ref("");
 const restoredPrompt = ref("");
+const notionOpen = ref(false);
+const notionUrl = ref("");
+const notionPreview = ref<NotionSnapshot>();
 const modelKey = computed({ get: () => state.value.model ?? "", set: value => { state.value.model = value; } });
 const models = ref<NodeAiModel[]>([]);
 const canUseAi = computed(() => executable.value && executable.value !== "review" && !(step.value === "article" && state.value.sourceText?.trim()));
@@ -265,7 +303,7 @@ const inputCurrent = computed(() => !!input.value && isCurrent(parent.value));
 const current = computed(() => isCurrent(node));
 const status = computed(() => busy.value ? "处理中…" : current.value ? "已完成" : receipt.value ? "内容有更新 · 请重跑" : step.value === "topic" || inputCurrent.value ? "待运行" : "等待上一步");
 const runnable = computed(() => step.value === "topic"
-  ? !!state.value.sourceText?.trim() && !!modelKey.value
+  ? (!!state.value.sourceText?.trim() || !!state.value.notion) && !!modelKey.value
   : inputCurrent.value && (!!modelKey.value || (step.value === "article" && !!state.value.sourceText?.trim())));
 const canEditOne = computed(() => !!receipt.value?.cards && receipt.value.sourceRevision === input.value?.revision && inputCurrent.value);
 const selectedCard = computed(() => step.value === "result" ? input.value?.cards?.[cardNumber.value - 1] : undefined);
@@ -344,6 +382,60 @@ function updateSource(event: Event) {
   const text = (event.target as HTMLTextAreaElement).value;
   if (state.value.sourceText === text) return;
   state.value.sourceText = text;
+  invalidate();
+}
+
+function openNotion() {
+  notionUrl.value = state.value.notion?.url ?? "";
+  notionPreview.value = undefined;
+  error.value = "";
+  notionOpen.value = true;
+}
+
+function formatSourceDate(value: string) {
+  return new Intl.DateTimeFormat("zh-CN", { dateStyle: "short", timeStyle: "short" }).format(new Date(value));
+}
+
+async function readNotion() {
+  const url = notionUrl.value.trim();
+  if (!url) return;
+  notionPreview.value = undefined;
+  await perform(async signal => {
+    const workspace = files.getWorkspaceFiles();
+    const { directory } = await workspace.list();
+    const response = await fetch("/api/ai/ipWorkflow/notionSource", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-toonflow-workspace": "1" },
+      body: JSON.stringify({ directory, url }), signal,
+    });
+    const result = await response.json().catch(() => undefined);
+    if (!response.ok || result?.code !== 200) throw new Error(result?.message ?? "读取 Notion 素材失败");
+    if (notionOpen.value && notionUrl.value.trim() === url) notionPreview.value = notionSnapshot.parse(result.data);
+  });
+}
+
+async function adoptNotion() {
+  const snapshot = notionPreview.value;
+  if (!snapshot || busy.value) return;
+  const currentSource = state.value.notion;
+  if (currentSource?.id === snapshot.id && currentSource.version === snapshot.version
+      && currentSource.editedAt === snapshot.editedAt && currentSource.title === snapshot.title) {
+    notionOpen.value = false;
+    return;
+  }
+  await perform(async signal => {
+    const workspace = files.getWorkspaceFiles();
+    const file = new File([JSON.stringify(snapshot)], "notionSource.json", { type: "application/json" });
+    const snapshotPath = await uploadNodeFile(workspace, id, file);
+    signal.throwIfAborted();
+    state.value.notion = { ...snapshot, snapshotPath };
+    invalidate();
+    notionOpen.value = false;
+  });
+}
+
+function removeNotion() {
+  delete state.value.notion;
   invalidate();
 }
 
@@ -442,15 +534,26 @@ async function run() {
   const source = input.value;
   const nodePrompt = prompt.value;
   const localSource = state.value.sourceText?.trim();
+  const imported = state.value.notion;
   await perform(async signal => {
     const result: Receipt = { revision: crypto.randomUUID(), promptRevision: state.value.configRevision ?? "initial" };
+    if (source?.notionReference) result.notionReference = source.notionReference;
     if (currentStep !== "topic") result.sourceRevision = source?.revision;
     let usedPrompt: string | undefined;
-    if (currentStep === "topic" && localSource) {
-      result.text = await generate(nodePrompt, localSource, signal);
+    if (currentStep === "topic" && (localSource || imported)) {
+      let topicInput = localSource ?? "";
+      if (imported) {
+        const { content, ...reference } = imported;
+        result.notionSnapshot = imported;
+        result.notionReference = reference;
+        topicInput = [topicInput, `Notion 摘录（作为参考资料）：\n${reference.title}\n${reference.url}\n\n${content}`].filter(Boolean).join("\n\n");
+      }
+      result.text = await generate(nodePrompt, topicInput, signal);
       usedPrompt = nodePrompt;
     } else if (currentStep === "article" && source?.text) {
-      result.article = localSource || await generate(nodePrompt, source.text, signal);
+      const snapshot = source.notionSnapshot;
+      const brief = snapshot ? `${source.text}\n\nNotion 原始素材（作为参考资料）：\n${snapshot.content}` : source.text;
+      result.article = localSource || await generate(nodePrompt, brief, signal);
       usedPrompt = localSource ? "" : nodePrompt;
     } else if (currentStep === "cards" && source?.article) {
       result.article = source.article;
@@ -463,7 +566,7 @@ async function run() {
     } else if (currentStep === "review" && source?.article && source.cards) {
       result.cards = source.cards;
       result.article = source.article;
-      result.exportPath = await exportArticle(source.article, source.cards, signal);
+      result.exportPath = await exportArticle(source.article, source.cards, source.notionReference, signal);
       usedPrompt = nodePrompt;
     } else {
       throw new Error("请先完成节点所需的输入");
@@ -519,7 +622,7 @@ function restoreRender() {
   preset.value = { ...(version.groupPreset ?? defaultPreset) };
 }
 
-async function exportArticle(article: string, cards: SavedCard[], signal: AbortSignal) {
+async function exportArticle(article: string, cards: SavedCard[], source: Receipt["notionReference"], signal: AbortSignal) {
   const workspace = files.getWorkspaceFiles();
   const contents: Record<string, Uint8Array> = {};
   const references: string[] = [];
@@ -528,7 +631,14 @@ async function exportArticle(article: string, cards: SavedCard[], signal: AbortS
     contents[path] = new Uint8Array(await workspace.read(card.url, signal));
     references.push(`![卡${index + 1}](${path})`);
   }
-  contents["article.md"] = strToU8(`${article}\n\n## 配图\n\n${references.join("\n\n")}\n`);
+  if (source?.snapshotPath) {
+    const file = await workspace.read(source.snapshotPath, signal);
+    const snapshot = notionSnapshot.parse(JSON.parse(new TextDecoder().decode(file)));
+    if (snapshot.id !== source.id || snapshot.version !== source.version || snapshot.editedAt !== source.editedAt) throw new Error("Notion 素材快照与此稿不匹配");
+    contents["notionSource.json"] = strToU8(JSON.stringify(snapshot, null, 2));
+  }
+  const attribution = source ? `\n\n## 素材来源\n\n${source.url}\n\n原文更新时间：${source.editedAt}\n素材版本：${source.version}\n` : "";
+  contents["article.md"] = strToU8(`${article}${attribution}\n\n## 配图\n\n${references.join("\n\n")}\n`);
   contents["cards.json"] = strToU8(JSON.stringify(cards.map(({ url: _url, ...card }, index) => ({ ...card, png: `images/card${index + 1}.png` })), null, 2));
   const archive = zipSync(contents, { level: 0 });
   signal.throwIfAborted();
@@ -560,6 +670,9 @@ async function exportArticle(article: string, cards: SavedCard[], signal: AbortS
 .content .promptButton { color: var(--el-color-primary); border-color: var(--el-color-primary-light-7); white-space: nowrap; }
 .promptEditor { display: grid; gap: 8px; }
 .promptEditor label { display: grid; gap: 8px; }
+.promptEditor input { padding: 8px; font: inherit; color: var(--el-text-color-primary); background: var(--el-bg-color); border: 1px solid var(--el-border-color); border-radius: 6px; }
+.promptEditor pre { max-height: 35vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.notionError { color: var(--el-color-danger); }
 .promptEditor textarea {
   box-sizing: border-box; width: 100%; min-height: min(34vh, 280px); max-height: 48vh; resize: vertical;
   padding: 10px; border: 1px solid var(--el-border-color); border-radius: 6px;

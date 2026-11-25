@@ -49,11 +49,24 @@ const savedCard = z.strictObject({
 export const fiveCopies = z.array(ipCardCopy).length(5);
 export type SavedCard = z.infer<typeof savedCard>;
 
+const notionReference = z.strictObject({
+  id: z.uuid(),
+  url: z.string().regex(/^https:\/\/www\.notion\.so\/[a-f0-9]{32}$/),
+  title: z.string().min(1).max(240),
+  editedAt: z.iso.datetime(),
+  version: z.string().regex(/^[a-f0-9]{64}$/),
+  snapshotPath: z.string().regex(/^assets\/[\w-]+\/[\da-f-]{36}\.json$/i).optional(),
+});
+export const notionSnapshot = notionReference.extend({ content: z.string().min(1).max(16000) });
+export type NotionSnapshot = z.infer<typeof notionSnapshot>;
+
 const receipt = z.strictObject({
   revision: z.string(),
   sourceRevision: z.string().optional(),
   promptRevision: z.string(),
   article: z.string().optional(),
+  notionReference: notionReference.optional(),
+  notionSnapshot: notionSnapshot.optional(),
   text: z.string().optional(),
   copies: fiveCopies.optional(),
   cards: z.array(savedCard).length(5).optional(),
