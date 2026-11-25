@@ -346,8 +346,11 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     ].map(({ name, color, duration }) => {
       const files = Array.from({ length: 10 }, (_, index) => {
         const path = join(root, `${name}${String(index + 1).padStart(2, "0")}.mp4`);
+        const codec = name === "A" && index === 0
+          ? ["-c:v", "libx265", "-tag:v", "hvc1", "-x265-params", "log-level=error:pools=none:frame-threads=1"]
+          : ["-c:v", "libx264"];
         ffmpeg("-f", "lavfi", "-i", `color=${color}:size=64x64:rate=12`, "-vf",
-          `drawbox=x=${index * 4}:y=0:w=4:h=12:color=white:t=fill`, "-t", duration, "-c:v", "libx264", "-bf", "0", path);
+          `drawbox=x=${index * 4}:y=0:w=4:h=12:color=white:t=fill`, "-t", duration, ...codec, "-bf", "0", path);
         return path;
       });
       return { name, files };
