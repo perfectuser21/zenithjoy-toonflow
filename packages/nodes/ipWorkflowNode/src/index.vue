@@ -71,13 +71,16 @@
         <pre>{{ inputSummary }}</pre>
       </details>
 
-      <label v-if="canUseAi">文字模型
-        <select v-model="modelKey" :disabled="busy">
-          <option value="">选择模型</option>
-          <option v-for="model in models" :key="getNodeModelKey(model)" :value="getNodeModelKey(model)">{{ model.modelId }} · {{ model.label }}</option>
-        </select>
-        <span v-if="!models.length" class="status">当前账号暂无可用的 GPT 文字模型</span>
-      </label>
+      <p v-if="step === 'article' && lastTrialModel" class="status">最近试稿使用 {{ lastTrialModel }}</p>
+      <template v-if="canUseAi">
+        <label v-if="models.length">文字模型
+          <select v-model="modelKey" :disabled="busy">
+            <option v-if="!modelKey" value="">选择模型</option>
+            <option v-for="model in models" :key="getNodeModelKey(model)" :value="getNodeModelKey(model)">{{ model.modelId }} · {{ model.label }}</option>
+          </select>
+        </label>
+        <p v-else class="status">{{ loadingModels ? '正在读取文字模型…' : '当前工作区未接入 GPT 文字模型，暂时无法在线生成' }}</p>
+      </template>
       <template v-if="step === 'render'">
         <label>改动范围
           <select v-model="targetCard" :disabled="busy">
@@ -115,7 +118,7 @@
           </div>
         </details>
         <div class="actions">
-          <button :disabled="busy || !inputCurrent || !modelKey" @click="recommendStyle">AI 推荐版式</button>
+          <button :disabled="busy || !inputCurrent || !selectedModel" @click="recommendStyle">AI 推荐版式</button>
           <button :disabled="busy || !inputCurrent || !input?.copies" @click="run">渲染{{ targetCard ? `第 ${targetCard} 张` : '整组' }}</button>
         </div>
       </template>
@@ -224,7 +227,7 @@
 
 <script setup lang="ts">
 import { activeMountedSkill, appendSkillVersion } from "./skillMount";
-import { chooseIpTextModel } from "./textModels";
+import { chooseIpTextModel, ipTrialModelName } from "./textModels";
 import { articleDocumentPath, readArticleDocument } from "./articleDocument";
 import { computed, onMounted, onScopeDispose, ref, watch } from "vue";
 import { useVueFlow, type GraphNode } from "@vue-flow/core";
@@ -251,7 +254,7 @@ defineOptions({
   ] satisfies NodeHandle[],
 });
 
-interface ArticleTrial { path: string; source: string; model: string; skillName: string; skillVersion: string; }
+interface ArticleTrial { path: string; source: string; model: string; modelId?: string; skillName: string; skillVersion: string; }
 
 interface WorkflowState {
   step?: Step | "result" | "skillMount";
@@ -301,6 +304,10 @@ const skillBodyDraft = ref("");
 const skillSourceDraft = ref("");
 const comparisonOpen = ref(false);
 const comparison = ref<(ArticleTrial & { article: string })[]>([]);
+const lastTrialModel = computed(() => {
+  const trial = state.value.articleTrials?.at(-1);
+  return trial ? ipTrialModelName(trial.model, trial.modelId) : undefined;
+});
 const comparableTrials = computed(() => {
   const trials = state.value.articleTrials ?? [];
   const latest = trials.at(-1);
@@ -320,6 +327,8 @@ const activeNotion = computed(() => {
 });
 const modelKey = computed({ get: () => state.value.model ?? "", set: value => { state.value.model = value; } });
 const models = ref<NodeAiModel[]>([]);
+const loadingModels = ref(true);
+const selectedModel = computed(() => findNodeModel(models.value, modelKey.value));
 const canUseAi = computed(() => executable.value && executable.value !== "review" && !(step.value === "article" && state.value.sourceText?.trim()));
 const busy = ref(false);
 const error = ref("");
@@ -471,8 +480,8 @@ const inputCurrent = computed(() => !!input.value && isCurrent(parent.value));
 const current = computed(() => isCurrent(node));
 const status = computed(() => busy.value ? "处理中…" : current.value ? "已完成" : receipt.value ? "内容有更新 · 请重跑" : step.value === "topic" || inputCurrent.value ? "待运行" : "等待上一步");
 const runnable = computed(() => step.value === "topic"
-  ? (!!state.value.sourceText?.trim() || !!activeNotion.value) && !!modelKey.value
-  : inputCurrent.value && (!!modelKey.value || (step.value === "article" && !!state.value.sourceText?.trim())));
+  ? (!!state.value.sourceText?.trim() || !!activeNotion.value) && !!selectedModel.value
+  : inputCurrent.value && (!!selectedModel.value || (step.value === "article" && !!state.value.sourceText?.trim())));
 const canEditOne = computed(() => !!receipt.value?.cards && receipt.value.sourceRevision === input.value?.revision && inputCurrent.value);
 const selectedCard = computed(() => step.value === "result" ? input.value?.cards?.[cardNumber.value - 1] : undefined);
 const previewUrl = files.useFileUrl(selectedCard, showError);
@@ -500,6 +509,7 @@ function showError(cause: unknown) {
 
 async function loadModels() {
   if (!executable.value || step.value === "review") return;
+  loadingModels.value = true;
   try {
     const catalog = (await ai.getModels()).map(model => ({ ...model, selectionKey: getNodeModelKey(model) }));
     const { available, selected } = chooseIpTextModel(catalog, modelKey.value);
@@ -507,6 +517,8 @@ async function loadModels() {
     if (selected !== modelKey.value) modelKey.value = selected;
   } catch (cause) {
     showError(cause);
+  } finally {
+    loadingModels.value = false;
   }
 }
 
@@ -711,6 +723,7 @@ async function run() {
   const mountedSkill = attachedSkill.value;
   const mountedSkillVersion = mountedSkill?.version;
   const selectedTextModel = modelKey.value;
+  const actualModelId = selectedModel.value?.modelId;
   const localSource = state.value.sourceText?.trim();
   const imported = activeNotion.value;
   await perform(async signal => {
@@ -741,7 +754,7 @@ async function run() {
       await workspace.write(result.articlePath, result.article + "\n", true);
       if (!localSource && mountedSkill && !state.value.promptText && !state.value.promptOverride) {
         signal.throwIfAborted();
-        const trial = { path: result.articlePath, source: source.revision, model: selectedTextModel, skillName: mountedSkill.name, skillVersion: mountedSkill.version };
+        const trial = { path: result.articlePath, source: source.revision, model: selectedTextModel, modelId: actualModelId, skillName: mountedSkill.name, skillVersion: mountedSkill.version };
         state.value.articleTrials = [...(state.value.articleTrials ?? []).slice(-11), trial];
       }
       usedPrompt = localSource ? "" : nodePrompt;
