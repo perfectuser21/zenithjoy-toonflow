@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import type { Application, Request, Response } from "express";
-import { createMultiTenant } from "@toonflow/multi-tenant-auth";
+import { adminWebSessionLifetimeMs, createMultiTenant } from "@toonflow/multi-tenant-auth";
 import type { AuthIdentity, ListUserOptions } from "@toonflow/multi-tenant-auth";
 import { createSourceMapping } from "@toonflow/multi-tenant-source-mapping";
 import type { SourceMapping } from "@toonflow/multi-tenant-source-mapping/config";
@@ -169,7 +169,7 @@ export async function registerUser(req: Request, res: Response, userName: string
   assertUserRequest(req);
   const result = await accessControl(() => control.register(userName, password));
   await ensureProjectQuota(result.user.id, "enroll");
-  res.cookie("toonflowWebSession", result.token, { ...cookieOptions(req, "/"), maxAge: 8 * 60 * 60 * 1000 });
+  res.cookie("toonflowWebSession", result.token, cookieOptions(req, "/"));
   return { user: result.user };
 }
 
@@ -177,7 +177,8 @@ export async function loginUser(req: Request, res: Response, userName: string, p
   assertUserRequest(req);
   const result = await accessControl(() => control.loginWeb(userName, password));
   if (result.user.role === "user") await ensureProjectQuota(result.user.id, "enroll");
-  res.cookie("toonflowWebSession", result.token, { ...cookieOptions(req, "/"), maxAge: 8 * 60 * 60 * 1000 });
+  const options = cookieOptions(req, "/");
+  res.cookie("toonflowWebSession", result.token, result.user.role === "admin" ? { ...options, maxAge: adminWebSessionLifetimeMs } : options);
   return { user: result.user };
 }
 
@@ -189,7 +190,7 @@ export async function loginHostWeb(req: Request, res: Response) {
     throw Object.assign(new Error("主机身份验证失败"), { status: 403 });
   }
   const result = await accessControl(() => control.loginHostWeb());
-  res.cookie("toonflowWebSession", result.token, { ...cookieOptions(req, "/"), maxAge: 8 * 60 * 60 * 1000 });
+  res.cookie("toonflowWebSession", result.token, { ...cookieOptions(req, "/"), maxAge: adminWebSessionLifetimeMs });
   return { user: result.user };
 }
 

@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from "@toonflow/file";
 import type { ModelMap, ModelType } from "@toonflow/multi-tenant-gateway";
 import express from "express";
@@ -6,7 +6,7 @@ import { unzipSync } from "fflate";
 import { z } from "zod";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
-import { createHash, generateKeyPairSync, randomUUID, sign } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from "node:crypto";
 import { once } from "node:events";
 import { createServer } from "node:https";
 import { join } from "node:path";
@@ -191,6 +191,57 @@ test("the four exported MP4s contain the selected pictures and original audio in
     await rm(root, { recursive: true, force: true });
   }
 }, 30000);
+
+test("ordinary creator sessions survive eight hours and still honor revocation", async () => {
+  const { createMultiTenant } = await import("@toonflow/multi-tenant-auth");
+  const { openDatabase } = await import("@toonflow/multi-tenant-db");
+  const root = await mkdtemp(join(tmpdir(), "toonflowCreatorSessions"));
+  let now = Date.now();
+  const clock = spyOn(Date, "now").mockImplementation(() => now);
+  try {
+    const auth = createMultiTenant(root);
+    const password = "fixture-password";
+    await auth.setup("session-admin", password);
+    const registered = await auth.register("session-creator", password);
+    const signedIn = await auth.loginWeb(registered.user.userName, password);
+    const signedOut = await auth.loginWeb(registered.user.userName, password);
+    const admin = await auth.loginWeb("session-admin", password);
+    const host = await auth.loginHostWeb();
+
+    const legacy = randomBytes(32).toString("hex");
+    const db = await openDatabase(root);
+    if (!db) throw Error("会话验收缺少数据库");
+    const eightHours = 8 * 60 * 60 * 1000;
+    await db.createWebSession({ tokenHash: createHash("sha256").update(legacy).digest("hex"), userId: registered.user.id,
+      role: "user", expiresAt: now + eightHours, authVersion: 0 });
+
+    now += eightHours - 1;
+    expect(await auth.authenticateWeb(legacy)).toEqual(registered.user);
+    expect(await auth.authenticateWeb(admin.token)).toEqual(admin.user);
+    expect(await auth.authenticateWeb(host.token)).toEqual(host.user);
+
+    now += 1;
+    expect(await auth.authenticateWeb(signedIn.token)).toEqual(signedIn.user);
+    expect(await auth.authenticateWeb(registered.token)).toEqual(registered.user);
+    expect(await auth.authenticateWeb(legacy)).toBeNull();
+    expect(await auth.authenticateWeb(admin.token)).toBeNull();
+    expect(await auth.authenticateWeb(host.token)).toBeNull();
+
+    await auth.logoutWeb(signedOut.token);
+    expect(await auth.authenticateWeb(signedOut.token)).toBeNull();
+    await auth.setUserDisabled(registered.user.id, true);
+    expect(await auth.authenticateWeb(signedIn.token)).toBeNull();
+    await auth.setUserDisabled(registered.user.id, false);
+    expect(await auth.authenticateWeb(signedIn.token)).toBeNull();
+    const afterEnable = await auth.loginWeb(registered.user.userName, password);
+    expect(await auth.authenticateWeb(afterEnable.token)).toEqual(registered.user);
+    await auth.resetUserPassword(registered.user.id, "fixture-reset-password");
+    expect(await auth.authenticateWeb(afterEnable.token)).toBeNull();
+  } finally {
+    clock.mockRestore();
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("platform image routes charge customer points and exempt administrators", async () => {
   const { createMultiTenant } = await import("@toonflow/multi-tenant-auth");
@@ -1135,6 +1186,8 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
         const catalogResponse = tenantPage.waitForResponse(response => new URL(response.url()).pathname === "/api/ai/models");
         await tenantPage.locator('button[type="submit"]').click();
         expect((await catalogResponse).status()).toBe(simulateCatalogOutage ? 503 : 200);
+        const sessionCookie = (await context.cookies()).find(cookie => cookie.name === "toonflowWebSession");
+        expect(sessionCookie?.session).toBe(true);
         await tenantPage.waitForSelector(".workspacePage:not([inert]) .canvasPanel:not([inert]), .el-result", { visible: true, timeout: 15000 });
         if (!simulateCatalogOutage) {
           const guided = await tenantPage.evaluate(async input => {
