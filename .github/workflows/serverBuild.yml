@@ -343,6 +343,6 @@ jobs:
 
           unittest.main()
           PY
-          bun test apps/server/src/utils/plugins/trustedNodeInitialization.test.ts
+          bun test apps/server/src/utils/plugins/trustedNodeInitialization.test.ts packages/nodes/frameAnalysisNode/tests/remakeMovieOptions.test.ts
       - name: Test simultaneous clip previews
         run: bun test apps/server/src/utils/media/trimReadQueue.test.ts

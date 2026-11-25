@@ -1,7 +1,7 @@
 <template>
   <el-dialog v-model="visible" title="视频翻拍" width="850px" class="nodrag nopan" appendToBody destroyOnClose>
     <div class="remakeBody" @pointerdown.stop @dblclick.stop>
-      <nav class="remakeStages" aria-label="翻拍步骤">
+      <nav v-if="!current?.productSwap" class="remakeStages" aria-label="翻拍步骤">
         <button v-for="(label, index) in ['分析原片', '生成样张', '生成成片']" :key="label" type="button"
           :disabled="!!activity || index > 0 && !current?.planApproved"
           :aria-current="stage === index ? 'step' : undefined" @click="stage = index">{{ index + 1 }}. {{ label }}</button>
@@ -18,6 +18,10 @@
           <el-button :type="savedToReuse ? 'default' : 'primary'" :loading="activity === 'analysis'" :disabled="!source || !analysisModel || !!activity || locked" @click="analyze">
             {{ current || savedToReuse ? "重新分析原片" : "分析原片" }}
           </el-button>
+        </div>
+        <div v-if="!current" class="remakeActions productSwapActions">
+          <input ref="productInput" type="file" accept="image/png,image/jpeg,image/webp" hidden aria-label="新商品参考图" @change="selectProductReference" />
+          <el-button :disabled="!source || !!activity" @click="productInput?.click()">一键换品</el-button>
         </div>
         <template v-if="current">
           <p class="remakeSummary">{{ current.analysis.scenes.length }} 段 · {{ current.groups.length }} 组背景 · {{ current.analysis.duration.toFixed(2) }} 秒</p>
@@ -98,10 +102,11 @@
           </el-select>
           <el-button v-if="current.job?.phase === 'review'" type="primary" :loading="activity === 'video'" :disabled="!!activity || !!current.job.retry" @click="generateMovie('finish')">合成并导出</el-button>
           <el-button v-else type="primary" :loading="activity === 'video'" :disabled="!!activity || current.job?.phase === 'completed' || !current.job && (!videoModel || !samplesReady)" @click="generateMovie()">
-            {{ current.job ? "复查成片任务" : "生成成片" }}
+            {{ current.job ? "复查成片任务" : current.productSwap ? "生成换品视频" : "生成成片" }}
           </el-button>
         </div>
-        <p class="remakeNote">使用已确认背景生成各镜头，再按原切点拼接并保留原音轨。请核对费用和生成后的商品、手部与字幕。</p>
+        <p v-if="current.productSwap" class="remakeNote">已准备 {{ current.analysis.scenes.length }} 个镜头。按原切点合成并保留原音轨。成片请复核商品、手部、字幕及口播里的商品名称。</p>
+        <p v-else class="remakeNote">使用已确认背景生成各镜头，再按原切点拼接并保留原音轨。请核对费用和生成后的商品、手部与字幕。</p>
         <p v-if="current.job" class="remakeSummary">已完成 {{ current.job.parts.filter(part => part.state === "succeeded").length }}/{{ current.shots.length }} 段</p>
         <el-button v-if="current.job?.retry && (current.job.phase === 'review' || current.job.phase === 'completed')" :disabled="!!activity" @click="generateMovie()">复查重做任务</el-button>
         <details v-if="current.job?.parts.length" class="remakeParts" open>
@@ -150,7 +155,8 @@ const savedToReuse = computed(() => {
     || current.value?.shots.some(shot => shot.caption || shot.productPrompt)) return;
   return candidate.data;
 });
-const stage = ref(current.value?.job ? 2 : current.value?.planApproved ? 1 : 0);
+const stage = ref(current.value?.job || current.value?.productSwap ? 2 : current.value?.planApproved ? 1 : 0);
+const productInput = ref<HTMLInputElement>();
 const message = ref("");
 const failure = ref("");
 const activity = ref<"analysis" | "prompts" | "samples" | "video">();
@@ -168,7 +174,7 @@ const canCompare = computed(() => imageModel.value?.mode?.includes("multiReferen
 const videoModel = computed(() => findNodeModel(videoModels.value, videoModelKey.value));
 const planReady = computed(() => !!current.value?.groups.length && current.value.transcript.kind !== "missing" && current.value.groups.every(group => !!group.prompt.trim())
   && current.value.shots.every(shot => shot.group !== null && !!shot.productPrompt));
-const samplesReady = computed(() => planReady.value && current.value?.planApproved && current.value.groups.every(group => !!group.picture && !group.task));
+const samplesReady = computed(() => !!current.value?.productSwap || planReady.value && current.value?.planApproved && current.value.groups.every(group => !!group.picture && !group.task));
 const unmade = computed(() => current.value?.groups.filter(group => !group.picture || group.task?.kind === "plate").length ?? 0);
 const locked = computed(() => !!state.value?.job || state.value?.groups.some(group => !!group.task));
 const originalUrls = ref<Record<number, string>>({});
@@ -195,7 +201,7 @@ watch(() => visible.value, value => { if (value) void loadModels(); }, { immedia
 watch(() => props.source?.url, () => {
   operation?.abort();
   previewPart.value = undefined;
-  stage.value = current.value?.job ? 2 : current.value?.planApproved ? 1 : 0;
+  stage.value = current.value?.job || current.value?.productSwap ? 2 : current.value?.planApproved ? 1 : 0;
   message.value = "";
   failure.value = "";
 });
@@ -295,6 +301,37 @@ function draftFromAnalysis(source: string, binding: { directory: string; canvasP
     transcript: { kind: "missing", reason: "尚未转录原片文案" },
     shots: analysis.scenes.map(scene => ({ id: scene.index, group: null, evidence: "待复核", caption: "", productPrompt: "" })),
     groups: [], product: "", style: "", planApproved: false,
+  });
+}
+
+function selectProductReference(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  const source = props.source;
+  if (!file || !source || current.value || activity.value) return;
+  const suffix = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" }[file.type];
+  if (!suffix || !file.size || file.size > 12 * 1024 * 1024) {
+    failure.value = "请选择 12 MiB 以内的 PNG、JPG 或 WebP 商品参考图";
+    return;
+  }
+  void run("analysis", async signal => {
+    const binding = persistence(source.url);
+    message.value = "准备原视频镜头";
+    const analysis = await callRemakeApi("analyze", { directory: binding.directory, videoPath: source.url }, remakeAnalysisSchema, signal);
+    if (analysis.scenes.length > 24) throw new Error("一键换品最多支持 24 个镜头，请先截取需要换品的片段");
+    signal.throwIfAborted();
+    persistence(source.url);
+    const path = await files.uploadFile(new File([file], `replacement.${suffix}`, { type: file.type }));
+    signal.throwIfAborted();
+    const view = draftFromAnalysis(source.url, binding, analysis);
+    view.productSwap = { reference: { path, mimeType: file.type } };
+    const previous = state.value;
+    state.value = view;
+    try { await save(state.value, signal); }
+    catch (error) { state.value = previous; throw error; }
+    stage.value = 2;
+    message.value = "新商品参考图已保存。请选择模型生成换品视频。";
   });
 }
 
@@ -583,7 +620,7 @@ async function completeMovie(path: string, view: RemakeState, signal: AbortSigna
   if (!nodeTypes?.value?.["remote-videoNode"]) throw new Error("请启用视频节点插件，再复查成片任务");
   if (!findNode(job.outputId)) addNodes({
     id: job.outputId, type: "remote-videoNode", position: { x: node.computedPosition.x + (node.dimensions.width || 320) + 80, y: node.computedPosition.y },
-    data: { label: "翻拍成片", outputs: { video: { dataType: "VIDEO", value: { url: path, mimeType: "video/mp4" } } } },
+    data: { label: view.productSwap ? "换品成片" : "翻拍成片", outputs: { video: { dataType: "VIDEO", value: { url: path, mimeType: "video/mp4" } } } },
   });
   const phase = job.phase;
   job.result = path;

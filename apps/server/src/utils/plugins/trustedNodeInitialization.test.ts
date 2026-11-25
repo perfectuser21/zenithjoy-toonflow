@@ -663,6 +663,8 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     let backgroundRequests = 0;
     let ordinaryWeb = false;
     let modelCatalogUnavailable = false;
+    const swapRequests: { operation: string; body: Record<string, unknown> }[] = [];
+    let swapFixture: { cuts: number[]; output: string } | undefined;
     let trimReview: { request: { directory: string; operationId: string; source: string; start: number; end: number }; state: "notFound" | "queued" | "ready" } | undefined;
     let trimChecks = 0;
     let trimSubmissions = 0;
@@ -696,6 +698,29 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       return response.json({ code: 200, data: [{
         providerId: "backgroundFixture", providerLabel: "验收", label: "背景模型", modelId: reviewModel, protocol: "openai-completions",
       }] });
+    });
+    gateway.get("/api/ai/media/models", (_request, response, next) => {
+      if (!swapFixture) return next();
+      return response.json({ code: 200, data: [{
+        providerId: "multiTenant", modelId: "fixture-swap", label: "换品验收模型", type: "video",
+        mode: [["imageReference:1", "videoReference:1"]],
+      }] });
+    });
+    gateway.post("/api/ai/media/background/:operation", express.json(), (request, response, next) => {
+      const operation = String(request.params.operation);
+      if (!swapFixture || operation === "analyze") return next();
+      const { cuts, output } = swapFixture;
+      const confirmed = swapRequests.some(entry => entry.operation === "confirm");
+      swapRequests.push({ operation, body: request.body });
+      const stage = operation === "finish" ? "completed" : operation === "confirm" || confirmed ? "confirmed" : "prepared";
+      const parts = cuts.slice(1).map((endSeconds, index) => ({
+        startSeconds: cuts[index], endSeconds,
+        state: stage === "prepared" ? "pending" : "succeeded",
+        ...(stage !== "prepared" ? { resultPath: output } : {}),
+      }));
+      return response.json({ code: 200, data: {
+        jobId: request.body.jobId, stage, parts, ...(stage === "completed" ? { resultPath: output } : {}),
+      } });
     });
     const sentReasoningBudgets: unknown[] = [];
     const { createApp } = await import("../../app");
@@ -1358,6 +1383,66 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
           expect(await readFile(customerVideo)).toEqual(sourceVideoBytes);
           expect(trimChecks).toBe(7);
           expect(trimSubmissions).toBe(0);
+
+          const swapCanvas = JSON.parse(await readFile(customerCanvas, "utf8"));
+          swapCanvas.nodes = [
+            { id: "swapVideo", type: "remote-videoNode", position: { x: 130, y: 200 },
+              data: { outputs: { video: { dataType: "VIDEO", value: { url: guidedSource, mimeType: "video/mp4" } } } } },
+            { id: "customerSwap", type: "remote-frameAnalysisNode", position: { x: 450, y: 200 },
+              data: { frameAnalysis: { aiEnabled: false } } },
+          ];
+          swapCanvas.edges = [{ id: "swapHandoff", source: "swapVideo", sourceHandle: "video", target: "customerSwap", targetHandle: "in" }];
+          await writeFile(customerCanvas, JSON.stringify(swapCanvas));
+          let swapPage = await context.newPage();
+          await swapPage.goto(`${origin}/#/workspace`, { waitUntil: "domcontentloaded" });
+          const swapOutput = "assets/swapFixture.mp4";
+          await writeFile(join(customerProject.directory, swapOutput), await readFile(join(customerProject.directory, guidedSource)));
+          const openSwap = async () => {
+            await swapPage.locator('.vue-flow__node[data-id="customerSwap"] .titleBar').setTimeout(8000).click();
+            await swapPage.locator('xpath=//div[@data-id="customerSwap"]//button[normalize-space(.)="视频翻拍" and not(@disabled)]').setTimeout(5000).click().catch(async error => {
+              const node = await swapPage.$eval('.vue-flow__node[data-id="customerSwap"]', element => element.textContent);
+              throw new Error(`换品节点未就绪：${node}`, { cause: error });
+            });
+          };
+          const readSwap = async () => {
+            const { nodes } = JSON.parse(await readFile(customerCanvas, "utf8"));
+            return nodes.find((node: { id: string }) => node.id === "customerSwap")?.data?.guidedRemake;
+          };
+          await openSwap();
+          await swapPage.waitForSelector('xpath=//button[normalize-space(.)="一键换品" and not(@disabled)]', { timeout: 5000 });
+          const replacement = join(customerProject.directory, guidedResult.scenes[1]!.image);
+          const productInput = await swapPage.waitForSelector('input[aria-label="新商品参考图"]');
+          if (!productInput) throw new Error("换品入口缺少商品参考图");
+          await productInput.toElement("input").then(input => input.uploadFile(replacement));
+          await swapPage.waitForSelector('xpath=//*[@role="status" and contains(.,"新商品参考图已保存")]', { timeout: 12000 });
+          const swap = await readSwap();
+          expect(swap.source).toBe(guidedSource);
+          expect(swap.analysis.scenes).toHaveLength(3);
+          expect(await readFile(join(customerProject.directory, swap.productSwap.reference.path))).toEqual(await readFile(replacement));
+          expect(swapRequests).toEqual([]);
+          swapFixture = { cuts: [0, ...swap.analysis.scenes.slice(1).map((shot: { start: number }) => shot.start), swap.analysis.scenes.at(-1).end], output: swapOutput };
+          await swapPage.close();
+          swapPage = await context.newPage();
+          await swapPage.goto(`${origin}/#/workspace`, { waitUntil: "domcontentloaded" });
+          await openSwap();
+          await swapPage.locator('xpath=//button[normalize-space(.)="生成换品视频" and not(@disabled)]').setTimeout(8000).click();
+          await swapPage.waitForSelector('.el-message-box', { visible: true, timeout: 5000 });
+          expect(await swapPage.$eval('.el-message-box', element => element.textContent)).toContain("生成 3 段换品视频");
+          expect(swapRequests).toEqual([]);
+          await swapPage.locator('.el-message-box .el-button--primary').click();
+          await swapPage.locator('xpath=//button[normalize-space(.)="合成并导出" and not(@disabled)]').setTimeout(10000).click();
+          await swapPage.waitForSelector('xpath=//*[@role="status" and contains(.,"成片已合成并放到画布")]', { timeout: 8000 });
+          expect(swapRequests.map(entry => entry.operation)).toEqual(["prepare", "status", "confirm", "status", "finish"]);
+          expect(swapRequests[0]?.body).toMatchObject({ videoPath: guidedSource, cuts: swapFixture.cuts.slice(1, -1) });
+          const sent = z.object({ shots: z.array(z.object({ image: z.unknown(), prompt: z.string() })) }).parse(swapRequests[2]?.body);
+          expect(sent.shots.map(({ image }) => image)).toEqual(Array(3).fill(swap.productSwap.reference));
+          expect(sent.shots.every(({ prompt }) => prompt.includes("只替换原视频中出现的商品"))).toBe(true);
+          const completedSwap = await readSwap();
+          expect(completedSwap.job).toMatchObject({ phase: "completed", result: swapOutput });
+          const savedOutput = JSON.parse(await readFile(customerCanvas, "utf8")).nodes.find((node: { id: string }) => node.id === completedSwap.job.outputId);
+          expect(savedOutput?.data).toMatchObject({ label: "换品成片", outputs: { video: { value: { url: swapOutput } } } });
+          await swapPage.close();
+          swapFixture = undefined;
         }
         const result = await tenantPage.evaluate(async () => {
           const headers = { "x-toonflow-workspace": "1" };

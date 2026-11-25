@@ -1,3 +1,4 @@
+import { remakeMovieOptions } from "./remakeMovieOptions";
 import { callRemakeApi, remakeJobSchema, type RemakeState } from "./remakeWorkflow";
 
 type MovieAction = "continue" | "finish" | "retry";
@@ -14,14 +15,10 @@ export async function runRemakeMovie(input: {
   progress(message: string): void;
 }) {
   const { action, partIndex, view, modelId, signal, confirmCharge, save, completeMovie, progress } = input;
-  const options = view.shots.map(shot => {
-    const group = view.groups.find(item => item.id === shot.group);
-    if (!group?.picture) throw new Error("每组背景先生成一张样张");
-    return { image: group.picture, prompt: `仅使用背景参考换景，保持原镜头时间、真实人物与商品、手部和字幕。商品展示要求：${shot.productPrompt}` };
-  });
+  const options = remakeMovieOptions(view);
   if (!view.job) {
     if (!modelId) throw new Error("请选择成片模型");
-    if (!await confirmCharge(`按原切点生成 ${options.length} 段视频。每段将按模型规则计费。`, signal)) return;
+    if (!await confirmCharge(`按原切点生成 ${options.length} 段${view.productSwap ? "换品" : ""}视频。每段将按模型规则计费。`, signal)) return;
     view.job = { id: crypto.randomUUID(), outputId: crypto.randomUUID(), modelId, phase: "preparing", parts: [] };
     try { await save(view, signal); } catch (error) { view.job = undefined; throw error; }
   }
