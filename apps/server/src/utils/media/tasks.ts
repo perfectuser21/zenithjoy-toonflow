@@ -286,6 +286,10 @@ async function resumable(task: MediaTask) {
   return true;
 }
 
+function hasUnknownMinimaxH3Submission(checkpoint: MediaGenerationCheckpoint) {
+  return checkpoint.providerData?.kind === minimaxH3ProviderId && checkpoint.providerData.state === "submitting";
+}
+
 function publicData(task: MediaTask) {
   const data = task.record.checkpoint.providerData;
   if (!data || task.blobs.length || task.prepared?.blobs.length) return undefined;
@@ -362,6 +366,10 @@ async function releaseCharge(task: MediaTask, notSubmitted = false) {
   const { record } = task;
   if (!record.ownerUserId || task.chargeFinalized || !record.chargeId && !record.modelRouteCipher) return;
   if (record.chargeStatus === "settled" || record.chargeStatus === "released") { task.chargeFinalized = true; return; }
+  if (record.state === "cancelled" && hasUnknownMinimaxH3Submission(record.checkpoint)) {
+    await finalizeCharge(task, { kind: "unknown" });
+    return;
+  }
   if (!record.chargeId) {
     let existing;
     try { existing = await modelGateway.getCharge(record.taskId, record.ownerUserId); }
@@ -810,11 +818,15 @@ export async function cancel(cwd: string, taskIds: string[], owner?: AuthIdentit
         await reconcileCharge(task);
         return;
       }
-      if (task.record.checkpoint.providerData?.kind === minimaxH3ProviderId) {
+      const abandonUnknown = task.record.state === "interrupted" && !task.active
+        && hasUnknownMinimaxH3Submission(task.record.checkpoint);
+      if (task.record.checkpoint.providerData?.kind === minimaxH3ProviderId && !abandonUnknown) {
         invalid("MiniMax H3 任务已进入付费提交，需查询原供应商任务后确认结果", 409);
       }
       task.record.state = "cancelled";
-      task.record.result = error<GeneratedMedia[]>("生成已取消", null, 499);
+      task.record.result = error<GeneratedMedia[]>(abandonUnknown ? "已放弃画布任务，供应商提交状态仍待核查" : "生成已取消", null, 499);
+      if (abandonUnknown && task.record.chargeId && !task.chargeFinalized
+        && task.record.chargeStatus !== "released" && task.record.chargeStatus !== "settled") task.record.chargeStatus = "pendingReview";
       // 取消先落盘；包括尚未收到提交的 ID，防止乱序请求稍后创建付费任务。
       await persist(task, exclusive);
       await releaseCharge(task);

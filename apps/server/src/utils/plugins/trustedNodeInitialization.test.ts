@@ -266,13 +266,15 @@ test("platform image routes charge customer points and exempt administrators", a
   }
 });
 
-test("the MiniMax H3 platform catalog, quote and wallet agree on the 768P pilot rate", async () => {
+test("the MiniMax H3 platform reconciles the 768P quote and holds funds when an unknown submission is abandoned", async () => {
   const root = await mkdtemp(join(tmpdir(), "toonflowH3Points"));
   const server = fileURLToPath(new URL("../../../", import.meta.url));
   try {
     const output = execFileSync(process.execPath, ["-e", `
       import assert from "node:assert/strict";
-      import { readFile } from "@toonflow/file";
+      import { mkdir, readFile } from "@toonflow/file";
+      import { createHash } from "node:crypto";
+      import { join } from "node:path";
       import { createMultiTenant } from "@toonflow/multi-tenant-auth";
       import { createModelGateway } from "@toonflow/multi-tenant-gateway";
       import { cloudSchema, formatModelPrice, modelAdapters } from "@/utils/multiTenant/modelAdapters";
@@ -318,9 +320,51 @@ test("the MiniMax H3 platform catalog, quote and wallet agree on the 768P pilot 
       assert.deepEqual(settled, { status: "settled", amount: "2.4", currency: "CNY", capped: false });
       assert.deepEqual((await gateway.readBalance(user.id)).wallets.find(wallet => wallet.currency === "CNY"),
         { currency: "CNY", balance: "2.6", reserved: "0", available: "2.6" });
-      console.log("MiniMax H3 768P 目录、报价、预占和钱包结算一致");
+
+      const current = await gateway.getProviders();
+      await gateway.saveProviders([{ kind: "media", id: "minimaxH3", label: "MiniMax H3 官方国内",
+        config: { apiKey: "fixture-minimax-key" }, source }], current.revision);
+      const { setRuntimeHost } = await import("@/lib/platform");
+      setRuntimeHost("desktop");
+      const { default: conf } = await import("@/utils/conf");
+      conf.set("settings.multiTenantEnabled", true);
+      const tasks = await import("@/utils/media/tasks");
+      const directory = join(root, "workspace");
+      await mkdir(directory);
+      let submissions = 0;
+      globalThis.fetch = Object.assign(async (input, init) => {
+        assert.equal(String(input), "https://api.minimax.cn/v2/video_generation");
+        assert.equal(init.method, "POST");
+        submissions++;
+        throw new Error("供应商提交响应丢失");
+      }, { preconnect: fetch.preconnect });
+      const owner = { id: user.id, role: "user", userName: user.userName };
+      const taskId = crypto.randomUUID();
+      const taskRequest = { ...request, providerId: "multiTenant", modelId };
+      await tasks.start(directory, taskId, "video", taskRequest, {}, owner);
+      await assert.rejects(tasks.wait(directory, taskId, owner), /供应商提交响应丢失/);
+      const [interrupted] = await tasks.status(directory, [taskId], true, owner);
+      assert.equal(interrupted.state, "interrupted");
+      assert.equal(interrupted.resumable, false);
+      await tasks.cancel(directory, [taskId], owner);
+      await tasks.cancel(directory, [taskId], owner);
+      const [abandoned] = await tasks.status(directory, [taskId], true, owner);
+      assert.equal(abandoned.state, "cancelled");
+      assert.equal(abandoned.resumable, false);
+      assert.equal((await tasks.start(directory, taskId, "video", taskRequest, {}, owner)).state, "cancelled");
+      assert.equal(submissions, 1);
+      const fingerprint = createHash("sha256").update(directory).digest("hex");
+      const checkpointPath = join(root, "mediaTasks", "workspace" + fingerprint, "task" + taskId.replaceAll("-", "") + ".json");
+      const persisted = JSON.parse(await readFile(checkpointPath, "utf8"));
+      assert.equal(persisted.state, "cancelled");
+      assert.deepEqual(persisted.checkpoint.providerData, { kind: "minimaxH3", state: "submitting" });
+      assert.equal(persisted.chargeStatus, "pendingReview");
+      assert.equal((await gateway.getCharge(taskId, user.id)).status, "reserved");
+      assert.deepEqual((await gateway.readBalance(user.id)).wallets.find(wallet => wallet.currency === "CNY"),
+        { currency: "CNY", balance: "2.6", reserved: "2.4", available: "0.2" });
+      console.log("MiniMax H3 目录、报价、实扣与未知提交预占验证通过");
     `], { cwd: server, env: { ...process.env, TOONFLOW_DATA_DIR: root }, encoding: "utf8", timeout: 10000 });
-    expect(output).toContain("MiniMax H3 768P 目录、报价、预占和钱包结算一致");
+    expect(output).toContain("MiniMax H3 目录、报价、实扣与未知提交预占验证通过");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
