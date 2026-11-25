@@ -8,3 +8,5 @@
 4. 在画布分别完成一次文生图和上传参考图编辑，并读回保存的成图。按 `taskId` 查询 Toonflow 后端的 `canvasOpenaiImageGateway` 日志，用其中的 `requestId` 对照网关 `openaiImageGateway` 日志以及 OpenAI 返回的 `upstreamRequestId`。成功后才保留启用配置。切换杭州时重新验证其路由，从杭州画布实测并独立读回同样的证据。
 
 [OpenAI 图片 API](https://developers.openai.com/api/docs/guides/image-generation) · [OpenAI 支持地区](https://help.openai.com/en/articles/7947663-chatgpt-and-openai-api-supported-countries-and-territories)
+
+香港普通账号的 2.6 验收可以使用 [verifyStudioImageModels.py](../delivery/verifyStudioImageModels.py)。由香港发布运维在现役发布器的 Python 模块路径下运行。脚本使用两个专用普通账号，按顺序提交一次 Flare 文生图和一次 Sunburst 参考图编辑，并核验保存的 PNG、跨账号拒绝、积分结算及 OpenAI 网关回执。提交前写任务流水号，遇到超时或失败按记录核对，不自动重提。
