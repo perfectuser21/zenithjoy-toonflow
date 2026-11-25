@@ -15,6 +15,7 @@ import {
   detectSupportedImageMimeTypeFromFile, type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { CanvasContext, QuestionContext, ToolContext, ToolFiles, MediaGenerationRequest } from "@toonflow/tools-scaffold/runtime";
+import { minimaxH3ProviderId } from "@toonflow/providers/media/minimaxH3";
 import { asrRequestSchema } from "@toonflow/tools-scaffold/runtime";
 import conf from "@/utils/conf";
 import { isWithin, resolveWorkspacePath, writeWorkspaceFile, renameWorkspaceFile, removeWorkspaceFile, lockWorkspaceFiles, protectWorkspaceRoot } from "@/utils/workspace/files";
@@ -55,8 +56,9 @@ export function createAgentToolContext(cwd: string, config: Record<string, unkno
   async function generate(mediaType: "image" | "video" | "audio", request: MediaGenerationRequest, signal?: AbortSignal) {
     requireWorkspace();
     signal?.throwIfAborted();
-    if (!modelGateway.enabled()) return generateMedia(cwd, mediaType, request, signal);
-    if (!actor) throw Object.assign(new Error("请先登录 Toonflow"), { status: 401 });
+    const routed = modelGateway.enabled();
+    if (!routed && request.providerId !== minimaxH3ProviderId) return generateMedia(cwd, mediaType, request, signal);
+    if (routed && !actor) throw Object.assign(new Error("请先登录 Toonflow"), { status: 401 });
     const taskId = crypto.randomUUID();
     await mediaTasks.start(cwd, taskId, mediaType, request, {}, actor);
     return mediaTasks.wait(cwd, taskId, actor, signal);

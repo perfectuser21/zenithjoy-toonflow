@@ -87,6 +87,7 @@ export interface MediaModel {
   label: string;
   type: "image" | "video" | "audio";
   mode?: unknown;
+  adaptiveFrameRatio?: boolean;
   imageSizes?: string[];
   imageRatios?: string[];
   maxReferenceImages?: number;

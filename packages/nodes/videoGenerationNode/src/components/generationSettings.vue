@@ -2,8 +2,8 @@
   <el-popover v-model:visible="settingsVisible" trigger="click" placement="top-start" width="min(340px, calc(100vw - 24px))" :disabled="disabled" :showArrow="false" :popperStyle="{ padding: '14px' }">
     <template #reference>
       <el-button class="settingsButton" text size="small" :disabled="disabled" :aria-expanded="settingsVisible" aria-label="视频生成设置">
-        <span class="ratioShape" :style="ratioStyle(ratio)" aria-hidden="true" />
-        <span>{{ [ratio, resolution, duration ? `${duration}秒` : ''].filter(Boolean).join(' · ') }}</span>
+        <span v-if="!adaptiveRatio" class="ratioShape" :style="ratioStyle(ratio)" aria-hidden="true" />
+        <span>{{ [adaptiveRatio ? '跟随输入图' : ratio, resolution, duration ? `${duration}秒` : ''].filter(Boolean).join(' · ') }}</span>
         <component :is="settingsVisible ? IconChevronDown : IconChevronUp" :size="14" aria-hidden="true" />
       </el-button>
     </template>
@@ -26,8 +26,9 @@
           </el-select>
         </div>
       </div>
-      <div class="sectionLabel">通用比例</div>
-      <div class="ratioOptions" role="group" aria-label="视频比例">
+      <div v-if="adaptiveRatio" class="sectionLabel">视频比例跟随输入图</div>
+      <div v-else class="sectionLabel">通用比例</div>
+      <div v-if="!adaptiveRatio" class="ratioOptions" role="group" aria-label="视频比例">
         <el-button v-for="item in ratios" :key="item" class="ratioButton" :disabled="disabled" :aria-label="`比例 ${item}`" :aria-pressed="ratio === item" @click="ratio = item">
           <span class="ratioContent">
             <span class="ratioShape" :style="ratioStyle(item)" aria-hidden="true" />
@@ -51,7 +52,7 @@ import { IconChevronDown, IconChevronUp } from "@tabler/icons-vue";
 import type { NodeMediaModel } from "@toonflow/nodes-scaffold/runtime";
 import modelForm from "@toonflow/node-shared/modelForm";
 
-const props = defineProps<{ model?: NodeMediaModel; disabled?: boolean; ratios: string[] }>();
+const props = defineProps<{ model?: NodeMediaModel; disabled?: boolean; ratios: string[]; adaptiveRatio?: boolean }>();
 const settingsVisible = ref(false);
 const duration = defineModel<number | undefined>("duration", { required: true });
 const resolution = defineModel<string>("resolution", { required: true });

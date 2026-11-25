@@ -19,6 +19,7 @@ interface ProviderModel<TRules extends readonly ProviderFormRule[] = readonly Pr
   mode?: (ImageMode | VideoMode)[];
   associationSkills?: string;
   audio?: "optional" | boolean;
+  adaptiveFrameRatio?: boolean;
   imageSizes?: string[];
   imageRatios?: string[];
   maxReferenceImages?: number;
@@ -136,6 +137,7 @@ interface ImageRequest extends MediaRequest {
 
 interface VideoRequest extends MediaRequest {
   prompt: string;
+  referenceOrder?: ({ type: "image" | "video" | "audio"; index: number } | { type: "firstFrame" | "lastFrame" | "text" })[];
   /** 当前生成模式；参考模式数组声明各类参考媒体数量上限。 */
   mode?: VideoMode;
   /** 参考图；首尾帧通过 firstFrame、lastFrame 单独传入。 */

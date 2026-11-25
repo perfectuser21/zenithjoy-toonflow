@@ -280,6 +280,7 @@ export function createModelGateway<Upstreams extends ModelMap, Catalogs extends 
       const revision = modelRoutingRevisionSchema.parse(expectedRevision);
       const current = await read();
       if (current.revision !== revision) fail("模型路由已被更新，请重新加载后再保存", 409);
+      for (const route of routes) if (route.enabled) options.adapters[route.type].validateRoute?.(route);
       const bindings = routes.filter(route => {
         if (!route.enabled) return false;
         const previous = current.routes.find(item => item.id === route.id);

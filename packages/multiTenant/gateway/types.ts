@@ -52,6 +52,7 @@ export interface ModelAdapter<T, Public, Cloud extends Record<string, unknown>> 
   sources: Record<ModelRoute["target"], ModelSource<T, Cloud>>;
   restore(value: unknown, route: ModelRoute): T;
   publicModel(execution: ModelExecution<T>): Public;
+  validateRoute?(route: ModelRoute): void;
   validate(execution: ModelExecution<T>, request: unknown): void;
   maximumUsage(execution: ModelExecution<T>, request: unknown): BillingUsage;
   restoreLegacy?(value: unknown): ModelExecution<T> | undefined;

@@ -13,7 +13,7 @@ import initializePlugins, { initializeHostedSharedCanvasNodes, initializeTrusted
 import { languageRequest, setLocaleFallback, translateError, translateMessage } from "@/lib/i18n";
 import { detectLocale, normalizeLocale } from "@toonflow/i18n";
 
-const autoInstallProviders = ["apiMart.ts", "metaso.ts", "compshare.ts"];
+const autoInstallProviders = ["apiMart.ts", "metaso.ts", "compshare.ts", "minimaxH3.ts"];
 declare const __toonflowWebHashes__: Record<string, string> | undefined;
 const trustedWebHashes = typeof __toonflowWebHashes__ === "undefined" ? {} : __toonflowWebHashes__;
 
