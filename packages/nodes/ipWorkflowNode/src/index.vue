@@ -266,12 +266,12 @@ const inputSummary = computed(() => input.value ? summarize(input.value) : "ä¸Šä
 watch([targetCard, inputCurrent], () => {
   if (!canEditOne.value) targetCard.value = 0;
   const card = receipt.value?.cards?.[targetCard.value - 1];
-  preset.value = { ...(card?.preset ?? receipt.value?.cards?.[0]?.preset ?? defaultPreset) };
+  preset.value = { ...(card?.preset ?? receipt.value?.groupPreset ?? defaultPreset) };
   cardDraft.value = card ? { ...card.copy, items: card.copy.items.map(item => ({ ...item })) } : undefined;
-});
+}, { immediate: true });
 
+watch(canUseAi, enabled => { if (enabled && !models.value.length) void loadModels(); }, { immediate: true });
 onMounted(() => {
-  if (canUseAi.value) void loadModels();
   if (step.value === "render") window.addEventListener(editCardEvent, handleEditResult);
 });
 function showError(cause: unknown) {
@@ -307,7 +307,6 @@ function expand() {
   flow.addEdges(ids.slice(1).map((target, index) => ({
     id: crypto.randomUUID(), source: ids[index < 4 ? index : 3], target, sourceHandle: "out", targetHandle: "in",
   })));
-  void loadModels();
 }
 
 function showWorkflow() {
@@ -437,6 +436,7 @@ async function run() {
       usedPrompt = nodePrompt;
     } else if (currentStep === "render" && source?.article && source.copies) {
       result.article = source.article;
+      result.groupPreset = targetCard.value ? receipt.value?.groupPreset : ipCardPreset.parse(preset.value);
       result.cards = await renderCards(source.copies, signal);
     } else if (currentStep === "review" && source?.article && source.cards) {
       result.cards = source.cards;
@@ -494,7 +494,7 @@ function restoreRender() {
   error.value = "";
   restoredRender.value = "";
   targetCard.value = 0;
-  preset.value = { ...(version.cards?.[0]?.preset ?? defaultPreset) };
+  preset.value = { ...(version.groupPreset ?? defaultPreset) };
 }
 
 async function exportArticle(article: string, cards: SavedCard[], signal: AbortSignal) {

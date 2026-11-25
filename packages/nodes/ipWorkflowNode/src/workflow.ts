@@ -57,6 +57,7 @@ const receipt = z.strictObject({
   text: z.string().optional(),
   copies: fiveCopies.optional(),
   cards: z.array(savedCard).length(5).optional(),
+  groupPreset: ipCardPreset.optional(),
   exportPath: z.string().regex(/^assets\/[\w-]+\/[\da-f-]{36}\.zip$/i).optional(),
 });
 export type Receipt = z.infer<typeof receipt>;
