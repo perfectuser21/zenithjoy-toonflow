@@ -432,7 +432,7 @@ test("the MiniMax H3 platform reconciles the 768P quote and holds funds when an 
   }
 }, 15000);
 
-test("OpenAI image editing forwards sixteen references and rejects seventeen", () => {
+test("OpenAI image editing supports released models and rejects seventeen references", async () => {
   const workspace = fileURLToPath(new URL("../../../../../", import.meta.url));
   const output = execFileSync(process.execPath, ["-e", `
     const token = "local-gateway-fixture-token-at-least-32";
@@ -443,9 +443,12 @@ test("OpenAI image editing forwards sixteen references and rejects seventeen", (
     Bun.serve = options => gateway = nativeServe({ ...options, port: 0 });
     const nativeFetch = globalThis.fetch;
     const received = [];
+    const expectedModels = ["gpt-image-2.5-sunburst","gpt-image-2.6-sunburst","gpt-image-2.6-flare"];
     globalThis.fetch = async (input, options) => {
-      if (String(input) !== "https://api.openai.com/v1/images/edits") throw Error("unexpected upstream endpoint");
-      received.push(JSON.parse(options.body).images.length);
+      const path = new URL(input).pathname;
+      if (!["/v1/images/edits", "/v1/images/generations"].includes(path)) throw Error("unexpected upstream endpoint");
+      const body = JSON.parse(options.body);
+      received.push([body.model,path,body.images?.length ?? 0]);
       return Response.json({ data: [{ b64_json: "iVBORw0KGgoAAAAB" }] }, { headers: { "x-request-id": "req_fixture" } });
     };
     await import("./deploy/imageGateway/index.ts");
@@ -462,8 +465,17 @@ test("OpenAI image editing forwards sixteen references and rejects seventeen", (
       tool: { fetch: (url, options) => requestGateway(url.pathname, options) },
     };
     try {
-      const result = await adapter.generateImage.call(context, { ...request, images: Array(16).fill(image) });
-      if (result[0]?.mimeType !== "image/png") throw Error("未收到图片结果");
+      for (const model of expectedModels) {
+        if (!adapter.models.some(entry => entry.id === model)) throw Error("模型未显示在供应商目录");
+        const generation = await adapter.generateImage.call(context, { ...request, model });
+        const edit = await adapter.generateImage.call(context, { ...request, model, images: Array(16).fill(image) });
+        if (generation[0]?.mimeType !== "image/png" || edit[0]?.mimeType !== "image/png") throw Error("未收到图片结果");
+      }
+      const unknown = await requestGateway("/v1/images/generations", {
+        method: "POST", headers: { authorization: "Bearer " + token, "content-type": "application/json" },
+        body: JSON.stringify({ model: "not-allowed", prompt: request.prompt, size: "1024x1024", quality: "medium", output_format: "png", n: 1 }),
+      });
+      if (unknown.status !== 400) throw Error("网关未阻止未发布的模型");
       const tooMany = Array(17).fill({ image_url: "data:image/png;base64," + image.data });
       const rejected = await requestGateway("/v1/images/edits", {
         method: "POST",
@@ -480,7 +492,13 @@ test("OpenAI image editing forwards sixteen references and rejects seventeen", (
       gateway.stop(true);
     }
   `], { cwd: workspace, encoding: "utf8", timeout: 10000 });
-  expect(output.trim().split("\n").at(-1)).toBe("[16]");
+  const models = ["gpt-image-2.5-sunburst", "gpt-image-2.6-sunburst", "gpt-image-2.6-flare"];
+  const { validateMediaProviderSource } = await import("../media/provider");
+  const source = await readFile(join(workspace, "packages/providers/src/media/openaiImage.ts"), "utf8");
+  expect(validateMediaProviderSource(source).models.map(model => model.id)).toEqual(models);
+  expect(JSON.parse(output.trim().split("\n").at(-1)!)).toEqual(models.flatMap(model => [
+    [model, "/v1/images/generations", 0], [model, "/v1/images/edits", 16],
+  ]));
 });
 
 test("staff canvas generates images, analyzes and edits videos, and exports 100 authorized uploads", async () => {

@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 
-const modelId = "gpt-image-2.5-sunburst";
+const allowedModels = new Set(["gpt-image-2.5-sunburst", "gpt-image-2.6-sunburst", "gpt-image-2.6-flare"]);
 const upstreamOrigin = "https://api.openai.com";
 const maxReferenceImages = 16;
 const maxEncodedImageBytes = 20 * 1024 * 1024;
@@ -34,7 +34,7 @@ function readImageUrl(value: unknown) {
 }
 
 function parseImageRequest(value: unknown, edit: boolean) {
-  if (!value || typeof value !== "object" || !("model" in value) || value.model !== modelId
+  if (!value || typeof value !== "object" || !("model" in value) || typeof value.model !== "string" || !allowedModels.has(value.model)
     || !("prompt" in value) || typeof value.prompt !== "string" || !value.prompt.trim() || value.prompt.length > 32000
     || !("size" in value) || typeof value.size !== "string" || !validDimensions.has(value.size)
     || !("quality" in value) || value.quality !== "medium" || !("output_format" in value) || value.output_format !== "png"
@@ -47,7 +47,7 @@ function parseImageRequest(value: unknown, edit: boolean) {
     images = value.images.map(readImageUrl);
     if (images.reduce((size, input) => size + input.image_url.length, 0) > maxEncodedImageBytes) throw new Error("参考图编码后的总大小不得超过 20 MiB");
   } else if ("images" in value) throw new Error("文生图请求不能包含参考图");
-  return { model: modelId, prompt: value.prompt, size: value.size, quality: value.quality, output_format: value.output_format,
+  return { model: value.model, prompt: value.prompt, size: value.size, quality: value.quality, output_format: value.output_format,
     n: value.n, ...(images ? { images } : {}) };
 }
 
@@ -83,7 +83,7 @@ Bun.serve({
       });
       const requestHeader = upstream.headers.get("x-request-id");
       const upstreamRequestId = requestHeader && /^req_[a-zA-Z0-9_-]{1,120}$/.test(requestHeader) ? requestHeader : undefined;
-      console.info(JSON.stringify({ event: "openaiImageGateway", requestId, upstreamRequestId, model: modelId, operation, status: upstream.status }));
+      console.info(JSON.stringify({ event: "openaiImageGateway", requestId, upstreamRequestId, model: body.model, operation, status: upstream.status }));
       if (upstreamRequestId) headers.set("x-request-id", upstreamRequestId);
       if (!upstream.ok || !upstreamRequestId || !upstream.headers.get("content-type")?.startsWith("application/json")) {
         await upstream.body?.cancel().catch(() => {});
@@ -92,7 +92,7 @@ Bun.serve({
       headers.set("content-type", "application/json");
       return new Response(upstream.body, { headers });
     } catch {
-      console.info(JSON.stringify({ event: "openaiImageGateway", requestId, model: modelId, operation, status: "networkError" }));
+      console.info(JSON.stringify({ event: "openaiImageGateway", requestId, model: body.model, operation, status: "networkError" }));
       return error("OpenAI 图片接口暂时不可达", 502, headers);
     }
   },

@@ -5,7 +5,7 @@ const rules = [
   { type: "input", field: "apiKey", title: "图片网关访问令牌", value: "" as string, props: { type: "password", showPassword: true } },
 ] as const;
 
-const modelId = "gpt-image-2.5-sunburst";
+const allowedModels = new Set(["gpt-image-2.5-sunburst", "gpt-image-2.6-sunburst", "gpt-image-2.6-flare"]);
 const maxReferenceImages = 16;
 const maxEncodedImageBytes = 20 * 1024 * 1024;
 const imageDimensions = {
@@ -26,16 +26,19 @@ function referenceImage(input: MediaInput) {
 export default {
   id: "openaiImage",
   label: "OpenAI 图片网关",
-  version: "1.1.0",
+  version: "1.2.0",
   readme: "连接平台配置的 OpenAI 图片网关。支持文生图和工作区图片编辑。请填写网关颁发的访问令牌。",
   rules,
-  models: [{
-    id: "gpt-image-2.5-sunburst", label: "GPT Image 2.5 Sunburst", type: "image", mode: ["text", "singleImage", "multiReference"],
-    maxReferenceImages: 16,
-    imageSizes: ["1K", "2K"], imageRatios: ["1:1", "3:2", "2:3", "16:9", "9:16"],
-  }],
+  models: [
+    { id: "gpt-image-2.5-sunburst", label: "GPT Image 2.5 Sunburst", type: "image", mode: ["text", "singleImage", "multiReference"],
+      maxReferenceImages: 16, imageSizes: ["1K", "2K"], imageRatios: ["1:1", "3:2", "2:3", "16:9", "9:16"] },
+    { id: "gpt-image-2.6-sunburst", label: "GPT Image 2.6 Sunburst", type: "image", mode: ["text", "singleImage", "multiReference"],
+      maxReferenceImages: 16, imageSizes: ["1K", "2K"], imageRatios: ["1:1", "3:2", "2:3", "16:9", "9:16"] },
+    { id: "gpt-image-2.6-flare", label: "GPT Image 2.6 Flare", type: "image", mode: ["text", "singleImage", "multiReference"],
+      maxReferenceImages: 16, imageSizes: ["1K", "2K"], imageRatios: ["1:1", "3:2", "2:3", "16:9", "9:16"] },
+  ],
   async generateImage(request) {
-    if (request.model !== modelId) throw new Error("图片网关不支持所选模型");
+    if (!allowedModels.has(request.model)) throw new Error("图片网关不支持所选模型");
     const gateway = URL.parse(this.config.gatewayUrl);
     if (!gateway || gateway.protocol !== "https:" || gateway.username || gateway.password || gateway.pathname !== "/"
       || gateway.search || gateway.hash || gateway.hostname.replace(/\.$/, "") === "api.openai.com") throw new Error("请配置图片网关的 HTTPS 地址");
@@ -58,7 +61,7 @@ export default {
     const response = await this.tool.fetch(new URL(images.length ? "/v1/images/edits" : "/v1/images/generations", gateway), {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model: modelId, prompt: request.prompt, size, quality: "medium", output_format: "png", n: 1,
+      body: JSON.stringify({ model: request.model, prompt: request.prompt, size, quality: "medium", output_format: "png", n: 1,
         ...(images.length ? { images } : {}) }),
       redirect: "error",
       signal: this.signal,
