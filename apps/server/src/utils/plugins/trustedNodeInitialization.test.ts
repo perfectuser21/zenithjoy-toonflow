@@ -330,6 +330,16 @@ test("the MiniMax H3 platform reconciles the 768P quote and holds funds when an 
       const { default: conf } = await import("@/utils/conf");
       conf.set("settings.multiTenantEnabled", true);
       const tasks = await import("@/utils/media/tasks");
+      const { detectMimeType } = await import("@/utils/media/priceReference");
+      const ftyp = (brand, compatible) => {
+        const header = Buffer.concat([Buffer.alloc(4), Buffer.from("ftyp" + brand), Buffer.alloc(4), Buffer.from(compatible)]);
+        header.writeUInt32BE(header.length);
+        return header;
+      };
+      assert.equal(detectMimeType(ftyp("heic", "mif1"), ""), "image/heic");
+      assert.equal(detectMimeType(ftyp("mif1", "mif1"), ""), "image/heif");
+      assert.equal(detectMimeType(ftyp("mif1", "mif1avif"), ""), "image/avif");
+      assert.equal(detectMimeType(ftyp("isom", "iso2av01"), "image/heic"), "video/mp4");
       const directory = join(root, "workspace");
       await mkdir(directory);
       let submissions = 0;

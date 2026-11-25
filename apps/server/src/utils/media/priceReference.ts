@@ -12,7 +12,7 @@ const references = new Map<string, { revision: string; expires: number; value: P
 let probeStatus: { config: string; expires: number; value: Promise<string | null> } | undefined;
 
 export function detectMimeType(bytes: Uint8Array, fallback: string) {
-  const header = Buffer.from(bytes.buffer, bytes.byteOffset, Math.min(bytes.byteLength, 16));
+  const header = Buffer.from(bytes.buffer, bytes.byteOffset, Math.min(bytes.byteLength, 64));
   const text = header.toString("ascii");
   const mimeType = fallback.split(";")[0].trim().toLowerCase();
   if (header.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return "image/png";
@@ -25,9 +25,14 @@ export function detectMimeType(bytes: Uint8Array, fallback: string) {
   if (header[0] === 0xff && (header[1]! & 0xf6) === 0xf0) return "audio/aac";
   if (text.startsWith("ID3") || (header[0] === 0xff && (header[1]! & 0xe0) === 0xe0 && (header[1]! & 0x06) !== 0)) return "audio/mpeg";
   if (text.slice(4, 8) === "ftyp") {
-    if (/avif|avis/.test(text.slice(8))) return "image/avif";
-    if (/^M4[AB] $/.test(text.slice(8, 12)) || mimeType.startsWith("audio/")) return "audio/mp4";
-    return text.slice(8, 12) === "qt  " ? "video/quicktime" : "video/mp4";
+    const primaryBrand = text.slice(8, 12);
+    const boxEnd = Math.min(header.readUInt32BE(0), header.length);
+    const brands = [primaryBrand, ...(text.slice(16, boxEnd).match(/.{4}/g) ?? [])];
+    if (brands.some(brand => brand === "avif" || brand === "avis")) return "image/avif";
+    if (brands.some(brand => /^(?:heic|heix|hevc|hevx|heim|heis|hevm|hevs)$/.test(brand))) return "image/heic";
+    if (primaryBrand === "mif1" || primaryBrand === "msf1") return "image/heif";
+    if (/^M4[AB] $/.test(primaryBrand) || mimeType.startsWith("audio/")) return "audio/mp4";
+    return primaryBrand === "qt  " ? "video/quicktime" : "video/mp4";
   }
   if (header.subarray(0, 4).equals(Buffer.from([26, 69, 223, 163]))) return mimeType.startsWith("audio/") ? "audio/webm" : "video/webm";
   return ({ "image/jpg": "image/jpeg", "audio/mp3": "audio/mpeg", "audio/x-wav": "audio/wav", "audio/wave": "audio/wav", "audio/x-flac": "audio/flac" } as Record<string, string>)[mimeType] ?? mimeType;
@@ -111,7 +116,7 @@ async function loadPriceReferencePath(path: string, reference: MediaReference, m
   const cached = cache ? references.get(key) : undefined;
   if (cached?.revision === revision) return cached.value;
   const value = (async () => {
-    const header = Buffer.alloc(16);
+    const header = Buffer.alloc(64);
     const handle = await open(path, "r");
     try { await handle.read(header, 0, header.length, 0); }
     finally { await handle.close(); }
