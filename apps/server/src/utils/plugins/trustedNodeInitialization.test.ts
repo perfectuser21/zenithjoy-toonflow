@@ -44,7 +44,10 @@ test("existing workspaces receive trusted nodes from each release", async () => 
     await writeFile(join(source, "frameAnalysisNode.umd.js"), "candidate:frameAnalysis");
     await writeFile(join(target, "frameAnalysisNode.umd.js"), "old:frameAnalysis");
     await writeFile(join(target, "videoNode.umd.js"), "old:video");
+    const updatedNodes = ["videoGenerationNode", "mashupNode", "videoConcatNode"];
+    for (const node of updatedNodes) await writeFile(join(target, node + ".umd.js"), "old");
     await initializeHostedSharedCanvasNodes(target, source);
+    for (const node of updatedNodes) expect(await readFile(join(target, node + ".umd.js"), "utf8")).toBe(`candidate:${node}.umd.js`);
     expect(await readFile(join(target, "frameAnalysisNode.umd.js"), "utf8")).toBe("candidate:frameAnalysis");
     expect(await readFile(join(target, "videoNode.umd.js"), "utf8")).toBe("next release");
     expect(await readFile(join(target, "customNode.umd.js"), "utf8")).toBe("customized");
@@ -492,7 +495,7 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     let backgroundRequests = 0;
     let ordinaryWeb = false;
     let modelCatalogUnavailable = false;
-    let trimReview: { request: { directory: string; operationId: string; source: string; start: number; end: number }; queued: boolean } | undefined;
+    let trimReview: { request: { directory: string; operationId: string; source: string; start: number; end: number }; state: "notFound" | "queued" | "ready" } | undefined;
     let trimChecks = 0;
     let trimSubmissions = 0;
     gateway.use((req, res, next) => {
@@ -514,7 +517,11 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       if (!ordinaryWeb || !trimReview) return next();
       if (!Object.entries(trimReview.request).every(([key, value]) => request.body?.[key] === value)) return response.sendStatus(409);
       trimChecks++;
-      return response.json({ code: 200, data: trimReview.queued ? { status: "pending", phase: "queued" } : { status: "notFound" } });
+      const nodeId = trimReview.request.operationId;
+      const data = trimReview.state === "queued" ? { status: "pending", phase: "queued" }
+        : trimReview.state === "ready" ? { status: "ready", nodeId, outputPath: `assets/${nodeId}/video.mp4` }
+          : { status: "notFound" };
+      return response.json({ code: 200, data });
     });
     gateway.get("/api/ai/models", (_request, response) => {
       if (modelCatalogUnavailable) return response.status(503).json({ code: 503, message: "模型目录暂不可用" });
@@ -926,8 +933,10 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     await mkdir(join(customerProject.directory, "assets"), { recursive: true });
     const customerCanvas = join(customerProject.directory, "旧画布.json");
     const guidedSource = "assets/guidedFixture.mp4";
-    trimReview = { request: { directory: customerProject.directory, operationId: randomUUID(), source: sceneSource, start: 0, end: 1 }, queued: false };
+    trimReview = { request: { directory: customerProject.directory, operationId: randomUUID(), source: sceneSource, start: 0, end: 1 }, state: "notFound" };
     const pendingTrim = { ...trimReview.request, ownerId: customer.id, canvasPath: "旧画布.json" };
+    const pendingDelete = { ...pendingTrim, canvasPath: "重命名前.json", operationId: randomUUID() };
+    const readyTrim = { ...pendingTrim, operationId: randomUUID() };
     const customerVideo = join(customerProject.directory, sceneSource);
     await writeFile(customerVideo, sourceVideoBytes);
     await writeFile(customerCanvas, JSON.stringify({
@@ -937,6 +946,11 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       nodes: [
         { id: "staleTrim", type: "remote-videoNode", position: { x: 130, y: 200 },
           data: { pendingTrim, outputs: { video: { dataType: "VIDEO", value: { url: sceneSource, mimeType: "video/mp4" } } } } },
+        { id: "deleteTrim", type: "remote-videoNode", position: { x: 130, y: 550 },
+          data: { pendingTrim: pendingDelete, outputs: { video: { dataType: "VIDEO", value: { url: sceneSource, mimeType: "video/mp4" } } } } },
+        { id: "ordinaryDelete", type: "remote-textNode", position: { x: 480, y: 550 }, data: { label: "可删除的普通节点" } },
+        { id: "readyTrim", type: "remote-videoNode", position: { x: 800, y: 550 },
+          data: { pendingTrim: readyTrim, outputs: { video: { dataType: "VIDEO", value: { url: sceneSource, mimeType: "video/mp4" } } } } },
         { id: "customerVideo", type: "remote-videoNode", position: { x: 450, y: 200 },
           data: { outputs: { video: { dataType: "VIDEO", value: { url: guidedSource, mimeType: "video/mp4" } } } } },
         { id: "customerAnalysis", type: "remote-frameAnalysisNode", position: { x: 730, y: 200 },
@@ -945,6 +959,7 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     }));
     await tenants.writeUserSettings(customer.id, {
       ui: { language: "zh-CN", startupAnimation: false },
+      general: { canvasShortcuts: { multiSelection: "Shift" } },
       stores: { "toonflow.projectList": { project: customerProject, projectList: [customerProject] } },
     }, 0);
     conf.set("settings.multiTenantEnabled", true);
@@ -1081,19 +1096,63 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
           expect(await savedTrim()).toEqual(pendingTrim);
           expect(trimChecks).toBe(1);
 
-          trimReview.queued = true;
+          trimReview.state = "queued";
           await clear.click();
           await check.wait();
           expect(await savedTrim()).toEqual(pendingTrim);
           expect(trimChecks).toBe(2);
 
-          trimReview.queued = false;
+          trimReview.state = "notFound";
           await check.click();
           await clear.click();
           await tenantPage.waitForSelector('.videoActionPanel', { hidden: true });
           expect(await savedTrim()).toBeUndefined();
           expect(await readFile(customerVideo)).toEqual(sourceVideoBytes);
           expect(trimChecks).toBe(4);
+
+          const deleteNode = '.vue-flow__node[data-id="deleteTrim"]';
+          const ordinaryDelete = '.vue-flow__node[data-id="ordinaryDelete"]';
+          const deleteButton = tenantPage.locator(`${deleteNode} button[aria-label="移除节点"]`).setTimeout(5000);
+          trimReview.request = { ...trimReview.request, operationId: pendingDelete.operationId };
+          trimReview.state = "queued";
+          await tenantPage.locator(`${ordinaryDelete} .titleBar`).click();
+          await tenantPage.keyboard.down("Shift");
+          await tenantPage.locator(`${deleteNode} .titleBar`).click();
+          await tenantPage.keyboard.up("Shift");
+          expect(await tenantPage.$(`${ordinaryDelete}.selected`)).not.toBeNull();
+          expect(await tenantPage.$(`${deleteNode}.selected`)).not.toBeNull();
+          await tenantPage.keyboard.press("Backspace");
+          await tenantPage.waitForSelector(ordinaryDelete, { hidden: true, timeout: 5000 });
+          await tenantPage.waitForSelector('xpath=//*[@role="alert" and contains(., "截取正在排队")]', { visible: true, timeout: 5000 });
+          expect(await tenantPage.$(deleteNode)).not.toBeNull();
+          expect(trimChecks).toBe(5);
+
+          trimReview.state = "notFound";
+          await deleteButton.click();
+          await tenantPage.waitForSelector(deleteNode, { hidden: true, timeout: 5000 });
+
+          const readyNode = '.vue-flow__node[data-id="readyTrim"]';
+          trimReview.request = { ...trimReview.request, operationId: readyTrim.operationId };
+          trimReview.state = "ready";
+          await tenantPage.locator(`${readyNode} .titleBar`).setTimeout(5000).click();
+          await tenantPage.locator(`${readyNode} button[aria-label="移除节点"]`).setTimeout(5000).click();
+          await tenantPage.waitForSelector('xpath=//*[@role="alert" and contains(., "请先检查并恢复截取结果")]', { visible: true, timeout: 5000 });
+          expect(await tenantPage.$(readyNode)).not.toBeNull();
+
+          const removedFromDisk = async () => {
+            const saved = JSON.parse(await readFile(customerCanvas, "utf8"));
+            return !saved.nodes.some((item: { id: string }) => ["deleteTrim", "ordinaryDelete"].includes(item.id));
+          };
+          const deletionDeadline = Date.now() + 5000;
+          while (!await removedFromDisk() && Date.now() < deletionDeadline) await Bun.sleep(50);
+          expect(await removedFromDisk()).toBe(true);
+          await tenantPage.reload({ waitUntil: "domcontentloaded" });
+          await tenantPage.waitForSelector(readyNode, { visible: true, timeout: 8000 });
+          expect(await tenantPage.$(deleteNode)).toBeNull();
+          expect(await tenantPage.$(ordinaryDelete)).toBeNull();
+          expect(JSON.parse(await readFile(customerCanvas, "utf8")).nodes.find((item: { id: string }) => item.id === "readyTrim").data.pendingTrim).toEqual(readyTrim);
+          expect(await readFile(customerVideo)).toEqual(sourceVideoBytes);
+          expect(trimChecks).toBe(7);
           expect(trimSubmissions).toBe(0);
         }
         const result = await tenantPage.evaluate(async () => {
