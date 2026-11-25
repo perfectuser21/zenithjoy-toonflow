@@ -211,7 +211,7 @@ async function saveRoute() {
   const keepsEnabledBinding = previous?.enabled && previous.type === form.value.type && previous.target === form.value.target
     && previous.providerId === form.value.providerId && previous.upstreamModelId === form.value.upstreamModelId;
   if (form.value.enabled && !keepsEnabledBinding && !selectedUpstream.value) { formError.value = translate("所选模型已不可用，请重新选择。"); return; }
-  const parsed = modelRouteSchema.safeParse({ id: formId.value, ...form.value, publicId: form.value.publicId.trim(), label: form.value.label.trim(), salePrice: salePrice.value, costPrice: costPrice.value });
+  const parsed = modelRouteSchema.safeParse({ id: formId.value, ...form.value, allowedUserIds: previous?.allowedUserIds, publicId: form.value.publicId.trim(), label: form.value.label.trim(), salePrice: salePrice.value, costPrice: costPrice.value });
   if (!parsed.success) { formError.value = translate("请检查创作端模型 ID、显示名称、转发目标和价格格式，价格最多支持 6 位小数。"); return; }
   const next = editingId.value ? routes.value.map(route => route.id === editingId.value ? parsed.data : route) : [...routes.value, parsed.data];
   const checked = modelRoutesSchema.safeParse(next);

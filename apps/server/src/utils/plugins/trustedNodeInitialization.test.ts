@@ -252,6 +252,7 @@ test("platform image routes charge customer points and exempt administrators", a
     const auth = createMultiTenant(root);
     await auth.setup("points-admin", "fixture-password");
     const user = await auth.createUser("points-customer", "fixture-password");
+    const other = await auth.createUser("points-other", "fixture-password");
     const admin = await auth.getAdminIdentity();
     if (!admin) throw Error("积分验收缺少管理员身份");
     const customer = { id: user.id, role: "user" } as const;
@@ -262,8 +263,8 @@ test("platform image routes charge customer points and exempt administrators", a
       sources: {
         backend: {
           async available(type: string) {
-            return type === "image" ? [{ target: "backend" as const, providerId: provider.id, providerLabel: provider.label,
-              modelId: model.id, label: model.label, type: model.type }] : [];
+            return type === "image" || type === "text" ? [{ target: "backend" as const, providerId: provider.id, providerLabel: provider.label,
+              modelId: model.id, label: model.label, type: type as "text" | "image" }] : [];
           },
           async resolve() { return { apiKey: secret }; },
         },
@@ -290,8 +291,16 @@ test("platform image routes charge customer points and exempt administrators", a
     const paid = { id: randomUUID(), publicId: "fixture-public", label: "图片生成 · 精细", type: "image", enabled: true,
       target: "backend", providerId: provider.id, upstreamModelId: model.id, costPrice: null,
       salePrice: { currency: "CNY", mode: "perRequest", amount: "1.5" } } as const;
-    await gateway.save([paid, { ...paid, id: randomUUID(), publicId: "fixture-free", salePrice: { ...paid.salePrice, amount: "0" } }], 0);
+    const scoped = { ...paid, type: "text", upstreamModelId: model.id, id: randomUUID(), publicId: "gpt-6.1-terra",
+      allowedUserIds: [user.id] as string[], salePrice: { currency: "CNY", mode: "perMillionTokens", input: "2", output: "10", cacheRead: "0", cacheWrite: "0" } } as const;
+    await gateway.save([scoped, paid, { ...paid, id: randomUUID(), publicId: "fixture-free", salePrice: { ...paid.salePrice, amount: "0" } }], 0);
     expect((await gateway.getProviders()).providers[0]?.config.apiKey).toBe(secret);
+    const outsider = { id: other.id, role: "user" } as const;
+    expect((await gateway.catalog(["text"], customer)).map(route => route.modelId)).toEqual([scoped.publicId]);
+    expect(await gateway.catalog(["text"], outsider)).toEqual([]);
+    expect(await gateway.catalog(["text"])).toEqual([]);
+    await expect(gateway.resolve("text", "multiTenant", scoped.publicId, undefined, {}, { actor: outsider })).rejects.toMatchObject({ status: 403 });
+    expect((await gateway.resolve("text", "multiTenant", scoped.publicId, undefined, {}, { actor: customer })).route.id).toBe(scoped.id);
     expect(await gateway.catalog(["image"], customer)).toEqual([{
       type: "image", providerId: "multiTenant", providerLabel: "悦升云端", routeId: paid.id, modelId: paid.publicId,
       label: "图片生成 · 精细 · 1.5 积分/次", priceLabel: "1.5 积分/次",
