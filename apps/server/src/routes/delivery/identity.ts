@@ -1,3 +1,4 @@
+import { customerPointsPerCny } from "@toonflow/multi-tenant-billing/config";
 import { Router } from "express";
 import { success, error } from "@/lib/responseFormat";
 
@@ -12,5 +13,5 @@ export default Router().get("/", (_req, res) => {
     res.status(503).json(error("当前实例尚未配置发布身份", null, 503));
     return;
   }
-  res.json(success({ sourceSha, image, bootId, capabilities: { mediaTaskReadOnly: true, directWorkspaceMediaUrls: process.env.TOONFLOW_WEB_MEDIA_STREAMING === "1" } }));
+  res.json(success({ sourceSha, image, bootId, capabilities: { mediaTaskReadOnly: true, directWorkspaceMediaUrls: process.env.TOONFLOW_WEB_MEDIA_STREAMING === "1", customerPointsPerCny } }));
 });

@@ -38,12 +38,10 @@ export type BillingChargeReceipt = { status: "reserved" | "settled" | "released"
 export type BillingReleaseMetadata = { actorId: string; reason: string };
 export type BillingSettlement = { amount: string; currency: BillingCurrency; capped: boolean; status: "settled" | "released" };
 
+export const customerPointsPerCny = 1;
+
 export function cnyToPoints(amount: string): string {
-  const [whole = "0", fraction = ""] = amount.split(".");
-  const thousandths = BigInt(whole) * 1000000n + BigInt(fraction.padEnd(6, "0"));
-  const points = thousandths / 1000n;
-  const remainder = (thousandths % 1000n).toString().padStart(3, "0").replace(/0+$/, "");
-  return remainder ? `${points}.${remainder}` : points.toString();
+  return amount.includes(".") ? amount.replace(/0+$/, "").replace(/\.$/, "") : amount;
 }
 
 export type CustomerPoints = {

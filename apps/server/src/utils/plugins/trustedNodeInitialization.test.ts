@@ -243,7 +243,7 @@ test("platform image routes charge customer points and exempt administrators", a
     expect((await gateway.getProviders()).providers[0]?.config.apiKey).toBe(secret);
     expect(await gateway.catalog(["image"], customer)).toEqual([{
       type: "image", providerId: "multiTenant", providerLabel: "悦升云端", routeId: paid.id, modelId: paid.publicId,
-      label: "图片生成 · 精细 · 1500 积分/次", priceLabel: "1500 积分/次",
+      label: "图片生成 · 精细 · 1.5 积分/次", priceLabel: "1.5 积分/次",
     }]);
 
     await gateway.credit({ userId: user.id, currency: "CNY", amount: "5", requestId: randomUUID() });
@@ -258,7 +258,7 @@ test("platform image routes charge customer points and exempt administrators", a
     expect(await run(customer)).toEqual({ value: "图片已生成", billing: { status: "settled", amount: "1.5", currency: "CNY", capped: false } });
     const settled = await gateway.readBalance(user.id);
     expect(settled.wallets).toContainEqual({ currency: "CNY", balance: "3.5", reserved: "0", available: "3.5" });
-    expect(settled.transactions.filter(entry => entry.kind === "model").map(entry => cnyToPoints(entry.amount))).toEqual(["1500"]);
+    expect(settled.transactions.filter(entry => entry.kind === "model").map(entry => cnyToPoints(entry.amount))).toEqual(["1.5"]);
     expect(await run(admin)).toEqual({ value: "图片已生成", billing: undefined });
     expect(await gateway.readBalance(user.id)).toEqual(settled);
   } finally {
@@ -303,7 +303,7 @@ test("the MiniMax H3 platform reconciles the 768P quote and holds funds when an 
       await assert.rejects(gateway.save([{ ...route, salePrice: { ...route.salePrice, mode: "perRequest" } }], 0), /按秒设置/);
       await gateway.save([route], 0);
       const [model] = await gateway.catalog(["video"], actor);
-      assert.equal(model.priceLabel, "600 积分/秒");
+      assert.equal(model.priceLabel, "0.6 积分/秒");
       assert.equal(model.adaptiveFrameRatio, true);
       assert.deepEqual(model.durationResolutionMap, [{ duration: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], resolution: ["768P"] }]);
       const request = { prompt: "花瓣舒展", duration: 4, resolution: "768P", ratio: "16:9" };

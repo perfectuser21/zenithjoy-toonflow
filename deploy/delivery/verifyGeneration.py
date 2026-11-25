@@ -9,7 +9,7 @@ generationExpected：fileCount（1至4）、timeoutSeconds（1至420）、
 pollSeconds（1至30）；video/audio另必填minDuration/maxDuration。
 模型及供应商由root配置明确选择，不内置默认模型或假供应商。
 香港另要求 studioImageVerification={modelId,gatewayHost,maxPoints}，以第二个专用账号
-生成一张测试图，校验积分结算、落盘 PNG 与 Mac Studio 网关回执。
+生成一张测试图，校验积分结算、落盘 PNG 与 Mac Studio 网关回执。maxPoints 使用配置时的每元 1000 积分。
 
 提交前在release.stateDirectory持久化generation-<run>-<attempt>.json；
 仅杭州隔离候选可对已完成且身份一致的任务重新只读核验。任务ID输出至stderr，
@@ -193,7 +193,7 @@ def validateGenerationConfig(config):
 
 
 def asPoints(value):
-    require(isinstance(value, str) and re.fullmatch(r'[0-9]{1,18}(?:\.[0-9]{1,3})?', value),
+    require(isinstance(value, str) and re.fullmatch(r'[0-9]{1,18}(?:\.[0-9]{1,6})?', value),
             '客户积分钱包或报价金额格式非法')
     return Decimal(value)
 
@@ -226,7 +226,14 @@ def verifyPointsBudget(client, payload, studio=None):
     client.request('GET', '/api/multiTenant/user/providerKey', expected=403, timeout=20)
     startingPoints = readPoints(client)
     quote = readGenerationQuote(client, payload)
-    require(not studio or quote <= asPoints(studio['maxPoints']), 'Mac Studio 验收报价超出积分上限')
+    if studio:
+        identity = client.request('GET', '/api/delivery/identity', {'nonce': str(uuid.uuid4())})
+        capabilities = identity.get('capabilities') if isinstance(identity, dict) else None
+        require(isinstance(capabilities, dict), '缺少积分面额核验所需的发布身份')
+        pointsPerCny = capabilities.get('customerPointsPerCny', 1000)
+        require(type(pointsPerCny) is int and pointsPerCny in (1, 1000), '客户积分面额无法识别')
+        maxQuote = asPoints(studio['maxPoints']) * Decimal(pointsPerCny) / 1000
+        require(quote <= maxQuote, 'Mac Studio 验收报价超出积分上限')
     require(asPoints(startingPoints['available']) >= quote, '专用发布验收账号积分低于本次报价')
     return startingPoints, quote
 
