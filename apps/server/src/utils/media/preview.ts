@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, stat, withFileAccess, writeFile
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { prepareWorkspaceFfmpeg } from "@/utils/ffmpeg";
+import { z } from "zod";
 
 export type PreviewKind = "video" | "image" | "audio";
 
@@ -81,13 +82,35 @@ export async function createVideoFrame(source: string, timeSeconds: number, sign
   }
 }
 
-export async function createPreview(content: Buffer, kind: PreviewKind, signal: AbortSignal) {
+const concatProbeSchema = z.object({
+  streams: z.tuple([z.object({
+    width: z.number().int().positive(), height: z.number().int().positive(),
+    duration: z.coerce.number().finite().positive().optional().catch(undefined),
+  })]),
+  format: z.object({ duration: z.coerce.number().finite().positive() }),
+});
+const concatDurationLimit = 120;
+const concatDurationTolerance = 0.08;
+
+export function normalizeConcatVideo(read: (signal: AbortSignal) => Promise<Buffer>, signal: AbortSignal) {
+  return convertMedia(read, "video", signal, true);
+}
+
+export function createPreview(content: Buffer, kind: PreviewKind, signal: AbortSignal) {
+  return convertMedia(() => Promise.resolve(content), kind, signal, false);
+}
+
+async function convertMedia(read: (signal: AbortSignal) => Promise<Buffer>, kind: PreviewKind, signal: AbortSignal, forConcat: boolean) {
   const release = await acquirePreview(signal);
   const timeout = AbortSignal.timeout(120000);
   const active = AbortSignal.any([signal, timeout]);
   let temporaryRoot = "";
   let directory: string | undefined;
   try {
+    const content = await read(active);
+    if (!content.length || content.length > previewLimit) {
+      throw Object.assign(new Error("媒体须为不超过 100 MB 的非空文件"), { status: 413 });
+    }
     const paths = await prepareWorkspaceFfmpeg(active);
     active.throwIfAborted();
     temporaryRoot = await realpath(tmpdir());
@@ -100,6 +123,29 @@ export async function createPreview(content: Buffer, kind: PreviewKind, signal: 
     const inputOptions = mov
       ? ["-f", "mov", "-format_whitelist", "mov", "-enable_drefs", "0", "-use_absolute_path", "0"]
       : ["-format_whitelist", "matroska,webm,avi,asf,mpeg,mpegts,ogg,wav,aiff,mp3,aac,flac,amr,ape,wv,tta,au,caf,tiff_pipe,png_pipe,jpeg_pipe,jpegls_pipe,jpegxl_pipe,webp_pipe,bmp_pipe,gif,apng,ico"];
+    const spawnOptions = {
+      cwd: directory, stdin: "ignore", stdout: "ignore", stderr: "pipe", windowsHide: true, signal: active,
+      env: Object.fromEntries(Object.entries(process.env).filter(([key]) => !["FFREPORT", "TOONFLOW_TRIM_TOKEN", "TOONFLOW_TRIM_STORE_TOKEN"].includes(key.toUpperCase()))),
+    } as const;
+    const safeInput = ["-protocol_whitelist", "file", "-max_streams", "32", ...inputOptions];
+    async function probeVideo(path: string, flags: string[]) {
+      const probe = Bun.spawn([paths.ffprobe, "-v", "error", ...flags, "-select_streams", "V:0",
+        "-show_entries", "stream=width,height,duration:format=duration", "-of", "json", path], {
+        ...spawnOptions, stdout: "pipe", stderr: "ignore",
+      });
+      const [metadata, status] = await Promise.all([new Response(probe.stdout).text(), probe.exited]);
+      active.throwIfAborted();
+      const parsed = concatProbeSchema.safeParse(status === 0 ? JSON.parse(metadata) : undefined);
+      if (!parsed.success) throw Object.assign(new Error("没有找到可读取的视频画面或有效时长"), { status: 422 });
+      return { ...parsed.data.streams[0], totalDuration: parsed.data.format.duration };
+    }
+    const original = forConcat ? await probeVideo(source, safeInput) : undefined;
+    if (original) {
+      const { width, height, totalDuration } = original;
+      if (totalDuration > concatDurationLimit || width > 4096 || height > 4096 || width * height > 4096 * 2160) {
+        throw Object.assign(new Error("需要转换编码的视频须在 120 秒和 4K 以内"), { status: 413 });
+      }
+    }
     const outputOptions = kind === "video"
       ? ["-map", "0:V:0", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "fast", "-crf", "18",
         "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-ac", "2", "-movflags", "+faststart"]
@@ -108,11 +154,9 @@ export async function createPreview(content: Buffer, kind: PreviewKind, signal: 
         : ["-map", "0:a:0", "-c:a", "libmp3lame", "-b:a", "192k", "-ar", "48000", "-ac", "2"];
     active.throwIfAborted();
     const child = Bun.spawn([paths.ffmpeg, "-hide_banner", "-v", "error", "-nostdin", "-n",
-      "-protocol_whitelist", "file", "-max_streams", "32", ...inputOptions, "-i", source,
-      ...outputOptions, "-map_metadata", "-1", "-fs", String(previewLimit), output], {
-      cwd: directory, stdin: "ignore", stdout: "ignore", stderr: "pipe", windowsHide: true, signal: active,
-      env: Object.fromEntries(Object.entries(process.env).filter(([key]) => !["FFREPORT", "TOONFLOW_TRIM_TOKEN", "TOONFLOW_TRIM_STORE_TOKEN"].includes(key.toUpperCase()))),
-    });
+      ...safeInput, ...(forConcat ? ["-threads", "2"] : []), "-i", source, ...outputOptions,
+      ...(forConcat ? ["-threads", "2", "-bf", "0", "-fps_mode", "passthrough", "-t", String(concatDurationLimit + 0.25)] : []),
+      "-map_metadata", "-1", "-fs", String(previewLimit), output], spawnOptions);
     const readErrors = async () => {
       const decoder = new TextDecoder();
       let details = "";
@@ -127,6 +171,14 @@ export async function createPreview(content: Buffer, kind: PreviewKind, signal: 
     }
     // FFmpeg 达到 -fs 会结束输出且可能超过阈值；不能把这种截断预览当成功返回。
     if ((await stat(output)).size >= previewLimit) throw Object.assign(new Error("兼容预览超过 100 MB，请使用较短或较小的媒体文件"), { status: 413 });
+    if (original) {
+      const converted = await probeVideo(output, ["-protocol_whitelist", "file", "-f", "mov", "-enable_drefs", "0", "-use_absolute_path", "0"]);
+      const durationDrift = original.duration && converted.duration
+        ? Math.abs(original.duration - converted.duration) : Math.abs(original.totalDuration - converted.totalDuration);
+      if (durationDrift > concatDurationTolerance || converted.totalDuration > concatDurationLimit + concatDurationTolerance) {
+        throw Object.assign(new Error("编码转换无法保留完整的原片时长"), { status: 422 });
+      }
+    }
     const data = await readFile(output, { signal: active });
     if (!data.length) throw Object.assign(new Error("兼容预览内容为空"), { status: 422 });
     return { data, mimeType: kind === "video" ? "video/mp4" : kind === "image" ? "image/png" : "audio/mpeg" };

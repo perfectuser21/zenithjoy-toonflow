@@ -4,7 +4,8 @@ import { useNodePreviewReady } from "./useNodePreviewReady";
 
 export interface WorkspaceFiles {
   list(path?: string): Promise<{ directory: string; entries: { name: string; path: string; type: "file" | "directory" }[] }>;
-  read(path: string): Promise<ArrayBuffer>;
+  read(path: string, signal?: AbortSignal): Promise<ArrayBuffer>;
+  normalizeVideo?(path: string, signal?: AbortSignal): Promise<Blob>;
   downloadMashupZip?(items: { name: string; path: string }[]): Promise<boolean>;
   acquireUrl?(path: string, mimeType: string): { url: Promise<string>; release(): void };
   readText(path: string): Promise<string>;

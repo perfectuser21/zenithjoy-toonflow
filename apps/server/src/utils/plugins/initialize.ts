@@ -20,7 +20,9 @@ export async function initializeTrustedNodes(targetDirectory: string, sourceDire
 }
 
 export async function initializeHostedSharedCanvasNodes(targetDirectory: string, sourceDirectory: string) {
-  await syncBundledNodes(targetDirectory, sourceDirectory, ["frameAnalysisNode.umd.js", "videoNode.umd.js"], "hostedSharedNodesRevision");
+  await syncBundledNodes(targetDirectory, sourceDirectory, [
+    "frameAnalysisNode.umd.js", "videoNode.umd.js", "videoGenerationNode.umd.js", "mashupNode.umd.js", "videoConcatNode.umd.js",
+  ], "hostedSharedNodesRevision");
 }
 
 async function syncBundledNodes(targetDirectory: string, sourceDirectory: string, files: readonly string[], marker: string) {
