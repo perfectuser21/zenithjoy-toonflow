@@ -94,6 +94,25 @@ jobs:
           import verifyGeneration
 
 
+          class StagingRejectionTest(unittest.TestCase):
+              def test_rejection_allows_only_staging_to_move_forward_without_success_receipt(self):
+                  with tempfile.TemporaryDirectory() as directory:
+                      state = Path(directory)
+                      journal = state / '42-1.json'
+                      journal.write_text('{"phase":"verifying"}')
+                      with patch.object(releaseHost, 'rootJson', lambda path, private=False: json.loads(path.read_text())):
+                          self.assertFalse(releaseHost.resolvedTransaction(state, journal, 'staging'))
+                          marker = state / 'rejected-42-1.json'
+                          marker.write_text(json.dumps({'result': 'verificationRejected', 'environment': 'staging',
+                                                   'transactionSha256': hashlib.sha256(journal.read_bytes()).hexdigest()}))
+                          self.assertTrue(releaseHost.resolvedTransaction(state, journal, 'staging'))
+                          self.assertFalse(releaseHost.resolvedTransaction(state, journal, 'production'))
+                          journal.write_text('{"phase":"switching"}')
+                          self.assertFalse(releaseHost.resolvedTransaction(state, journal, 'staging'))
+                          journal.write_text('{"phase":"verifying","changed":true}')
+                          self.assertFalse(releaseHost.resolvedTransaction(state, journal, 'staging'))
+
+
           class ProductionCutoverTest(unittest.TestCase):
               def test_failed_candidate_leaves_public_incumbent_running(self):
                   self.assertEqual(self.release(candidate_passes=False), ('old', []))
