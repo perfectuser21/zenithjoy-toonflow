@@ -65,6 +65,7 @@ export const remakeStateSchema = z.strictObject({
   product: z.string(),
   style: z.string(),
   planApproved: z.boolean(),
+  productSwap: z.strictObject({ reference: mediaSchema }).optional(),
   job: jobSchema.optional(),
 });
 export type RemakeAnalysis = z.infer<typeof remakeAnalysisSchema>;
