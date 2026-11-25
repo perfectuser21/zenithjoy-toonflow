@@ -946,9 +946,9 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       nodes: [
         { id: "staleTrim", type: "remote-videoNode", position: { x: 130, y: 200 },
           data: { pendingTrim, outputs: { video: { dataType: "VIDEO", value: { url: sceneSource, mimeType: "video/mp4" } } } } },
+        { id: "ordinaryDelete", type: "remote-textNode", position: { x: 480, y: 550 }, data: { label: "可删除的普通节点" } },
         { id: "deleteTrim", type: "remote-videoNode", position: { x: 130, y: 550 },
           data: { pendingTrim: pendingDelete, outputs: { video: { dataType: "VIDEO", value: { url: sceneSource, mimeType: "video/mp4" } } } } },
-        { id: "ordinaryDelete", type: "remote-textNode", position: { x: 480, y: 550 }, data: { label: "可删除的普通节点" } },
         { id: "readyTrim", type: "remote-videoNode", position: { x: 800, y: 550 },
           data: { pendingTrim: readyTrim, outputs: { video: { dataType: "VIDEO", value: { url: sceneSource, mimeType: "video/mp4" } } } } },
         { id: "customerVideo", type: "remote-videoNode", position: { x: 450, y: 200 },
