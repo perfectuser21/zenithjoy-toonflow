@@ -13,7 +13,10 @@
       <span v-if="error" role="alert">{{ error }}</span>
     </section>
     <section v-else class="content nodrag nopan nowheel" @keydown.stop @dblclick.stop>
-      <span class="status" role="status">{{ status }}</span>
+      <div class="promptBar">
+        <span class="status" role="status">{{ status }}</span>
+        <button class="promptButton" :disabled="busy" @click="openPromptEditor">{{ step === 'review' ? '编辑审核要求' : '编辑提示词' }}</button>
+      </div>
       <details>
         <summary>Skill · {{ skill?.name }} · {{ skill?.version }}</summary>
         <p>{{ skill?.source }}</p>
@@ -25,21 +28,6 @@
           <button :disabled="busy || !skillPath.trim()" @click="loadSkill">加载并固定版本</button>
           <button :disabled="busy || skill?.source === 'Toonflow 内置'" @click="resetSkill">使用内置 Skill</button>
         </div>
-        <label>{{ step === 'review' ? '本节点审核要求' : '本节点提示词' }}
-          <textarea v-model="promptDraft" rows="3" maxlength="4000" :disabled="busy" />
-        </label>
-        <div class="actions">
-          <button :disabled="busy || promptDraft.trim() === promptOverride" @click="savePrompt">保存提示词版本</button>
-          <select v-if="state.promptHistory?.length" v-model="restoredPrompt" aria-label="历史提示词版本" :disabled="busy">
-            <option value="">历史版本</option>
-            <option v-for="(version, index) in state.promptHistory" :key="version.id" :value="version.id">第 {{ index + 1 }} 版</option>
-          </select>
-          <button v-if="restoredPrompt" :disabled="busy" @click="restorePrompt">载入历史文本</button>
-        </div>
-        <details>
-          <summary>当前生效提示词</summary>
-          <pre>{{ prompt }}</pre>
-        </details>
         <details v-if="state.lastPrompt">
           <summary>上次运行使用的提示词</summary>
           <pre>{{ state.lastPrompt }}</pre>
@@ -102,7 +90,7 @@
           </div>
         </details>
         <div class="actions">
-          <button :disabled="busy || !inputCurrent || !modelKey || promptDirty" @click="recommendStyle">AI 推荐版式</button>
+          <button :disabled="busy || !inputCurrent || !modelKey" @click="recommendStyle">AI 推荐版式</button>
           <button :disabled="busy || !inputCurrent || !input?.copies" @click="run">渲染{{ targetCard ? `第 ${targetCard} 张` : '整组' }}</button>
         </div>
       </template>
@@ -116,14 +104,13 @@
           <pre>{{ input.article }}</pre>
         </details>
         <ol v-if="input?.cards"><li v-for="card in input.cards" :key="card.url">{{ card.copy.title }}</li></ol>
-        <button :disabled="busy || !inputCurrent || !input?.cards || promptDirty" @click="run">审核通过并导出</button>
+        <button :disabled="busy || !inputCurrent || !input?.cards" @click="run">审核通过并导出</button>
         <a v-if="downloadUrl && current" :href="downloadUrl" download="IP长文与配图.zip">下载 Markdown 和五张 PNG</a>
       </template>
-      <button v-else :disabled="busy || !runnable || promptDirty" @click="run">
+      <button v-else :disabled="busy || !runnable" @click="run">
         {{ step === 'article' && state.sourceText?.trim() ? '采纳已有长文' : '运行这一步' }}
       </button>
       <button v-if="step === 'topic'" @click="showWorkflow">总览工作流</button>
-      <p v-if="promptDirty" class="status">有未保存的提示词修改</p>
       <details v-if="receipt">
         <summary>{{ current ? '查看当前输出' : '查看上次输出' }}</summary>
         <pre>{{ summarize(receipt) }}</pre>
@@ -138,11 +125,33 @@
       <p v-if="error" role="alert">{{ error }}</p>
     </section>
   </nodeSkeleton>
+  <el-dialog v-if="promptEditorOpen" v-model="promptEditorOpen"
+    :title="`${step === 'review' ? '编辑审核要求' : '编辑提示词'} · ${executable ? labels[executable] : ''}`"
+    width="min(720px, calc(100vw - 32px))" appendToBody :closeOnClickModal="false">
+    <div class="promptEditor" @keydown.stop>
+      <label>当前提示词
+        <textarea v-model="promptDraft" maxlength="24000" aria-label="当前提示词" />
+      </label>
+      <div class="actions">
+        <button @click="promptDraft = defaultPrompt">载入 Skill 默认提示词</button>
+        <select v-if="state.promptHistory?.length" v-model="restoredPrompt" aria-label="历史提示词版本" @change="restorePrompt">
+          <option value="">历史版本</option>
+          <option v-for="(version, index) in state.promptHistory" :key="version.id" :value="version.id">第 {{ index + 1 }} 版</option>
+        </select>
+      </div>
+      <p class="status">保存后，仅在此节点下次运行时生效。</p>
+    </div>
+    <template #footer>
+      <el-button @click="promptEditorOpen = false">取消</el-button>
+      <el-button type="primary" :disabled="!promptDirty || !promptDraft.trim() || busy" @click="savePrompt">保存提示词版本</el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, onScopeDispose, ref, watch } from "vue";
 import { useVueFlow, type GraphNode } from "@vue-flow/core";
+import { ElButton, ElDialog } from "element-plus";
 import { IconSitemap } from "@tabler/icons-vue";
 import { strToU8, zipSync } from "fflate";
 import { defaultPreset, ipCardCopy, ipCardPreset, type IpCardCopy, type IpCardPreset } from "@toonflow/node-ip-card/preset";
@@ -165,8 +174,9 @@ interface WorkflowState {
   skill?: Skill;
   model?: string;
   promptOverride?: string;
+  promptText?: string;
   configRevision?: string;
-  promptHistory?: { id: string; text: string }[];
+  promptHistory?: { id: string; text: string; full?: true }[];
   lastPrompt?: string;
   renderHistory?: Receipt[];
 }
@@ -181,11 +191,14 @@ const step = computed(() => state.value.step);
 const cardNumber = computed(() => state.value.cardNumber ?? 1);
 const executable = computed(() => step.value && step.value !== "result" ? step.value : undefined);
 const skill = computed(() => state.value.skill ?? (executable.value ? builtInSkill(executable.value) : undefined));
-const promptOverride = computed(() => state.value.promptOverride ?? "");
-const promptDraft = ref(promptOverride.value);
-watch(promptOverride, value => { promptDraft.value = value; });
-const promptDirty = computed(() => promptDraft.value.trim() !== promptOverride.value);
-const prompt = computed(() => executable.value && skill.value ? effectivePrompt(executable.value, skill.value, promptOverride.value) : "");
+const defaultPrompt = computed(() => executable.value && skill.value ? effectivePrompt(executable.value, skill.value, "") : "");
+const prompt = computed(() => {
+  if (state.value.promptText !== undefined) return state.value.promptText;
+  return executable.value && skill.value ? effectivePrompt(executable.value, skill.value, state.value.promptOverride ?? "") : "";
+});
+const promptEditorOpen = ref(false);
+const promptDraft = ref("");
+const promptDirty = computed(() => promptDraft.value !== prompt.value);
 const skillPath = ref("");
 const restoredPrompt = ref("");
 const modelKey = computed({ get: () => state.value.model ?? "", set: value => { state.value.model = value; } });
@@ -334,17 +347,27 @@ function updateSource(event: Event) {
   invalidate();
 }
 
-function savePrompt() {
-  if (!promptDirty.value) return;
-  state.value.promptOverride = promptDraft.value.trim();
-  invalidate();
-  state.value.promptHistory = [...(state.value.promptHistory ?? []), { id: state.value.configRevision!, text: promptOverride.value }];
+function openPromptEditor() {
+  promptDraft.value = prompt.value;
   restoredPrompt.value = "";
+  promptEditorOpen.value = true;
+}
+
+function savePrompt() {
+  const text = promptDraft.value;
+  if (!promptDirty.value || !text.trim() || busy.value) return;
+  delete state.value.promptOverride;
+  if (text === defaultPrompt.value) delete state.value.promptText;
+  else state.value.promptText = text;
+  invalidate();
+  state.value.promptHistory = [...(state.value.promptHistory ?? []), { id: state.value.configRevision!, text, full: true }];
+  promptEditorOpen.value = false;
 }
 
 function restorePrompt() {
   const version = state.value.promptHistory?.find(version => version.id === restoredPrompt.value);
-  if (version) promptDraft.value = version.text;
+  if (!version || !executable.value || !skill.value) return;
+  promptDraft.value = version.full ? version.text : effectivePrompt(executable.value, skill.value, version.text);
 }
 
 function resetSkill() {
@@ -397,7 +420,7 @@ async function generate(systemPrompt: string, task: string, signal: AbortSignal)
 
 async function recommendStyle() {
   const source = input.value;
-  if (!inputCurrent.value || !source?.copies || promptDirty.value) return;
+  if (!inputCurrent.value || !source?.copies) return;
   await perform(async signal => {
     const text = await generate(prompt.value, JSON.stringify(source.copies), signal);
     if (!inputCurrent.value || input.value?.revision !== source.revision) throw new Error("上游内容已更新，请重新推荐");
@@ -416,7 +439,6 @@ function commit(output: Receipt, usedPrompt?: string) {
 async function run() {
   const currentStep = executable.value;
   if (!currentStep || (currentStep !== "topic" && !inputCurrent.value)) return;
-  if (currentStep !== "render" && promptDirty.value) return;
   const source = input.value;
   const nodePrompt = prompt.value;
   const localSource = state.value.sourceText?.trim();
@@ -534,5 +556,14 @@ async function exportArticle(article: string, cards: SavedCard[], signal: AbortS
 .content summary { cursor: pointer; }
 .content [role="alert"] { color: var(--el-color-danger); overflow-wrap: anywhere; }
 .actions { display: flex; flex-wrap: wrap; gap: 5px; margin-block: 5px; }
+.promptBar { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+.content .promptButton { color: var(--el-color-primary); border-color: var(--el-color-primary-light-7); white-space: nowrap; }
+.promptEditor { display: grid; gap: 8px; }
+.promptEditor label { display: grid; gap: 8px; }
+.promptEditor textarea {
+  box-sizing: border-box; width: 100%; min-height: min(34vh, 280px); max-height: 48vh; resize: vertical;
+  padding: 10px; border: 1px solid var(--el-border-color); border-radius: 6px;
+  background: var(--el-bg-color); color: var(--el-text-color-primary); font: inherit; line-height: 1.55;
+}
 .fields { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 </style>
