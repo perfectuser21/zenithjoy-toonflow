@@ -94,6 +94,26 @@ jobs:
           import verifyGeneration
 
 
+          class CustomerPointsBudgetTest(unittest.TestCase):
+              def test_release_budget_preserves_the_same_cap_across_denominations(self):
+                  studio = {'maxPoints': '1500'}
+                  with patch.object(verifyGeneration, 'readPoints', return_value={'available': '5000.043497'}):
+                      for capabilities, accepted, rejected in (
+                          ({}, '1500', '1500.001'),
+                          ({'customerPointsPerCny': 1}, '1.5', '1.500001'),
+                      ):
+                          with self.subTest(capabilities=capabilities):
+                              client = unittest.mock.Mock()
+                              client.request.return_value = {'capabilities': capabilities}
+                              with patch.object(verifyGeneration, 'readGenerationQuote',
+                                                return_value=verifyGeneration.asPoints(accepted)):
+                                  verifyGeneration.verifyPointsBudget(client, {}, studio)
+                              with patch.object(verifyGeneration, 'readGenerationQuote',
+                                                return_value=verifyGeneration.asPoints(rejected)):
+                                  with self.assertRaisesRegex(RuntimeError, '积分上限'):
+                                      verifyGeneration.verifyPointsBudget(client, {}, studio)
+
+
           class StagingRejectionTest(unittest.TestCase):
               def test_rejection_allows_only_staging_to_move_forward_without_success_receipt(self):
                   with tempfile.TemporaryDirectory() as directory:
