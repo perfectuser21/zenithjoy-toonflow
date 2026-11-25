@@ -6,7 +6,7 @@ import type { NodeInputValue, NodeOutput } from "./values";
 
 export type NodeEventCallbacks = {
   delete: () => void | Promise<void>;
-  save: (reason?: "reload") => void | Promise<void>;
+  save: (reason?: "reload" | "delete") => void | Promise<void>;
   copy: () => Record<string, unknown> | Promise<Record<string, unknown>>;
   canConnect: ValidConnectionFunc;
   [name: `input:${string}`]: (values: NodeInputValue[]) => void;
@@ -79,10 +79,9 @@ export function useNodeEvent(nodeId = useNodeId(), canvas = useVueFlow()) {
     return (async () => {
       if (args[0] === "delete") {
         const node = canvas.findNode(nodeId);
-        if (node?.data?.pendingTrim) throw new Error("请先恢复未完成的截取，再删除节点");
-        // 删除前完成已有文件写入，保证立即撤销时能读回最新内容。
-        for (const callback of [...events?.save ?? []]) await callback();
+        for (const callback of [...events?.save ?? []]) await callback("delete");
         if (canvas.findNode(nodeId) !== node || registry.get(nodeId) !== events) throw new Error("节点已切换，请重新操作");
+        if (node?.data?.pendingTrim) throw new Error("请先恢复未完成的截取，再删除节点");
       }
       for (const callback of [...events?.[args[0]] ?? []]) {
         if (args[0] === "save" && args[1]) await callback(args[1]);
