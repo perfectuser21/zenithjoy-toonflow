@@ -1,5 +1,5 @@
 <template>
-  <nodeSkeleton v-bind="nodeProps" class="ipCardNode" :fullscreenVisible="false" :downloadUrl="selectedUrl" downloadName="ipCard03.png">
+  <nodeSkeleton v-bind="nodeProps" class="ipCardNode" style="width: 448px" :fullscreenVisible="false" :downloadUrl="selectedUrl" downloadName="ipCard03.png">
     <section class="content nodrag nopan nowheel" @pointerdown.stop @dblclick.stop @keydown.stop>
       <p class="hint">样稿 · 第 3 张正文配图</p>
       <label class="field">怎么改
@@ -119,12 +119,14 @@ async function generate() {
 </script>
 
 <style scoped>
-.content { width: 430px; display: grid; gap: 10px; padding: 10px; }
+.content { display: grid; gap: 10px; padding: 10px; }
 .hint { margin: 0; color: var(--el-text-color-secondary); font-size: 12px; }
 .field { display: grid; gap: 4px; flex: 1; min-width: 0; font-weight: 500; }
-.actions { display: flex; align-items: end; gap: 8px; }
+.actions { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
+.actions .field { flex-basis: 180px; }
 textarea, select, button { font: inherit; }
 textarea, select { background: var(--el-fill-color-light); border: 1px solid var(--el-border-color); border-radius: 6px; color: inherit; padding: 6px 8px; }
+textarea, select { width: 100%; min-width: 0; box-sizing: border-box; }
 textarea { resize: vertical; }
 button { border: 0; border-radius: 6px; padding: 6px 12px; white-space: nowrap; }
 .primary { color: white; background: var(--el-color-primary); }
