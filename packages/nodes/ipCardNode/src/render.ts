@@ -1,17 +1,9 @@
+/// <reference path="./wasmAsset.d.ts" />
 import { resolve } from "node:path";
 import { readFile } from "@toonflow/file";
-import { z } from "zod";
+import type { IpCardPreset } from "./preset";
 import { initWasm, Resvg } from "@resvg/resvg-wasm";
 import wasmPath from "@resvg/resvg-wasm/index_bg.wasm" with { type: "file" };
-
-export const ipCardPreset = z.strictObject({
-  layout: z.enum(["leftVisualRightText", "rightVisualLeftText"]),
-  paper: z.enum(["warmWhite", "coolWhite"]),
-  accent: z.enum(["blue", "green"]),
-  showPage: z.boolean(),
-});
-
-type Preset = z.infer<typeof ipCardPreset>;
 
 const input = {
   "number": "03",
@@ -26,7 +18,7 @@ const input = {
   ]
 };
 
-export function renderIpCardSvg(preset: Preset) {
+function renderIpCardSvg(preset: IpCardPreset) {
   const ink = '#1D2A40';
   const muted = '#526379';
   const paper = preset.paper === 'warmWhite' ? '#F7F4ED' : '#F2F6FB';
@@ -75,7 +67,7 @@ const fontFamily = process.platform === "darwin" ? "Heiti SC" : process.platform
 let engine: Promise<void> | undefined;
 let font: Promise<Buffer> | undefined;
 
-export async function renderIpCard(preset: Preset) {
+export async function renderIpCard(preset: IpCardPreset) {
   engine ??= initWasm(readFile(resolve(import.meta.dir, wasmPath)).then(bytes => WebAssembly.compile(new Uint8Array(bytes))));
   font ??= readFile(process.env.TOONFLOW_IP_CARD_FONT ?? fontPath);
   const [, fontData] = await Promise.all([engine, font]);

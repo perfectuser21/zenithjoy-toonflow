@@ -14,6 +14,8 @@
     "element-plus": "^2.14.5"
   },
   "dependencies": {
+    "@resvg/resvg-wasm": "2.6.2",
+    "@toonflow/file": "workspace:*",
     "@tabler/icons-vue": "^3.46.0",
     "zod": "^4.6.2"
   },
@@ -22,5 +24,9 @@
     "typescript": "~6.0.3",
     "vite": "^8.2.2",
     "vue-tsc": "^3.3.11"
+  },
+  "exports": {
+    "./render": "./src/render.ts",
+    "./preset": "./src/preset.ts"
   }
 }

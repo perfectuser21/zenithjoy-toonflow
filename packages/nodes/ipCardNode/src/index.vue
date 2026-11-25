@@ -30,7 +30,7 @@
 import { computed, onMounted, onScopeDispose, ref } from "vue";
 import { IconPhotoEdit } from "@tabler/icons-vue";
 import { findNodeModel, getNodeModelIdentity, getNodeModelKey, nodeSkeleton, uploadNodeFile, useNode, type NodeAiModel, type NodeMediaValue } from "@toonflow/nodes-scaffold/runtime";
-import { z } from "zod";
+import { ipCardPreset, type IpCardPreset } from "./preset";
 import original from "./original.png?inline";
 
 defineOptions({
@@ -38,13 +38,7 @@ defineOptions({
   icon: IconPhotoEdit,
 });
 
-const presetSchema = z.strictObject({
-  layout: z.enum(["leftVisualRightText", "rightVisualLeftText"]),
-  paper: z.enum(["warmWhite", "coolWhite"]),
-  accent: z.enum(["blue", "green"]),
-  showPage: z.boolean(),
-});
-type Version = NodeMediaValue & { preset: z.infer<typeof presetSchema> };
+type Version = NodeMediaValue & { preset: IpCardPreset };
 const { id, node, nodeProps, ai, files } = useNode({ label: "IP 卡片改版", onModelsChanged: () => void loadModels() });
 const data = node.data as typeof node.data & { ipCardVersions?: Version[]; ipCardSelected?: string };
 const versions = computed(() => data.ipCardVersions ?? []);
@@ -98,7 +92,7 @@ async function generate() {
       signal: controller.signal,
     });
     const json = result.text.trim().replace(/^\x60\x60\x60(?:json)?\s*/i, "").replace(/\s*\x60\x60\x60$/, "");
-    const preset = presetSchema.parse(JSON.parse(json));
+    const preset = ipCardPreset.parse(JSON.parse(json));
     const response = await fetch("/api/ai/ipCard/render", {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-toonflow-workspace": "1" },

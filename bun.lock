@@ -48,7 +48,6 @@
         "@earendil-works/pi-coding-agent": "^0.85.1",
         "@firecrawl/anydoc": "0.2.4",
         "@firecrawl/anydoc-wasm": "0.2.4",
-        "@resvg/resvg-wasm": "2.6.2",
         "@toonflow/ffmpeg": "workspace:*",
         "@toonflow/file": "workspace:*",
         "@toonflow/i18n": "workspace:*",
@@ -59,6 +58,7 @@
         "@toonflow/multi-tenant-gateway": "workspace:*",
         "@toonflow/multi-tenant-models": "workspace:*",
         "@toonflow/multi-tenant-source-mapping": "workspace:*",
+        "@toonflow/node-ip-card": "workspace:*",
         "@toonflow/providers": "workspace:*",
         "@toonflow/teams-scaffold": "workspace:*",
         "@toonflow/tool-asset-operator": "workspace:*",
@@ -642,7 +642,9 @@
       "name": "@toonflow/node-ip-card",
       "version": "2.0.0",
       "dependencies": {
+        "@resvg/resvg-wasm": "2.6.2",
         "@tabler/icons-vue": "^3.46.0",
+        "@toonflow/file": "workspace:*",
         "zod": "^4.6.2",
       },
       "devDependencies": {
