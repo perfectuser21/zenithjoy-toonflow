@@ -91,7 +91,7 @@ export async function readClipboardNodes(command: string, directory: string) {
     path.forEach(id => checked.add(id));
   }
   const relativeUrl = (url: string) => !/^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(url);
-  const hasWorkspaceFile = nodes.some(node => Object.values(node.data.outputs ?? {}).some(output => {
+  const hasWorkspaceFile = nodes.some(node => node.data.workspaceScoped === true || Object.values(node.data.outputs ?? {}).some(output => {
     if (!isNodeOutput(output)) return false;
     return output.dataType === "VIDEO_BATCH" ? output.value.some(clip => relativeUrl(clip.url))
       : typeof output.value === "object" && relativeUrl(output.value.url);

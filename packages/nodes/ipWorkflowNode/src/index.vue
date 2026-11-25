@@ -253,6 +253,11 @@ const cardDraft = ref<IpCardCopy>();
 const preset = ref<IpCardPreset>({ ...defaultPreset });
 const restoredRender = ref("");
 const receipt = computed(() => readReceipt(outputs.value.out.value));
+watch(() => !!(activeNotion.value?.snapshotPath || receipt.value?.notionReference?.snapshotPath
+  || receipt.value?.cards || receipt.value?.exportPath || state.value.renderHistory?.length), scoped => {
+  if (scoped) state.value.workspaceScoped = true;
+  else delete state.value.workspaceScoped;
+}, { immediate: true, flush: "sync" });
 const type = "remote-ipWorkflowNode";
 const editCardEvent = "toonflow:editIpWorkflowCard";
 function editResult() {
