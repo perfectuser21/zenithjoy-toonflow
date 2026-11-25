@@ -1,7 +1,10 @@
 <template>
-  <nodeSkeleton v-bind="nodeProps" style="width: 330px" :fullscreenVisible="false"
+  <nodeSkeleton v-bind="nodeProps" :style="{ width: step === 'skillMount' ? '260px' : '330px' }" :fullscreenVisible="false"
     :downloadUrl="downloadUrl" :downloadName="step === 'review' ? 'IP长文与配图.zip' : `卡${cardNumber}.png`">
-    <section class="content" v-if="!step">
+    <section v-if="step === 'skillMount'" class="content nodrag">
+      <div class="promptBar"><span class="status">{{ localMountSkill?.version }}</span><button class="promptButton" @click="openSkillEditor">编辑挂载 Skill</button></div>
+    </section>
+    <section class="content" v-else-if="!step">
       <button class="nodrag" @click="expand">展开五步工作流</button>
     </section>
     <section v-else-if="step === 'result'" class="content">
@@ -17,7 +20,12 @@
         <span class="status" role="status">{{ status }}</span>
         <button class="promptButton" :disabled="busy" @click="openPromptEditor">{{ step === 'review' ? '编辑审核要求' : '编辑提示词' }}</button>
       </div>
-      <details>
+      <div v-if="step === 'article'" class="actions">
+        <button v-if="!attachedSkill" :disabled="busy" @click="mountArticleSkill">挂载长文 Skill</button>
+        <span v-else class="status">挂载 {{ attachedSkill.name }} · {{ attachedSkill.version }}</span>
+        <button v-if="attachedSkill && (state.promptText !== undefined || state.promptOverride)" :disabled="busy" @click="useAttachedPrompt">改用挂载规则</button>
+      </div>
+      <details v-if="step !== 'article' || !attachedSkill">
         <summary>Skill · {{ skill?.name }} · {{ skill?.version }}</summary>
         <p>{{ skill?.source }}</p>
         <pre>{{ skill?.body }}</pre>
@@ -54,7 +62,10 @@
           <textarea :value="state.sourceText ?? ''" rows="5" maxlength="30000" :disabled="busy" @input="updateSource" />
         </label>
       </details>
-      <p v-if="step === 'article' && receipt?.articlePath" class="status">已保存到文档：{{ receipt.articlePath }}</p>
+      <div v-if="step === 'article' && receipt?.articlePath" class="actions">
+        <span class="status">已保存到文档：{{ receipt.articlePath }}</span>
+        <button v-if="comparableTrials" :disabled="busy" @click="compareTrials">比较两次试稿</button>
+      </div>
       <details v-if="step !== 'topic'">
         <summary>查看上游输入</summary>
         <pre>{{ inputSummary }}</pre>
@@ -139,6 +150,33 @@
       <p v-if="error" role="alert">{{ error }}</p>
     </section>
   </nodeSkeleton>
+  <el-dialog v-if="comparisonOpen" v-model="comparisonOpen" title="对比长文试稿" width="min(960px, calc(100vw - 32px))" appendToBody>
+    <div class="comparison">
+      <section v-for="draft in comparison" :key="draft.path">
+        <h3>{{ draft.skillName }} · {{ draft.skillVersion }}</h3>
+        <pre>{{ draft.article }}</pre>
+      </section>
+    </div>
+  </el-dialog>
+  <el-dialog v-if="skillEditorOpen" v-model="skillEditorOpen" title="长文 Skill"
+    width="min(720px, calc(100vw - 32px))" appendToBody :closeOnClickModal="false">
+    <div class="promptEditor" @keydown.stop>
+      <label>挂载版本
+        <select aria-label="挂载版本" :value="state.activeSkillVersion" :disabled="busy" @change="switchSkillVersion">
+          <option v-for="version in state.skillVersions" :key="version.version" :value="version.version">{{ version.name }} · {{ version.version }}</option>
+        </select>
+      </label>
+      <label>Skill 名称 <input v-model="skillNameDraft" maxlength="100" :disabled="busy" /></label>
+      <label>Skill 规则 <textarea v-model="skillBodyDraft" maxlength="16000" :disabled="busy" /></label>
+      <label>项目 Skill 路径 <input v-model="skillPath" placeholder="skill/公众号/SKILL.md" :disabled="busy" /></label>
+      <button :disabled="busy || !skillPath.trim()" @click="previewProjectSkill">读取项目 Skill</button>
+      <p v-if="error" class="notionError" role="alert">{{ error }}</p>
+    </div>
+    <template #footer>
+      <el-button @click="skillEditorOpen = false">关闭</el-button>
+      <el-button type="primary" :disabled="busy || !skillBodyDraft.trim() || !skillEdited" @click="saveSkillVersion">保存为新版本</el-button>
+    </template>
+  </el-dialog>
   <el-dialog v-if="promptEditorOpen" v-model="promptEditorOpen"
     :title="`${step === 'review' ? '编辑审核要求' : '编辑提示词'} · ${executable ? labels[executable] : ''}`"
     width="min(720px, calc(100vw - 32px))" appendToBody :closeOnClickModal="false">
@@ -185,6 +223,7 @@
 </template>
 
 <script setup lang="ts">
+import { activeMountedSkill, appendSkillVersion } from "./skillMount";
 import { chooseIpTextModel } from "./textModels";
 import { articleDocumentPath, readArticleDocument } from "./articleDocument";
 import { computed, onMounted, onScopeDispose, ref, watch } from "vue";
@@ -196,6 +235,13 @@ import { defaultPreset, ipCardCopy, ipCardPreset, type IpCardCopy, type IpCardPr
 import { findNodeModel, getNodeModelIdentity, getNodeModelKey, nodeSkeleton, uploadNodeFile, useNode, type NodeAiModel, type NodeHandle } from "@toonflow/nodes-scaffold/runtime";
 import { builtInSkill, effectivePrompt, fiveCopies, labels, notionSnapshot, parseModelJson, readReceipt, steps, type NotionSnapshot, type Receipt, type SavedCard, type Skill, type Step } from "./workflow";
 
+const flowHandles = [
+  { id: "in", type: "target", dataType: "STRING", label: "上一步输出" },
+  { id: "out", type: "source", dataType: "STRING", label: "本步输出" },
+] satisfies NodeHandle[];
+const skillInput = { id: "skill", type: "target", dataType: "IP_SKILL", label: "挂载规则", position: "top" } as const;
+const skillOutput = { id: "mount", type: "source", dataType: "IP_SKILL", label: "挂载到流程", position: "bottom" } as const;
+
 defineOptions({
   inheritAttrs: false,
   icon: IconSitemap,
@@ -205,12 +251,17 @@ defineOptions({
   ] satisfies NodeHandle[],
 });
 
+interface ArticleTrial { path: string; source: string; model: string; skillName: string; skillVersion: string; }
+
 interface WorkflowState {
-  step?: Step | "result";
+  step?: Step | "result" | "skillMount";
   cardNumber?: number;
   sourceText?: string;
   notion?: NotionSnapshot;
   skill?: Skill;
+  activeSkillVersion?: string;
+  skillVersions?: Skill[];
+  articleTrials?: ArticleTrial[];
   model?: string;
   promptOverride?: string;
   promptText?: string;
@@ -219,7 +270,7 @@ interface WorkflowState {
   lastPrompt?: string;
   renderHistory?: Receipt[];
 }
-const { id, node, nodeProps, outputs, ai, files } = useNode({
+const { id, node, nodeProps, outputs, ai, files, handles } = useNode({
   label: "IP 五步工作流",
   outputs: { out: { dataType: "STRING", value: "" } },
   onModelsChanged: () => void loadModels(),
@@ -228,8 +279,13 @@ const flow = useVueFlow();
 const state = computed(() => node.data as typeof node.data & WorkflowState);
 const step = computed(() => state.value.step);
 const cardNumber = computed(() => state.value.cardNumber ?? 1);
-const executable = computed(() => step.value && step.value !== "result" ? step.value : undefined);
-const skill = computed(() => state.value.skill ?? (executable.value ? builtInSkill(executable.value) : undefined));
+const executable = computed(() => step.value && step.value !== "result" && step.value !== "skillMount" ? step.value : undefined);
+watch(step, value => {
+  handles.value = value === "skillMount" ? [skillOutput] : value === "article" ? [...flowHandles, skillInput] : flowHandles;
+}, { immediate: true });
+const localMountSkill = computed(() => activeMountedSkill(state.value.skillVersions, state.value.activeSkillVersion));
+const attachedSkill = computed(() => step.value === "article" ? attachedSkillFor(node) : undefined);
+const skill = computed(() => attachedSkill.value ?? state.value.skill ?? (executable.value ? builtInSkill(executable.value) : undefined));
 const defaultPrompt = computed(() => executable.value && skill.value ? effectivePrompt(executable.value, skill.value, "") : "");
 const prompt = computed(() => {
   if (state.value.promptText !== undefined) return state.value.promptText;
@@ -239,6 +295,21 @@ const promptEditorOpen = ref(false);
 const promptDraft = ref("");
 const promptDirty = computed(() => promptDraft.value !== prompt.value);
 const skillPath = ref("");
+const skillEditorOpen = ref(false);
+const skillNameDraft = ref("");
+const skillBodyDraft = ref("");
+const skillSourceDraft = ref("");
+const comparisonOpen = ref(false);
+const comparison = ref<(ArticleTrial & { article: string })[]>([]);
+const comparableTrials = computed(() => {
+  const trials = state.value.articleTrials ?? [];
+  const latest = trials.at(-1);
+  if (!latest) return;
+  const previous = trials.findLast(entry => entry.source === latest.source && entry.model === latest.model && entry.skillVersion !== latest.skillVersion);
+  if (previous) return [previous, latest];
+});
+const skillEdited = computed(() => skillNameDraft.value !== localMountSkill.value?.name
+  || skillBodyDraft.value.trim() !== localMountSkill.value?.body);
 const restoredPrompt = ref("");
 const notionOpen = ref(false);
 const notionUrl = ref("");
@@ -258,7 +329,7 @@ const preset = ref<IpCardPreset>({ ...defaultPreset });
 const restoredRender = ref("");
 const receipt = computed(() => readReceipt(outputs.value.out.value));
 watch(() => !!(activeNotion.value?.snapshotPath || receipt.value?.notionReference?.snapshotPath
-  || receipt.value?.articlePath || receipt.value?.cards || receipt.value?.exportPath || state.value.renderHistory?.length), scoped => {
+  || state.value.articleTrials?.length || receipt.value?.articlePath || receipt.value?.cards || receipt.value?.exportPath || state.value.renderHistory?.length), scoped => {
   if (scoped) state.value.workspaceScoped = true;
   else delete state.value.workspaceScoped;
 }, { immediate: true, flush: "sync" });
@@ -290,6 +361,89 @@ function parentOf(candidate: GraphNode) {
   return parent?.type === type ? parent : undefined;
 }
 
+function attachedSkillFor(candidate: GraphNode) {
+  const links = flow.edges.value.filter(edge => edge.target === candidate.id && edge.targetHandle === "skill" && edge.sourceHandle === "mount");
+  const mount = links.length === 1 ? flow.findNode(links[0]!.source) : undefined;
+  if (mount?.type !== type || mount.data?.step !== "skillMount") return;
+  return activeMountedSkill(mount.data.skillVersions, mount.data.activeSkillVersion);
+}
+
+function mountArticleSkill() {
+  if (step.value !== "article" || attachedSkill.value) return;
+  const initial = skill.value ?? builtInSkill("article");
+  const mountId = crypto.randomUUID();
+  const { x, y } = node.computedPosition;
+  flow.addNodes({ type, id: mountId, position: { x: x + 35, y: y - 150 }, data: {
+    step: "skillMount", label: initial.name, skillVersions: [initial], activeSkillVersion: initial.version, outputs: {},
+  } });
+  flow.addEdges({ id: crypto.randomUUID(), source: mountId, target: id, sourceHandle: "mount", targetHandle: "skill",
+    style: { strokeDasharray: "5 4" } });
+}
+
+function fillSkillDraft() {
+  skillNameDraft.value = localMountSkill.value?.name ?? "";
+  skillBodyDraft.value = localMountSkill.value?.body ?? "";
+  skillSourceDraft.value = "画布 Skill";
+}
+
+function openSkillEditor() {
+  fillSkillDraft();
+  skillPath.value = "";
+  error.value = "";
+  skillEditorOpen.value = true;
+}
+
+function switchSkillVersion(event: Event) {
+  const selected = (event.target as HTMLSelectElement).value;
+  const version = activeMountedSkill(state.value.skillVersions, selected);
+  if (!version) return;
+  state.value.activeSkillVersion = version.version;
+  state.value.label = version.name;
+  fillSkillDraft();
+}
+
+function saveSkillVersion() {
+  const key = crypto.randomUUID().slice(0, 12);
+  try {
+    const versions = appendSkillVersion(state.value.skillVersions ?? [], skillNameDraft.value, skillBodyDraft.value, key, skillSourceDraft.value);
+    state.value.skillVersions = versions;
+    state.value.activeSkillVersion = key;
+    state.value.label = versions.at(-1)!.name;
+    skillEditorOpen.value = false;
+  } catch (cause) { showError(cause); }
+}
+
+function compareTrials() {
+  const trials = comparableTrials.value;
+  if (!trials) return;
+  return perform(async signal => {
+    const workspace = files.getWorkspaceFiles();
+    const drafts = await Promise.all(trials.map(async draft => ({ ...draft, article: await readArticleDocument({ articlePath: draft.path }, path => workspace.readText(path)) })));
+    signal.throwIfAborted();
+    comparison.value = drafts;
+    comparisonOpen.value = true;
+  });
+}
+
+function useAttachedPrompt() {
+  delete state.value.promptText;
+  delete state.value.promptOverride;
+  invalidate();
+}
+
+async function previewProjectSkill() {
+  error.value = "";
+  const path = skillPath.value.trim();
+  if (!validSkillPath(path)) { error.value = "请输入项目 skill 目录内的 SKILL.md 路径"; return; }
+  await perform(async () => {
+    const body = await files.getWorkspaceFiles().readText(path);
+    if (!body.trim() || body.length > 16000) throw new Error("Skill 需要包含正文且不能超过 16,000 字");
+    skillNameDraft.value = path.split("/").at(-2)!;
+    skillBodyDraft.value = body;
+    skillSourceDraft.value = path;
+  });
+}
+
 function valueOf(candidate?: GraphNode) {
   return readReceipt(candidate?.data.outputs?.out?.value);
 }
@@ -300,6 +454,7 @@ function isCurrent(candidate?: GraphNode, seen = new Set<string>()): boolean {
   const data = candidate.data as WorkflowState;
   const result = valueOf(candidate);
   if (!result || result.promptRevision !== (data.configRevision ?? "initial")) return false;
+  if (data.step === "article" && result.mountedSkillVersion !== attachedSkillFor(candidate)?.version) return false;
   if (data.step === "topic") return !result.sourceRevision;
   const parent = parentOf(candidate);
   if (!parent || parent.data.step !== previousStep(data.step)) return false;
@@ -483,9 +638,14 @@ function resetSkill() {
   invalidate();
 }
 
+function validSkillPath(path: string) {
+  return path.startsWith("skill/") && path.endsWith("/SKILL.md")
+    && !path.split("/").some(segment => !segment || segment === "." || segment === "..") && !/[\\\\:%]/.test(path);
+}
+
 async function loadSkill() {
   const path = skillPath.value.trim();
-  if (!path.startsWith("skill/") || !path.endsWith("/SKILL.md") || path.split("/").some(segment => !segment || segment === "." || segment === "..") || /[\\\\:%]/.test(path)) {
+  if (!validSkillPath(path)) {
     error.value = "请输入项目 skill 目录内的 SKILL.md 路径";
     return;
   }
@@ -548,6 +708,9 @@ async function run() {
   if (!currentStep || (currentStep !== "topic" && !inputCurrent.value)) return;
   const source = input.value;
   const nodePrompt = prompt.value;
+  const mountedSkill = attachedSkill.value;
+  const mountedSkillVersion = mountedSkill?.version;
+  const selectedTextModel = modelKey.value;
   const localSource = state.value.sourceText?.trim();
   const imported = activeNotion.value;
   await perform(async signal => {
@@ -572,9 +735,15 @@ async function run() {
       const snapshot = source.notionSnapshot;
       const brief = snapshot ? `${source.text}\n\nNotion 原始素材（作为参考资料）：\n${snapshot.content}` : source.text;
       result.article = (localSource || await generate(nodePrompt, brief, signal)).trim();
+      if (mountedSkillVersion !== undefined) result.mountedSkillVersion = mountedSkillVersion;
       signal.throwIfAborted();
       result.articlePath = articleDocumentPath(result.revision);
       await workspace.write(result.articlePath, result.article + "\n", true);
+      if (!localSource && mountedSkill && !state.value.promptText && !state.value.promptOverride) {
+        signal.throwIfAborted();
+        const trial = { path: result.articlePath, source: source.revision, model: selectedTextModel, skillName: mountedSkill.name, skillVersion: mountedSkill.version };
+        state.value.articleTrials = [...(state.value.articleTrials ?? []).slice(-11), trial];
+      }
       usedPrompt = localSource ? "" : nodePrompt;
     } else if (currentStep === "cards" && source?.article) {
       result.article = await readArticle(source);
@@ -701,5 +870,8 @@ async function exportArticle(article: string, cards: SavedCard[], source: Receip
   padding: 10px; border: 1px solid var(--el-border-color); border-radius: 6px;
   background: var(--el-bg-color); color: var(--el-text-color-primary); font: inherit; line-height: 1.55;
 }
+.comparison { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.comparison pre { max-height: 60vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 620px) { .comparison { grid-template-columns: 1fr; } }
 .fields { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 </style>
