@@ -11,6 +11,7 @@ import { once } from "node:events";
 import { createServer } from "node:https";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { remakeMovieOptions } from "../../../../../packages/nodes/frameAnalysisNode/src/remakeMovieOptions";
 import { createSceneDetector } from "../../../../../packages/nodes/frameAnalysisNode/src/sceneDetector";
 import { combinationCount, combinationAt, renderBatch, type MashupClip } from "../../../../../packages/nodes/mashupNode/src/mashupBatch";
 import { initializeHostedSharedCanvasNodes, initializeTrustedNodes, trustedNodeNames } from "./initialize";
@@ -1449,7 +1450,18 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
           expect(swapRequests[0]?.body).toMatchObject({ videoPath: guidedSource, cuts: swapFixture.cuts.slice(1, -1) });
           const sent = z.object({ shots: z.array(z.object({ image: z.unknown(), prompt: z.string() })) }).parse(swapRequests[2]?.body);
           expect(sent.shots.map(({ image }) => image)).toEqual(Array(3).fill(swap.productSwap.reference));
-          expect(sent.shots.every(({ prompt }) => prompt.includes("只替换原视频中出现的商品"))).toBe(true);
+          for (const { prompt } of sent.shots) {
+            expect(prompt).toContain("只替换原视频中出现的商品");
+            expect(prompt).toMatch(/镜头.*人物/);
+            expect(prompt).not.toContain("仅使用背景参考换景");
+            expect(prompt).toContain("不得新增人物、手或动作");
+            expect(prompt).toContain("标签图案");
+          }
+          const picture = { path: "assets/original-room.png", mimeType: "image/png" };
+          expect(remakeMovieOptions({
+            shots: [{ group: 1, productPrompt: "保留原标签" }],
+            groups: [{ id: 1, picture }],
+          })).toEqual([{ image: picture, prompt: "仅使用背景参考换景，保持原镜头时间、真实人物与商品、手部和字幕。商品展示要求：保留原标签" }]);
           const completedSwap = await readSwap();
           expect(completedSwap.job).toMatchObject({ phase: "completed", result: swapOutput });
           const savedOutput = JSON.parse(await readFile(customerCanvas, "utf8")).nodes.find((node: { id: string }) => node.id === completedSwap.job.outputId);
