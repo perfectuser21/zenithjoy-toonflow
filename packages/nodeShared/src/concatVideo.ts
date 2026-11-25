@@ -4,12 +4,13 @@ import {
   canEncodeAudio, canEncodeVideo, Input, MP4, Mp4OutputFormat, NullTarget, Output, QTFF, QUALITY_HIGH, VideoSample, VideoSampleSource, WavOutputFormat,
   type EncodedPacket, type InputTrack,
 } from "mediabunny";
+import type { WorkspaceFiles } from "@toonflow/nodes-scaffold/runtime";
 
 const workspaceFileLimit = 100 * 1024 * 1024;
 export const maxConcatClips = 6;
 
 export async function prepareConcatClip(
-  { blob, directory, path }: { blob: Blob; directory: string; path: string },
+  { blob, workspace, path }: { blob: Blob; workspace: Pick<WorkspaceFiles, "normalizeVideo">; path: string },
   signal: AbortSignal,
 ) {
   signal.throwIfAborted();
@@ -23,16 +24,17 @@ export async function prepareConcatClip(
     }
   } finally { input.dispose(); }
 
-  const response = await fetch("/api/workspaces/files/normalizeVideo", {
-    method: "POST", headers: { "Content-Type": "application/json", "x-toonflow-workspace": "1" },
-    body: JSON.stringify({ directory, path }), signal,
-  });
-  if (!response.ok) {
-    const reason: unknown = await response.json().catch(() => null);
+  if (!workspace.normalizeVideo) throw new Error("当前画布不支持转换素材编码");
+  try {
+    return await workspace.normalizeVideo(path, signal);
+  } catch (error) {
+    signal.throwIfAborted();
+    const response = error && typeof error === "object" && "response" in error ? error.response : undefined;
+    const data = response && typeof response === "object" && "data" in response ? response.data : undefined;
+    const reason: unknown = data instanceof Blob ? await data.text().then(JSON.parse).catch(() => null) : data;
     const message = reason && typeof reason === "object" && "message" in reason && typeof reason.message === "string" ? reason.message : "";
-    throw new Error(message || "无法转换素材编码");
+    throw new Error(message || "无法转换素材编码", { cause: error });
   }
-  return response.blob();
 }
 
 async function inspectClip(input: Input, position: number) {

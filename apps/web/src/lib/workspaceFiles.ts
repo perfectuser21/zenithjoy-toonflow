@@ -50,6 +50,11 @@ export default function useWorkspaceFiles(directory?: MaybeRefOrGetter<string | 
     return data;
   }
 
+  async function normalizeVideo(path: string, signal?: AbortSignal) {
+    const { data } = await client.post<Blob>("/normalizeVideo", { directory: getDirectory(), path }, { responseType: "blob", signal });
+    return data;
+  }
+
   async function importImage(url: string) {
     const { data } = await client.post<{ data: { path: string; mimeType: string } }>("/importImage", { directory: getDirectory(), url });
     return data.data;
@@ -199,5 +204,5 @@ export default function useWorkspaceFiles(directory?: MaybeRefOrGetter<string | 
   }
 
   // ACT: 当前目录逐次读取；跨 await 或防抖的操作传入目录字符串，固定本次目标。
-  return { list, read, downloadMashupZip, importImage, cloneProject, exportZip, acquireUrl, readText, readJson, readTextSnapshot, writeTextSnapshot, write, writeJson, rename, copy, reveal, remove, mkdir };
+  return { list, read, normalizeVideo, downloadMashupZip, importImage, cloneProject, exportZip, acquireUrl, readText, readJson, readTextSnapshot, writeTextSnapshot, write, writeJson, rename, copy, reveal, remove, mkdir };
 }

@@ -172,8 +172,8 @@ async function run(first: boolean) {
         if (lastClip[slot]?.url !== clip.url) {
           let blob = normalized.get(clip.url);
           if (!blob) {
-            const original = new Blob([await workspace.read(clip.url)], { type: clip.mimeType });
-            blob = await prepareConcatClip({ blob: original, directory: saved.directory, path: clip.url }, signal);
+            const original = new Blob([await workspace.read(clip.url, signal)], { type: clip.mimeType });
+            blob = await prepareConcatClip({ blob: original, workspace, path: clip.url }, signal);
             if (blob !== original && normalizedBytes + blob.size <= 100 * 1024 * 1024) {
               normalized.set(clip.url, blob);
               normalizedBytes += blob.size;
