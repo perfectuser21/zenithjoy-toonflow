@@ -35,16 +35,16 @@
       </details>
       <template v-if="step === 'topic'">
         <div class="actions">
-          <button class="promptButton" :disabled="busy" @click="openNotion">{{ state.notion ? '重新读取 Notion' : '从 Notion 导入' }}</button>
-          <a v-if="state.notion" :href="state.notion.url" target="_blank" rel="noopener noreferrer">打开原文</a>
+          <button class="promptButton" :disabled="busy" @click="openNotion">{{ activeNotion ? '重新读取 Notion' : '从 Notion 导入' }}</button>
+          <a v-if="activeNotion" :href="activeNotion.url" target="_blank" rel="noopener noreferrer">打开原文</a>
         </div>
-        <details v-if="state.notion">
-          <summary>{{ state.notion.title }} · 已读取</summary>
-          <p>原文更新时间 {{ formatSourceDate(state.notion.editedAt) }}</p>
-          <pre>{{ state.notion.content }}</pre>
+        <details v-if="activeNotion">
+          <summary>{{ activeNotion.title }} · 已读取</summary>
+          <p>原文更新时间 {{ formatSourceDate(activeNotion.editedAt) }}</p>
+          <pre>{{ activeNotion.content }}</pre>
           <button :disabled="busy" @click="removeNotion">移除素材</button>
         </details>
-        <label>{{ state.notion ? '补充选题要求' : '选题需求与已有素材' }}
+        <label>{{ activeNotion ? '补充选题要求' : '选题需求与已有素材' }}
           <textarea :value="state.sourceText ?? ''" rows="4" maxlength="16000" :disabled="busy" @input="updateSource" />
         </label>
       </template>
@@ -239,6 +239,10 @@ const restoredPrompt = ref("");
 const notionOpen = ref(false);
 const notionUrl = ref("");
 const notionPreview = ref<NotionSnapshot>();
+const activeNotion = computed(() => {
+  const parsed = notionSnapshot.safeParse(state.value.notion);
+  return parsed.success ? parsed.data : undefined;
+});
 const modelKey = computed({ get: () => state.value.model ?? "", set: value => { state.value.model = value; } });
 const models = ref<NodeAiModel[]>([]);
 const canUseAi = computed(() => executable.value && executable.value !== "review" && !(step.value === "article" && state.value.sourceText?.trim()));
@@ -303,7 +307,7 @@ const inputCurrent = computed(() => !!input.value && isCurrent(parent.value));
 const current = computed(() => isCurrent(node));
 const status = computed(() => busy.value ? "处理中…" : current.value ? "已完成" : receipt.value ? "内容有更新 · 请重跑" : step.value === "topic" || inputCurrent.value ? "待运行" : "等待上一步");
 const runnable = computed(() => step.value === "topic"
-  ? (!!state.value.sourceText?.trim() || !!state.value.notion) && !!modelKey.value
+  ? (!!state.value.sourceText?.trim() || !!activeNotion.value) && !!modelKey.value
   : inputCurrent.value && (!!modelKey.value || (step.value === "article" && !!state.value.sourceText?.trim())));
 const canEditOne = computed(() => !!receipt.value?.cards && receipt.value.sourceRevision === input.value?.revision && inputCurrent.value);
 const selectedCard = computed(() => step.value === "result" ? input.value?.cards?.[cardNumber.value - 1] : undefined);
@@ -386,7 +390,7 @@ function updateSource(event: Event) {
 }
 
 function openNotion() {
-  notionUrl.value = state.value.notion?.url ?? "";
+  notionUrl.value = activeNotion.value?.url ?? "";
   notionPreview.value = undefined;
   error.value = "";
   notionOpen.value = true;
@@ -417,7 +421,7 @@ async function readNotion() {
 async function adoptNotion() {
   const snapshot = notionPreview.value;
   if (!snapshot || busy.value) return;
-  const currentSource = state.value.notion;
+  const currentSource = activeNotion.value;
   if (currentSource?.id === snapshot.id && currentSource.version === snapshot.version
       && currentSource.editedAt === snapshot.editedAt && currentSource.title === snapshot.title) {
     notionOpen.value = false;
@@ -534,7 +538,7 @@ async function run() {
   const source = input.value;
   const nodePrompt = prompt.value;
   const localSource = state.value.sourceText?.trim();
-  const imported = state.value.notion;
+  const imported = activeNotion.value;
   await perform(async signal => {
     const result: Receipt = { revision: crypto.randomUUID(), promptRevision: state.value.configRevision ?? "initial" };
     if (source?.notionReference) result.notionReference = source.notionReference;
