@@ -304,6 +304,7 @@ test("the MiniMax H3 platform reconciles the 768P quote and holds funds when an 
       await gateway.save([route], 0);
       const [model] = await gateway.catalog(["video"], actor);
       assert.equal(model.priceLabel, "600 积分/秒");
+      assert.equal(model.adaptiveFrameRatio, true);
       assert.deepEqual(model.durationResolutionMap, [{ duration: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], resolution: ["768P"] }]);
       const request = { prompt: "花瓣舒展", duration: 4, resolution: "768P", ratio: "16:9" };
       const invalid = { ...request, resolution: "2K" };

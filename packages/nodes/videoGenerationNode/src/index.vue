@@ -98,6 +98,7 @@
             v-model:generateAudio="data.generateAudio"
             v-model:other="data.other"
             :ratios="ratioOptions"
+            :adaptiveRatio="adaptiveRatio"
             :model="selectedModel"
             :disabled="generating || deleting || !selectedModel" />
           <div class="generationActions">
@@ -190,7 +191,9 @@ const ratioOptions = ["16:9", "9:16", "1:1", "4:3", "3:4"];
 const selectedModel = useNodeModelSelection(models, computed({ get: () => data.value.model, set: value => { data.value.model = value; } }));
 useModelForm(data, selectedModel);
 const selectedMode = computed(() => selectedModel.value?.mode?.find((item) => JSON.stringify(item) === data.value.mode) as NodeVideoRequest["mode"]);
-const frameMode = computed(() => ["startEndRequired", "endFrameOptional", "startFrameOptional"].includes(String(selectedMode.value)));
+const frameModes = ["startEndRequired", "endFrameOptional", "startFrameOptional"];
+const frameMode = computed(() => frameModes.includes(String(selectedMode.value)));
+const adaptiveRatio = computed(() => selectedModel.value?.adaptiveFrameRatio === true && frameMode.value);
 const mediaCounts = computed(() => ({
   image: refList.value.filter((item) => item.dataType === "IMAGE").length,
   video: refList.value.filter((item) => item.dataType === "VIDEO").length,
@@ -302,7 +305,7 @@ function getGenerationInput(prompt: string): Omit<NodeVideoRequest, "directory">
     mode: selectedMode.value,
     duration: data.value.duration,
     resolution: data.value.resolution || undefined,
-    ratio: data.value.ratio,
+    ratio: adaptiveRatio.value ? undefined : data.value.ratio,
     generateAudio: choice.audio === "optional" ? data.value.generateAudio : choice.audio,
     other: Object.keys(data.value.other).length ? { ...data.value.other } : undefined,
     outputDirectory: `assets/${id}`,
@@ -468,13 +471,13 @@ function getConfig() {
       modelId: selectedModel.value?.modelId ?? "",
       duration: data.value.duration,
       resolution: data.value.resolution,
-      ratio: data.value.ratio,
+      ratio: adaptiveRatio.value ? "adaptive" : data.value.ratio,
       mode: selectedMode.value,
       generateAudio: data.value.generateAudio,
       other: data.value.other,
     },
     models: models.value,
-    ratios: ratioOptions,
+    ratios: adaptiveRatio.value ? ["adaptive"] : ratioOptions,
     matchingModes: matchingModes.value,
   };
 }
@@ -499,7 +502,7 @@ nodeTools.register({
     modelId: z.string().min(1).optional(),
     duration: z.number().positive().optional(),
     resolution: z.string().min(1).optional(),
-    ratio: z.enum(ratioOptions).optional(),
+    ratio: z.enum([...ratioOptions, "adaptive"]).optional(),
     mode: z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]).optional(),
     generateAudio: z.boolean().optional(),
     other: z.record(z.string(), z.json()).optional(),
@@ -519,13 +522,19 @@ nodeTools.register({
     const resolutions = getResolutions(choice, duration);
     if (args.resolution !== undefined && !resolutions.includes(args.resolution)) throw new Error(`当前时长不支持分辨率 ${args.resolution}，可选：${resolutions.join("、")}`);
     const resolution = args.resolution ?? (resolutions.includes(data.value.resolution) ? data.value.resolution : resolutions[0] ?? "");
-    if (args.mode !== undefined && !getMatchingModes(choice).some((item) => JSON.stringify(item) === JSON.stringify(args.mode))) throw new Error("所选模式不受当前模型支持或不适用于当前引用，请根据模型能力及已连接素材选择");
+    const matchingModes = getMatchingModes(choice);
+    if (args.mode !== undefined && !matchingModes.some((item) => JSON.stringify(item) === JSON.stringify(args.mode))) throw new Error("所选模式不受当前模型支持或不适用于当前引用，请根据模型能力及已连接素材选择");
+    const targetMode = args.mode ?? (choice === selectedModel.value ? selectedMode.value : matchingModes[0]);
+    const followsInput = choice.adaptiveFrameRatio === true && frameModes.includes(String(targetMode));
+    if (args.ratio !== undefined && followsInput !== (args.ratio === "adaptive")) {
+      throw new Error(followsInput ? "当前模式的视频比例跟随输入图" : "当前模式需要指定视频比例");
+    }
     if (args.generateAudio !== undefined && choice.audio !== "optional" && args.generateAudio !== (choice.audio === true)) throw new Error("当前模型不支持切换声音，请查看 getConfig 返回的 audio 能力");
     const other = getModelFormValues(choice, choice === selectedModel.value ? data.value.other : {}, args.other);
     data.value.model = getNodeModelKey(choice);
     data.value.duration = duration;
     data.value.resolution = resolution;
-    if (args.ratio !== undefined) data.value.ratio = args.ratio;
+    if (args.ratio !== undefined && args.ratio !== "adaptive") data.value.ratio = args.ratio;
     if (args.mode !== undefined) data.value.mode = JSON.stringify(args.mode);
     if (args.generateAudio !== undefined) data.value.generateAudio = args.generateAudio;
     data.value.other = other;

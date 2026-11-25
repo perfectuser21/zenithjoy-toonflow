@@ -180,7 +180,7 @@ export async function listMediaModels(): Promise<MediaModel[]> {
       providerId: provider.id, providerLabel: provider.label, modelId: model.id, label: model.label, type: model.type,
       supportsPrice: "supportsPrice" in provider && provider.supportsPrice === true,
       rules: model.rules,
-      mode: model.mode, durationResolutionMap: model.durationResolutionMap, audio: model.audio,
+      mode: model.mode, durationResolutionMap: model.durationResolutionMap, audio: model.audio, adaptiveFrameRatio: model.adaptiveFrameRatio,
       ...(model.type === "audio" ? { voices: model.voices } : {}),
       ...(model.type === "image" ? {
         maxReferenceImages: getImageReferenceLimit(provider.id, model),
@@ -250,7 +250,7 @@ function resumableAssets(assets: MediaAsset[], mediaType: "image" | "video" | "a
 async function prepareRequest<T>(directory: string | undefined, mediaType: "image" | "video" | "audio", request: MediaGenerationRequest,
   read: (cwd: string, reference: MediaReference, type: string, signal?: AbortSignal) => Promise<T>, signal?: AbortSignal) {
   // ACT: 仅向已适配引用映射的内置供应商传递，其他第三方适配器仍接收原有公共参数。
-  const referenceOrder = mediaType === "video" && ["toonflow", "apiMart", "metaso", "compshare", "aliyun"].includes(request.providerId) ? request.referenceOrder : undefined;
+  const referenceOrder = mediaType === "video" && ["toonflow", "apiMart", "metaso", "compshare", "aliyun", minimaxH3ProviderId].includes(request.providerId) ? request.referenceOrder : undefined;
   if (referenceOrder) {
     const media = { image: request.images, video: request.videos, audio: request.audios };
     for (const [index, reference] of referenceOrder.entries()) {
@@ -332,7 +332,7 @@ async function preparePriceRequest(directory: string | undefined, mediaType: "im
   const combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
   try {
     const prepared = await prepareRequest(directory, mediaType, request, readPriceReference, combined);
-    if (prepared.type === "video") delete prepared.referenceOrder;
+    if (prepared.type === "video" && request.providerId !== minimaxH3ProviderId) delete prepared.referenceOrder;
     return prepared;
   }
   catch (error) {

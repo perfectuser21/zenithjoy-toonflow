@@ -264,6 +264,7 @@ function mediaCapabilities({ route, upstream: { model, secretValues } }: ModelEx
     mode: z.array(z.union([mode, z.array(referenceMode).min(1).max(3)])).max(32).optional(),
     durationResolutionMap: z.array(z.object({ duration: z.array(z.number().positive()).max(100), resolution: z.array(safeString).max(100) })).max(100).optional(),
     audio: z.union([z.boolean(), z.literal("optional")]).optional(),
+    adaptiveFrameRatio: z.boolean().optional(),
     imageSizes: z.array(safeString).max(100).optional(), imageRatios: z.array(z.string().regex(/^[1-9]\d{0,3}:[1-9]\d{0,3}$/)).max(100).optional(),
     maxReferenceImages: mediaModelsSchema.element.shape.maxReferenceImages,
     voices: z.array(z.object({ title: safeString, voice: safeString })).max(1000).optional(),

@@ -32,6 +32,7 @@ export const mediaModelsSchema = z.array(z.object({
   imageSizes: z.array(z.string()).optional(),
   imageRatios: z.array(z.string()).optional(),
   maxReferenceImages: z.number().int().min(0).max(256).optional(),
+  adaptiveFrameRatio: z.boolean().optional(),
   durationResolutionMap: z.array(z.object({
     duration: z.array(z.number()),
     resolution: z.array(z.string()),

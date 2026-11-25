@@ -37,7 +37,7 @@ function rejected(message: string, status = 400): never {
   throw Object.assign(new Error(message), { code: "MEDIA_TASK_FAILED", status });
 }
 
-function videoSpecification(request: VideoSpecification, frames: { first: boolean; last: boolean }) {
+function videoSpecification(request: VideoSpecification & Pick<VideoRequest, "referenceOrder">, frames: { first: boolean; last: boolean }) {
   if (request.model !== minimaxH3ModelId) rejected("MiniMax 官方供应商仅支持 MiniMax-H3");
   const resolution = request.resolution?.toUpperCase();
   if (resolution !== "768P" && resolution !== "2K") rejected("MiniMax H3 的分辨率须为 768P 或 2K");
@@ -46,7 +46,7 @@ function videoSpecification(request: VideoSpecification, frames: { first: boolea
   if (duration === undefined || !Number.isInteger(duration) || duration < spec.minSeconds || duration > spec.maxSeconds) {
     rejected("MiniMax H3 的时长须为 4 到 15 秒的整数");
   }
-  const text = request.prompt.trim();
+  const text = promptWithReferences(request, frames).trim();
   if (!text || Array.from(text).length > 7000) rejected("MiniMax H3 的提示词须为 1 到 7000 个字符");
   const ratio = textRatios.find(value => value === request.ratio);
   const { mode } = request;
@@ -76,6 +76,16 @@ function frameInput(input: MediaInput, role: FrameRole): FrameContent {
   }
   const mimeType = input.mimeType === "image/jpg" ? "image/jpeg" : input.mimeType;
   return { type: "image_url", role, image_url: { url: `data:${mimeType};base64,${data}` } };
+}
+
+function promptWithReferences(request: Pick<VideoRequest, "prompt" | "referenceOrder">, frames: { first: boolean; last: boolean }) {
+  return request.prompt.replace(/\{\{ref (\d+)\}\}/g, (marker, number: string) => {
+    const reference = request.referenceOrder?.[Number(number) - 1];
+    if (reference?.type === "firstFrame" && frames.first) return "首帧";
+    if (reference?.type === "lastFrame" && frames.last) return "尾帧";
+    if (reference?.type === "text") return `参考 ${Number(number)}`;
+    return rejected(`MiniMax H3 无法识别提示词中的素材引用 ${marker}`);
+  });
 }
 
 function videoContent(request: VideoRequest, ratio: TextRatio | "adaptive", text: string): VideoContent {
@@ -173,6 +183,7 @@ export default {
   rules,
   models: [{
     id: "MiniMax-H3", label: "MiniMax H3", type: "video", mode: ["text", "endFrameOptional", "startFrameOptional"], audio: "optional",
+    adaptiveFrameRatio: true,
     durationResolutionMap: [{ duration: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], resolution: ["768P", "2K"] }],
   }],
   async getPrice(request) {
