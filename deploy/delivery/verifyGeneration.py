@@ -12,7 +12,7 @@ pollSeconds（1至30）；video/audio另必填minDuration/maxDuration。
 生成一张测试图，校验积分结算、落盘 PNG 与 Mac Studio 网关回执。
 
 提交前在release.stateDirectory持久化generation-<run>-<attempt>.json；
-同一发布编号再次调用一律拒绝，避免未知结果重复扣费。任务ID输出至stderr，
+仅杭州隔离候选可对已完成且身份一致的任务重新只读核验。任务ID输出至stderr，
 超时/断网/进程变化均保留事务与线上任务，运维必须核对后另行处置。
 提交前要求公网及本机身份声明capabilities.mediaTaskReadOnly=true且版本/boot一致。
 隔离验收通过唯一的位置参数传入独立发布配置，业务请求仅使用候选回环地址。
@@ -322,25 +322,53 @@ def verifyGenerationCase(config, release, request, bootId, case, checkPoints, st
     other.login(next(account for account in config['accounts'] if account['userId'] != workspace['userId']))
     if checkPoints:
         startingPoints, quote = verifyPointsBudget(client, payload, studio)
-    # root账本与主发布事务共用受保护目录；原子独占创建杜绝相同run再次提交。
     state = Path(release['stateDirectory'])
     identity = rootJson(state / 'identity.json')
     require(identity['environment'] == request['environment'], '生成事务账本环境不匹配')
     require(state.stat().st_mode & 0o077 == 0, '生成事务目录必须为root私有')
-    taskId = str(uuid.uuid4())
-    payload['taskId'] = taskId
     journalPrefix = 'studioImageGeneration-' if studio else 'generation-'
     journal = state / (journalPrefix + request['runId'] + '-' + request['runAttempt'] + '.json')
-    transaction = {'request': {key: request[key] for key in releaseIdentityFields}, 'publicOrigin': config['publicOrigin'],
-                   'taskId': taskId, 'bootId': bootId, 'phase': 'prepared', 'createdAt': time.time(),
-                   'requestSha256': hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()}
-    durableJson(journal, transaction, create=True)
-    print('生成验收已占位 taskId=' + taskId, file=sys.stderr)
-    # 不重试此POST。断线、超时或异常时prepared仍可能代表已提交，禁止再造任务。
-    submitted = client.request('POST', '/api/ai/media/generate', body=payload)
-    require(isinstance(submitted, dict) and submitted.get('taskId') == taskId, '生成提交回执身份不匹配，结果待核对')
-    transaction.update(phase='submitted', submittedAt=time.time())
-    durableJson(journal, transaction)
+    releaseIdentity = {key: request[key] for key in releaseIdentityFields}
+    publicOrigin = config['publicOrigin']
+    previousReceipt = None
+    if isolated and request['environment'] == 'production' and (journal.exists() or journal.is_symlink()):
+        transaction = rootJson(journal, private=True)
+        require(isinstance(transaction, dict) and transaction.get('phase') == 'completed'
+                and transaction.get('request') == releaseIdentity and transaction.get('publicOrigin') == publicOrigin
+                and transaction.get('bootId') == bootId, '原生成事务结果未知或候选身份不同')
+        taskId = transaction.get('taskId')
+        require(isinstance(taskId, str) and
+                re.fullmatch(r'[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}', taskId),
+                '原生成任务身份非法')
+        previousReceipt = transaction.get('receipt')
+        require(isinstance(previousReceipt, dict) and previousReceipt.get('generationVerified') is True,
+                '原生成事务缺少已验证回执')
+    else:
+        taskId = str(uuid.uuid4())
+    payload['taskId'] = taskId
+    requestSha256 = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+    receipt = {**releaseIdentity, 'publicOrigin': publicOrigin, 'result': 'passed', 'generationVerified': True,
+               'taskId': taskId, 'businessMode': 'tenant', 'generationMediaType': mediaType, 'bootId': bootId}
+    if previousReceipt is not None:
+        previousArtifacts = previousReceipt.get('artifacts')
+        require(transaction.get('requestSha256') == requestSha256
+                and previousReceipt == {**receipt, 'artifacts': previousArtifacts}
+                and isinstance(previousArtifacts, list) and len(previousArtifacts) == expected['fileCount']
+                and all(isinstance(artifact, dict) and set(artifact) == {'sha256', 'bytes', 'mediaType'}
+                        and artifact['mediaType'] == mediaType and type(artifact['bytes']) is int and artifact['bytes'] > 0
+                        and isinstance(artifact['sha256'], str) and re.fullmatch('[a-f0-9]{64}', artifact['sha256'])
+                        for artifact in previousArtifacts), '原生成请求或回执不匹配')
+    else:
+        transaction = {'request': releaseIdentity, 'publicOrigin': publicOrigin, 'taskId': taskId, 'bootId': bootId,
+                       'phase': 'prepared', 'createdAt': time.time(), 'requestSha256': requestSha256}
+        durableJson(journal, transaction, create=True)
+        print('生成验收已占位 taskId=' + taskId, file=sys.stderr)
+        # 断线或超时时，prepared仍可能代表已提交。
+        submitted = client.request('POST', '/api/ai/media/generate', body=payload)
+        require(isinstance(submitted, dict) and submitted.get('taskId') == taskId,
+                '生成提交回执身份不匹配，结果待核对')
+        transaction.update(phase='submitted', submittedAt=time.time())
+        durableJson(journal, transaction)
     deadline = time.monotonic() + expected['timeoutSeconds']
     statusRequest = {'directory': payload['directory'], 'taskIds': [taskId],
                      'resume': False, 'readOnly': True}
@@ -353,6 +381,7 @@ def verifyGenerationCase(config, release, request, bootId, case, checkPoints, st
                 '生成状态回执身份不匹配')
         status = statuses[0]
         require(status.get('state') in ('running', 'succeeded'), '生成任务失败、取消或中断，保留taskId待核对')
+        require(previousReceipt is None or status['state'] == 'succeeded', '原生成任务已不处于成功状态')
         if status['state'] == 'succeeded':
             break
         time.sleep(min(expected['pollSeconds'], max(0, deadline - time.monotonic())))
@@ -360,8 +389,9 @@ def verifyGenerationCase(config, release, request, bootId, case, checkPoints, st
     files = result.get('data')
     require(result.get('code') == 200 and isinstance(files, list) and len(files) == expected['fileCount'],
             '生成任务未返回审定数量的成功产物')
-    transaction.update(phase='generated', generatedAt=time.time())
-    durableJson(journal, transaction)
+    if previousReceipt is None:
+        transaction.update(phase='generated', generatedAt=time.time())
+        durableJson(journal, transaction)
     fresh = newPublicClient(config, isolated=isolated)
     fresh.login(workspace)
     other.request('POST', '/api/ai/media/tasks/status', body=statusRequest, expected=403)
@@ -383,9 +413,10 @@ def verifyGenerationCase(config, release, request, bootId, case, checkPoints, st
     verifyPublicCandidate(fresh, local, request, bootId)
     if checkPoints:
         verifyPointsSettlement(startingPoints, readPoints(fresh), taskId, quote)
-    receipt = {**{key: request[key] for key in releaseIdentityFields}, 'publicOrigin': config['publicOrigin'],
-               'result': 'passed', 'generationVerified': True, 'taskId': taskId,
-               'businessMode': 'tenant', 'generationMediaType': mediaType, 'bootId': bootId, 'artifacts': artifacts}
+    receipt['artifacts'] = artifacts
+    if previousReceipt is not None:
+        require(receipt == previousReceipt, '生成产物与原回执不一致')
+        return previousReceipt
     if checkPoints:
         receipt['customerPointsSettled'] = True
     if studio:

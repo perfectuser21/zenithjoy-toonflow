@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } fr
 import type { ModelMap, ModelType } from "@toonflow/multi-tenant-gateway";
 import express from "express";
 import { unzipSync } from "fflate";
+import { z } from "zod";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from "node:crypto";
@@ -12,7 +13,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createSceneDetector } from "../../../../../packages/nodes/frameAnalysisNode/src/sceneDetector";
 import { combinationCount, combinationAt, renderBatch, type MashupClip } from "../../../../../packages/nodes/mashupNode/src/mashupBatch";
-import { initializeTrustedNodes, trustedNodeNames } from "./initialize";
+import { initializeHostedSharedCanvasNodes, initializeTrustedNodes, trustedNodeNames } from "./initialize";
 
 test("existing workspaces receive trusted nodes from each release", async () => {
   const root = await mkdtemp(join(tmpdir(), "toonflowTrustedNodes"));
@@ -23,6 +24,7 @@ test("existing workspaces receive trusted nodes from each release", async () => 
     await mkdir(target);
     const nodeFiles = Object.keys(trustedNodeNames).map(name => `${name}.umd.js`);
     expect(trustedNodeNames.videoConcatNode).toBe("合成成片");
+    expect(trustedNodeNames.frameAnalysisNode).toBe("逐帧拉片");
     for (const file of nodeFiles) {
       await writeFile(join(source, file), `candidate:${file}`);
       await writeFile(join(target, file), `old:${file}`);
@@ -39,12 +41,23 @@ test("existing workspaces receive trusted nodes from each release", async () => 
     await initializeTrustedNodes(target, source);
     expect(await readFile(join(target, "videoNode.umd.js"), "utf8")).toBe("next release");
     expect(await readFile(join(target, "customNode.umd.js"), "utf8")).toBe("customized");
+    await writeFile(join(source, "frameAnalysisNode.umd.js"), "candidate:frameAnalysis");
+    await writeFile(join(target, "frameAnalysisNode.umd.js"), "old:frameAnalysis");
+    await writeFile(join(target, "videoNode.umd.js"), "old:video");
+    const updatedNodes = ["videoGenerationNode", "mashupNode", "videoConcatNode", "ipCardNode", "ipWorkflowNode"];
+    for (const node of updatedNodes) await writeFile(join(target, node + ".umd.js"), "old");
+    await initializeHostedSharedCanvasNodes(target, source);
+    for (const node of updatedNodes) expect(await readFile(join(target, node + ".umd.js"), "utf8")).toBe(`candidate:${node}.umd.js`);
+    expect(await readFile(join(target, "frameAnalysisNode.umd.js"), "utf8")).toBe("candidate:frameAnalysis");
+    expect(await readFile(join(target, "videoNode.umd.js"), "utf8")).toBe("next release");
+    expect(await readFile(join(target, "customNode.umd.js"), "utf8")).toBe("customized");
     expect(await readFile(join(target, "initialized"), "utf8")).toBe("existing workspace");
     expect(await readFile(join(target, "textNode.disabled"), "utf8")).toBe("");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
+
 
 function group(prefix: string, count: number): MashupClip[] {
   return Array.from({ length: count }, (_, index) => ({ name: prefix + index, url: prefix + index, mimeType: "video/mp4" }));
@@ -304,6 +317,121 @@ test("platform image routes charge customer points and exempt administrators", a
   }
 });
 
+test("the MiniMax H3 platform reconciles the 768P quote and holds funds when an unknown submission is abandoned", async () => {
+  const root = await mkdtemp(join(tmpdir(), "toonflowH3Points"));
+  const server = fileURLToPath(new URL("../../../", import.meta.url));
+  try {
+    const output = execFileSync(process.execPath, ["-e", `
+      import assert from "node:assert/strict";
+      import { mkdir, readFile } from "@toonflow/file";
+      import { createHash } from "node:crypto";
+      import { join } from "node:path";
+      import { createMultiTenant } from "@toonflow/multi-tenant-auth";
+      import { createModelGateway } from "@toonflow/multi-tenant-gateway";
+      import { cloudSchema, formatModelPrice, modelAdapters } from "@/utils/multiTenant/modelAdapters";
+      import { providerAdapters } from "@/utils/multiTenant/providerAdapters";
+
+      const root = process.env.TOONFLOW_DATA_DIR;
+      const auth = createMultiTenant(root);
+      await auth.setup("h3-points-admin", "fixture-password");
+      const user = await auth.createUser("h3-points-customer", "fixture-password");
+      const actor = { id: user.id, role: "user" };
+      const source = await readFile("../../packages/providers/src/media/minimaxH3.ts", "utf8");
+      const gateway = createModelGateway(root, {
+        enabled: () => true, formatPrice: formatModelPrice, adapters: modelAdapters,
+        cloud: { parse: value => cloudSchema.parse(value), async load() { throw Error("平台试点只使用指定的官方供应商"); } },
+        providers: {
+          ...providerAdapters,
+          async legacy() { return [{ kind: "media", id: "minimaxH3", label: "MiniMax H3 官方国内", config: {}, source }]; },
+        },
+      });
+      const modelId = "minimax-h3-pilot";
+      const route = { id: crypto.randomUUID(), publicId: modelId, label: "MiniMax H3", type: "video", enabled: true,
+        target: "backend", providerId: "minimaxH3", upstreamModelId: "MiniMax-H3",
+        salePrice: { currency: "CNY", mode: "perSecond", amount: "0.60" },
+        costPrice: { currency: "CNY", mode: "perSecond", amount: "0.50" } };
+      await assert.rejects(gateway.save([{ ...route, costPrice: { ...route.costPrice, amount: "0.80" } }], 0), /每秒 0.50 元/);
+      await assert.rejects(gateway.save([{ ...route, salePrice: { ...route.salePrice, mode: "perRequest" } }], 0), /按秒设置/);
+      await gateway.save([route], 0);
+      const [model] = await gateway.catalog(["video"], actor);
+      assert.equal(model.priceLabel, "600 积分/秒");
+      assert.equal(model.adaptiveFrameRatio, true);
+      assert.deepEqual(model.durationResolutionMap, [{ duration: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], resolution: ["768P"] }]);
+      const request = { prompt: "花瓣舒展", duration: 4, resolution: "768P", ratio: "16:9" };
+      const invalid = { ...request, resolution: "2K" };
+      await assert.rejects(gateway.quoteRequest("video", "multiTenant", modelId, invalid, { actor }), /只支持 768P/);
+      await assert.rejects(gateway.capture("video", "multiTenant", modelId, invalid, { actor }), /只支持 768P/);
+      const quote = await gateway.quoteRequest("video", "multiTenant", modelId, request, { actor });
+      assert.equal(quote.amount, "2.4");
+      await gateway.credit({ userId: user.id, currency: "CNY", amount: "5", requestId: crypto.randomUUID() });
+      const execution = await gateway.capture("video", "multiTenant", modelId, request, { actor });
+      const requestId = crypto.randomUUID();
+      const chargeId = await gateway.reserveSnapshot("video", "multiTenant", modelId, execution, request, { actor, requestId, payload: request });
+      assert.equal((await gateway.readBalance(user.id)).wallets.find(wallet => wallet.currency === "CNY").reserved, "2.4");
+      const settled = await gateway.finalize(chargeId, user.id, { kind: "usage", usage: { requests: 1, seconds: 4 } });
+      assert.deepEqual(settled, { status: "settled", amount: "2.4", currency: "CNY", capped: false });
+      assert.deepEqual((await gateway.readBalance(user.id)).wallets.find(wallet => wallet.currency === "CNY"),
+        { currency: "CNY", balance: "2.6", reserved: "0", available: "2.6" });
+
+      const current = await gateway.getProviders();
+      await gateway.saveProviders([{ kind: "media", id: "minimaxH3", label: "MiniMax H3 官方国内",
+        config: { apiKey: "fixture-minimax-key" }, source }], current.revision);
+      const { setRuntimeHost } = await import("@/lib/platform");
+      setRuntimeHost("desktop");
+      const { default: conf } = await import("@/utils/conf");
+      conf.set("settings.multiTenantEnabled", true);
+      const tasks = await import("@/utils/media/tasks");
+      const { detectMimeType } = await import("@/utils/media/priceReference");
+      const ftyp = (brand, compatible) => {
+        const header = Buffer.concat([Buffer.alloc(4), Buffer.from("ftyp" + brand), Buffer.alloc(4), Buffer.from(compatible)]);
+        header.writeUInt32BE(header.length);
+        return header;
+      };
+      assert.equal(detectMimeType(ftyp("heic", "mif1"), ""), "image/heic");
+      assert.equal(detectMimeType(ftyp("mif1", "mif1"), ""), "image/heif");
+      assert.equal(detectMimeType(ftyp("mif1", "mif1avif"), ""), "image/avif");
+      assert.equal(detectMimeType(ftyp("isom", "iso2av01"), "image/heic"), "video/mp4");
+      const directory = join(root, "workspace");
+      await mkdir(directory);
+      let submissions = 0;
+      globalThis.fetch = Object.assign(async (input, init) => {
+        assert.equal(String(input), "https://api.minimax.cn/v2/video_generation");
+        assert.equal(init.method, "POST");
+        submissions++;
+        throw new Error("供应商提交响应丢失");
+      }, { preconnect: fetch.preconnect });
+      const owner = { id: user.id, role: "user", userName: user.userName };
+      const taskId = crypto.randomUUID();
+      const taskRequest = { ...request, providerId: "multiTenant", modelId };
+      await tasks.start(directory, taskId, "video", taskRequest, {}, owner);
+      await assert.rejects(tasks.wait(directory, taskId, owner), /供应商提交响应丢失/);
+      const [interrupted] = await tasks.status(directory, [taskId], true, owner);
+      assert.equal(interrupted.state, "interrupted");
+      assert.equal(interrupted.resumable, false);
+      await tasks.cancel(directory, [taskId], owner);
+      await tasks.cancel(directory, [taskId], owner);
+      const [abandoned] = await tasks.status(directory, [taskId], true, owner);
+      assert.equal(abandoned.state, "cancelled");
+      assert.equal(abandoned.resumable, false);
+      assert.equal((await tasks.start(directory, taskId, "video", taskRequest, {}, owner)).state, "cancelled");
+      assert.equal(submissions, 1);
+      const fingerprint = createHash("sha256").update(directory).digest("hex");
+      const checkpointPath = join(root, "mediaTasks", "workspace" + fingerprint, "task" + taskId.replaceAll("-", "") + ".json");
+      const persisted = JSON.parse(await readFile(checkpointPath, "utf8"));
+      assert.equal(persisted.state, "cancelled");
+      assert.deepEqual(persisted.checkpoint.providerData, { kind: "minimaxH3", state: "submitting" });
+      assert.equal(persisted.chargeStatus, "pendingReview");
+      assert.equal((await gateway.getCharge(taskId, user.id)).status, "reserved");
+      assert.deepEqual((await gateway.readBalance(user.id)).wallets.find(wallet => wallet.currency === "CNY"),
+        { currency: "CNY", balance: "2.6", reserved: "2.4", available: "0.2" });
+      console.log("MiniMax H3 目录、报价、实扣与未知提交预占验证通过");
+    `], { cwd: server, env: { ...process.env, TOONFLOW_DATA_DIR: root }, encoding: "utf8", timeout: 10000 });
+    expect(output).toContain("MiniMax H3 目录、报价、实扣与未知提交预占验证通过");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 15000);
+
 test("OpenAI image editing forwards sixteen references and rejects seventeen", () => {
   const workspace = fileURLToPath(new URL("../../../../../", import.meta.url));
   const output = execFileSync(process.execPath, ["-e", `
@@ -363,7 +491,7 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
   const originalFetch = globalThis.fetch;
   const originalConsoleError = console.error;
   const previousEnvironment = Object.fromEntries([
-    "NODE_ENV", "TOONFLOW_DATA_DIR", "TOONFLOW_PROJECT_QUOTA_ROOT", "TOONFLOW_TRUSTED_CANVAS_BETA",
+    "NODE_ENV", "TOONFLOW_DATA_DIR", "TOONFLOW_PROJECT_QUOTA_ROOT", "TOONFLOW_TRUSTED_CANVAS_BETA", "TOONFLOW_BACKGROUND_BETA",
     "TOONFLOW_STAFF_ACCESS_ORIGIN", "TOONFLOW_STAFF_ACCESS_ISSUER", "TOONFLOW_STAFF_ACCESS_AUDIENCE",
   ].map(key => [key, process.env[key]]));
   let server: ReturnType<typeof createServer> | undefined;
@@ -387,8 +515,13 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     ].map(({ name, color, duration }) => {
       const files = Array.from({ length: 10 }, (_, index) => {
         const path = join(root, `${name}${String(index + 1).padStart(2, "0")}.mp4`);
-        ffmpeg("-f", "lavfi", "-i", `color=${color}:size=64x64:rate=12`, "-vf",
-          `drawbox=x=${index * 4}:y=0:w=4:h=12:color=white:t=fill`, "-t", duration, "-c:v", "libx264", "-bf", "0", path);
+        const hevc = name === "A" && index === 0;
+        const codec = hevc
+          ? ["-c:v", "libx265", "-tag:v", "hvc1", "-x265-params", "log-level=error:pools=none:frame-threads=1"]
+          : ["-c:v", "libx264"];
+        const audio = hevc ? ["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-c:a", "aac"] : [];
+        ffmpeg("-f", "lavfi", "-i", `color=${color}:size=64x64:rate=12`, ...audio, "-vf",
+          `drawbox=x=${index * 4}:y=0:w=4:h=12:color=white:t=fill`, "-t", duration, ...codec, "-bf", "0", path);
         return path;
       });
       return { name, files };
@@ -434,7 +567,7 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     `);
     const videoNodes = await Promise.all(groups.map(async ({ name, files }, index) => {
       const url = `assets/${name}.mp4`;
-      await writeFile(join(project.directory, url), await readFile(files[0]!));
+      await writeFile(join(project.directory, url), await readFile(files[name === "A" ? 1 : 0]!));
       return { id: name, type: "remote-videoNode", position: { x: 350 + index * 320, y: 1000 },
         data: { label: name, outputs: { video: { dataType: "VIDEO", value: { url, mimeType: "video/mp4" } } } } };
     }));
@@ -464,6 +597,7 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       ],
       edges: [
         { id: "batch", source: "mashup", sourceHandle: "videos", target: "qianchuan", targetHandle: "videos" },
+        { id: "analysisInput", source: "backgroundSource", sourceHandle: "video", target: "analysis", targetHandle: "in" },
         { id: "wanImage", source: "imageGeneration", sourceHandle: "image", target: "wanGeneration", targetHandle: "in" },
         { id: "wanVideo", source: "backgroundSource", sourceHandle: "video", target: "wanGeneration", targetHandle: "in" },
         ...videoNodes.map(({ id }, index) => ({ id: "segment" + index, source: id, sourceHandle: "video", target: "concat", targetHandle: "segment" + index })),
@@ -529,7 +663,7 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     let backgroundRequests = 0;
     let ordinaryWeb = false;
     let modelCatalogUnavailable = false;
-    let trimReview: { request: { directory: string; operationId: string; source: string; start: number; end: number }; queued: boolean } | undefined;
+    let trimReview: { request: { directory: string; operationId: string; source: string; start: number; end: number }; state: "notFound" | "queued" | "ready" } | undefined;
     let trimChecks = 0;
     let trimSubmissions = 0;
     gateway.use((req, res, next) => {
@@ -551,7 +685,11 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       if (!ordinaryWeb || !trimReview) return next();
       if (!Object.entries(trimReview.request).every(([key, value]) => request.body?.[key] === value)) return response.sendStatus(409);
       trimChecks++;
-      return response.json({ code: 200, data: trimReview.queued ? { status: "pending", phase: "queued" } : { status: "notFound" } });
+      const nodeId = trimReview.request.operationId;
+      const data = trimReview.state === "queued" ? { status: "pending", phase: "queued" }
+        : trimReview.state === "ready" ? { status: "ready", nodeId, outputPath: `assets/${nodeId}/video.mp4` }
+          : { status: "notFound" };
+      return response.json({ code: 200, data });
     });
     gateway.get("/api/ai/models", (_request, response) => {
       if (modelCatalogUnavailable) return response.status(503).json({ code: 503, message: "模型目录暂不可用" });
@@ -697,6 +835,10 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       throw Error("画布未保存验收产物");
     }
     const generating = await openCanvas();
+    let normalizations = 0;
+    generating.page.on("request", request => {
+      if (request.method() === "POST" && new URL(request.url()).pathname === "/api/workspaces/files/normalizeVideo") normalizations++;
+    });
     for (const { name, files } of groups) {
       const input = await generating.page.waitForSelector(`input[type=file][aria-label="${name} 组视频"]`, { timeout: 10000 });
       if (!input) throw Error(`找不到 ${name} 组视频入口`);
@@ -721,6 +863,7 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     const clips = saved.nodes.find(node => node.id === "mashup")?.data.mashup?.batch.results;
     if (!clips) throw Error("已保存画布缺少成片");
     expect(clips.map(clip => clip.name)).toEqual(names);
+    expect(normalizations).toBe(1);
     const originals = new Map(await Promise.all(clips.map(async clip => [clip.name, await readFile(join(project.directory, clip.url))] as const)));
     for (const index of [0, 49, 99]) {
       const path = join(project.directory, clips[index]!.url);
@@ -761,22 +904,55 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     const concatPath = join(project.directory, (await savedNodeData("concat")).videoConcat.result.url);
     const readPixel = (path: string, seconds: string) => ffmpeg("-ss", seconds, "-i", path, "-vf", "crop=4:4:28:28,scale=1:1",
       "-frames:v", "1", "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1");
-    expect(readPixel(concatPath, "0.1")).toEqual(readPixel(groups[0]!.files[0]!, "0.1"));
+    const mixed = join(project.directory, clips[0]!.url);
+    const [red, redGreen, redBlue] = readPixel(mixed, "0.1");
+    const [blueRed, blueGreen, blue] = readPixel(mixed, "0.4");
+    expect(red).toBeGreaterThan(220);
+    expect(Math.max(redGreen!, redBlue!)).toBeLessThan(40);
+    expect(blue).toBeGreaterThan(220);
+    expect(Math.max(blueRed!, blueGreen!)).toBeLessThan(40);
+    const originalMashup = z.object({ groups: z.array(z.object({ clips: z.array(z.object({ url: z.string() })) })) }).parse((await savedNodeData("mashup")).mashup);
+    expect(await readFile(join(project.directory, originalMashup.groups[0]!.clips[0]!.url))).toEqual(await readFile(groups[0]!.files[0]!));
+    const pcm = ffmpeg("-i", mixed, "-vn", "-ar", "8000", "-ac", "1", "-f", "s16le", "pipe:1");
+    expect(pcm.length).toBeGreaterThanOrEqual(12000);
+    expect(pcm.subarray(1600, 3200).some(value => value !== 0)).toBe(true);
+    expect(pcm.subarray(6400, 11200).every(value => value === 0)).toBe(true);
+    expect(readPixel(concatPath, "0.1")).toEqual(readPixel(groups[0]!.files[1]!, "0.1"));
     expect(readPixel(concatPath, "0.4")).toEqual(readPixel(groups[1]!.files[0]!, "0.1"));
     const generatedImage = await waitForSaved<string>(async () => (await savedNodeData("imageGeneration"))?.outputs?.image?.value.url);
     expect(await readFile(join(project.directory, generatedImage))).toEqual(png);
     const backgroundNode = '.vue-flow__node[data-id="backgroundSource"]';
+    const backgroundSubmissions: string[] = [];
+    generating.page.on("request", request => {
+      if (request.method() !== "POST" || new URL(request.url()).pathname !== "/api/ai/media/generate") return;
+      const submitted = z.object({ nodeId: z.string(), mediaType: z.string() }).safeParse(JSON.parse(request.postData() ?? "null"));
+      if (submitted.success && submitted.data.nodeId === "backgroundSource") backgroundSubmissions.push(submitted.data.mediaType);
+    });
     await generating.page.locator(`${backgroundNode} .titleBar`).setTimeout(5000).click();
-    await generating.page.locator(`${backgroundNode} button[title^="自动生成背景候选"]:not([disabled])`).setTimeout(5000).click().catch(async error => {
+    await generating.page.locator('xpath=//div[@data-id="backgroundSource"]//button[normalize-space(.)="换背景" and not(@disabled)]').setTimeout(5000).click().catch(async error => {
       throw Error(await generating.page.$eval(backgroundNode, node => Reflect.get(node, "innerText")), { cause: error });
     });
     const dialog = '.backgroundPanel';
+    const candidatesButton = 'xpath=//button[normalize-space(.)="生成 3 个候选" and not(@disabled)]';
+    await generating.page.waitForSelector(`${dialog} img[alt="提取的视频画面"]`, { visible: true });
+    await generating.page.waitForNetworkIdle({ idleTime: 500, timeout: 12000 });
+    expect(backgroundSubmissions).toEqual([]);
+    await generating.page.locator(candidatesButton).click();
+    const confirmImage = 'xpath=//div[contains(@class,"el-message-box")]//button[normalize-space(.)="确认出图"]';
+    await generating.page.waitForSelector(confirmImage, { visible: true });
+    expect(backgroundSubmissions).toEqual([]);
+    await generating.page.locator('xpath=//div[contains(@class,"el-message-box")]//button[normalize-space(.)="取消"]').click();
+    await generating.page.waitForSelector(confirmImage, { hidden: true });
+    expect(backgroundSubmissions).toEqual([]);
+    await generating.page.locator(candidatesButton).click();
+    await generating.page.locator(confirmImage).click();
     await generating.page.waitForFunction(selector => {
       const candidates = Array.from(Reflect.get(globalThis, "document").querySelectorAll(selector + " .candidateGrid img")) as { naturalWidth: number }[];
       return candidates.length === 3 && candidates.every(image => image.naturalWidth === 64);
     }, { timeout: 12000 }, dialog).catch(async error => {
       throw Error(await generating.page.$eval(dialog, node => Reflect.get(node, "innerText")), { cause: error });
     });
+    expect(backgroundSubmissions).toEqual(["image", "image", "image"]);
     await generating.page.locator(`${dialog} .candidateGrid button:nth-child(2)`).click();
     await generating.page.locator('xpath=//button[normalize-space(.)="确认生成" and not(@disabled)]').click();
     await generating.page.waitForFunction(() => {
@@ -787,10 +963,24 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     });
     const replacementPath = await waitForSaved<string>(async () => (await savedNodeData("backgroundSource"))?.backgroundState?.lastResult?.url);
     expect((await savedNodeData("backgroundSource")).backgroundState.candidates).toHaveLength(3);
+    expect(backgroundSubmissions).toEqual(["image", "image", "image", "video"]);
     expect(await readFile(join(project.directory, replacementPath))).toEqual(replacementVideo);
     expect(await readFile(join(project.directory, sceneSource))).toEqual(sourceVideoBytes);
     await generating.page.locator('xpath=//button[normalize-space(.)="关闭" and ancestor::*[@role="dialog"]]').click();
     const shotNode = '.vue-flow__node[data-id="analysis"]';
+    await generating.page.locator(`${backgroundNode} .titleBar`).setTimeout(5000).click();
+    await generating.page.locator('xpath=//div[@data-id="backgroundSource"]//button[normalize-space(.)="视频翻拍" and not(@disabled)]').setTimeout(5000).click();
+    await generating.page.waitForSelector(".remakeStages button[aria-current=step]", { visible: true, timeout: 5000 });
+    expect(await generating.page.$$eval(".vue-flow__node-remote-frameAnalysisNode", nodes => nodes.map(node => node.getAttribute("data-id")))).toEqual(["analysis"]);
+    expect(await generating.page.$$eval(".remakeStages button", buttons => buttons.map(button => ({
+      label: button.textContent?.trim(), disabled: Reflect.get(button, "disabled"),
+    })))).toEqual([
+      { label: "1. 分析原片", disabled: false },
+      { label: "2. 生成样张", disabled: true },
+      { label: "3. 生成成片", disabled: true },
+    ]);
+    await generating.page.locator('[role="dialog"]:has(.remakeStages) .el-dialog__headerbtn').click();
+    await generating.page.waitForSelector(".remakeStages", { hidden: true, timeout: 5000 });
     await generating.page.locator(`${shotNode} .titleBar`).setTimeout(5000).click();
     await generating.page.locator('xpath=//button[normalize-space(.)="开始拉片" and not(@disabled)]').setTimeout(5000).click();
     const shotResult = await generating.page.waitForSelector(
@@ -928,22 +1118,53 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     const customerProject = { ...project, directory: join(root, "multiTenant", "workspaces", customer.id, "studio") };
     await mkdir(join(customerProject.directory, "assets"), { recursive: true });
     const customerCanvas = join(customerProject.directory, "旧画布.json");
-    trimReview = { request: { directory: customerProject.directory, operationId: randomUUID(), source: sceneSource, start: 0, end: 1 }, queued: false };
+    const guidedSource = "assets/guidedFixture.mp4";
+    trimReview = { request: { directory: customerProject.directory, operationId: randomUUID(), source: sceneSource, start: 0, end: 1 }, state: "notFound" };
     const pendingTrim = { ...trimReview.request, ownerId: customer.id, canvasPath: "旧画布.json" };
+    const pendingDelete = { ...pendingTrim, canvasPath: "重命名前.json", operationId: randomUUID() };
+    const readyTrim = { ...pendingTrim, operationId: randomUUID() };
     const customerVideo = join(customerProject.directory, sceneSource);
     await writeFile(customerVideo, sourceVideoBytes);
     await writeFile(customerCanvas, JSON.stringify({
-      toonflowCanvas: true, edges: [], viewport: { x: 0, y: 0, zoom: 1 },
-      nodes: [{ id: "staleTrim", type: "remote-videoNode", position: { x: 220, y: 200 },
-        data: { pendingTrim, outputs: { video: { dataType: "VIDEO", value: { url: sceneSource, mimeType: "video/mp4" } } } } }],
+      toonflowCanvas: true,
+      edges: [{ id: "handoff", source: "customerVideo", sourceHandle: "video", target: "customerAnalysis", targetHandle: "in" }],
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: "staleTrim", type: "remote-videoNode", position: { x: 130, y: 200 },
+          data: { pendingTrim, outputs: { video: { dataType: "VIDEO", value: { url: sceneSource, mimeType: "video/mp4" } } } } },
+        { id: "ordinaryDelete", type: "remote-textNode", position: { x: 480, y: 550 }, data: { label: "可删除的普通节点" } },
+        { id: "deleteTrim", type: "remote-videoNode", position: { x: 130, y: 550 },
+          data: { pendingTrim: pendingDelete, outputs: { video: { dataType: "VIDEO", value: { url: sceneSource, mimeType: "video/mp4" } } } } },
+        { id: "readyTrim", type: "remote-videoNode", position: { x: 800, y: 550 },
+          data: { pendingTrim: readyTrim, outputs: { video: { dataType: "VIDEO", value: { url: sceneSource, mimeType: "video/mp4" } } } } },
+        { id: "customerVideo", type: "remote-videoNode", position: { x: 450, y: 200 },
+          data: { outputs: { video: { dataType: "VIDEO", value: { url: guidedSource, mimeType: "video/mp4" } } } } },
+        { id: "customerAnalysis", type: "remote-frameAnalysisNode", position: { x: 730, y: 200 },
+          data: { frameAnalysis: { aiEnabled: false } } },
+      ],
     }));
     await tenants.writeUserSettings(customer.id, {
       ui: { language: "zh-CN", startupAnimation: false },
+      general: { canvasShortcuts: { multiSelection: "Shift" } },
       stores: { "toonflow.projectList": { project: customerProject, projectList: [customerProject] } },
     }, 0);
     conf.set("settings.multiTenantEnabled", true);
     process.env.NODE_ENV = "dev";
     delete process.env.TOONFLOW_TRUSTED_CANVAS_BETA;
+    process.env.TOONFLOW_BACKGROUND_BETA = "1";
+    const { openDatabase, initializeBackgroundBudget } = await import("@toonflow/multi-tenant-db");
+    const guidedDatabase = await openDatabase(root, false);
+    if (!guidedDatabase) throw new Error("缺少验收数据库");
+    try {
+      await guidedDatabase.initializeBackgroundJobs();
+      await initializeBackgroundBudget(guidedDatabase);
+    }
+    finally { await guidedDatabase.close(); }
+    ffmpeg("-i", customerVideo, "-vf", "fps=30", "-c:v", "libx264", "-c:a", "copy", join(customerProject.directory, guidedSource));
+    const hevcSource = "assets/concatHevc.mp4";
+    await writeFile(join(customerProject.directory, hevcSource), await readFile(groups[0]!.files[0]!));
+    const longSource = "assets/concatOverLimit.mp4";
+    ffmpeg("-f", "lavfi", "-i", "color=red:size=64x64:rate=1:duration=121", "-c:v", "libx264", join(customerProject.directory, longSource));
     ordinaryWeb = true;
     const observed = [];
     for (const simulateCatalogOutage of [false, true]) {
@@ -952,8 +1173,12 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       try {
         const tenantPage = await context.newPage();
         let agentRequests = 0;
+        let fullScans = 0;
         tenantPage.on("request", request => {
-          if (new URL(request.url()).pathname === "/api/agent/list") agentRequests++;
+          const path = new URL(request.url()).pathname;
+          if (path === "/api/agent/list") agentRequests++;
+          if (path === "/api/ai/media/background/analyze" && request.method() === "POST"
+            && request.postData() && !request.postData()?.includes('"expectedSourceRevision"')) fullScans++;
         });
         await tenantPage.goto(`${origin}/#/workspace`, { waitUntil: "domcontentloaded" });
         await tenantPage.locator('input[autocomplete="username"]').fill(customer.userName);
@@ -965,6 +1190,106 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
         expect(sessionCookie?.session).toBe(true);
         await tenantPage.waitForSelector(".workspacePage:not([inert]) .canvasPanel:not([inert]), .el-result", { visible: true, timeout: 15000 });
         if (!simulateCatalogOutage) {
+          const guided = await tenantPage.evaluate(async input => {
+            const headers = { "Content-Type": "application/json", "x-toonflow-workspace": "1" };
+            const post = (path: string, body: unknown) => fetch(path, { method: "POST", headers, body: JSON.stringify(body) });
+            const path = "/api/ai/media/background/analyze";
+            const scopedSource = { directory: input.own, videoPath: input.source };
+            const analysis = await post(path, scopedSource);
+            const payload = await analysis.json();
+            const data = payload && typeof payload === "object" && "data" in payload ? payload.data : undefined;
+            const version = data && typeof data === "object" && "sourceRevision" in data ? data.sourceRevision : undefined;
+            const check = await post(path, { ...scopedSource, expectedSourceRevision: version });
+            const stale = await post(path, { ...scopedSource, expectedSourceRevision: "outdated-workspace-version" });
+            const foreign = await post(path, { directory: input.foreign, videoPath: input.source, expectedSourceRevision: version });
+            const raw = await post("/api/ffmpeg/execute", {});
+            const normalizePath = "/api/workspaces/files/normalizeVideo";
+            const normalized = await post(normalizePath, { directory: input.own, path: input.hevc });
+            const normalizeForeign = await post(normalizePath, { directory: input.foreign, path: "assets/A.mp4" });
+            const normalizeEscape = await post(normalizePath, { directory: input.own, path: "../studio/assets/A.mp4" });
+            const normalizeLong = await post(normalizePath, { directory: input.own, path: input.long });
+            return {
+              status: analysis.status, payload, check: await check.json(), stale: await stale.json(), foreign: foreign.status, raw: raw.status,
+              normalized: { status: normalized.status, type: normalized.headers.get("Content-Type"), size: (await normalized.arrayBuffer()).byteLength },
+              normalizeDenied: [normalizeForeign.status, normalizeEscape.status, normalizeLong.status],
+            };
+          }, { own: customerProject.directory, foreign: project.directory, source: guidedSource, hevc: hevcSource, long: longSource });
+          expect(guided.status).toBe(200);
+          expect(guided.foreign).toBe(403);
+          expect(guided.raw).toBe(403);
+          expect(guided.normalized).toEqual({ status: 200, type: "video/mp4", size: expect.any(Number) });
+          expect(guided.normalized.size).toBeGreaterThan(500);
+          expect(guided.normalizeDenied).toEqual([403, 400, 413]);
+          expect(guided.check).toMatchObject({ data: { matches: true } });
+          expect(guided.stale).toMatchObject({ data: { matches: false } });
+          const { data: guidedResult } = z.object({ data: z.object({ scenes: z.array(z.object({ image: z.string() })) }) }).parse(guided.payload);
+          expect(guidedResult.scenes).toHaveLength(3);
+          for (const shot of guidedResult.scenes) {
+            const preview = await readFile(join(customerProject.directory, shot.image));
+            expect(preview.subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
+          }
+          const firstScan = fullScans;
+          const customerAnalysis = '.vue-flow__node[data-id="customerAnalysis"]';
+          await tenantPage.locator(`${customerAnalysis} .titleBar`).setTimeout(5000).click();
+          await tenantPage.locator('xpath=//div[@data-id="customerAnalysis"]//button[normalize-space(.)="开始拉片" and not(@disabled)]').setTimeout(8000).click();
+          await tenantPage.waitForSelector(`${customerAnalysis} .resultSummary`, { visible: true, timeout: 15000 });
+          expect(fullScans).toBe(firstScan + 1);
+          async function readCustomerAnalysis() {
+            const saved = z.object({ nodes: z.array(z.object({ id: z.string(), data: z.record(z.string(), z.unknown()) })) })
+              .parse(JSON.parse(await readFile(customerCanvas, "utf8")));
+            return saved.nodes.find(({ id }) => id === "customerAnalysis")?.data;
+          }
+          const analysisSnapshot = z.object({ manifest: z.string(), scenes: z.array(z.object({ start: z.number(), end: z.number() })) });
+          const reportResult = analysisSnapshot.extend({
+            backgroundReview: z.object({ assignments: z.array(z.object({ referenceShot: z.number().nullable() })) }),
+          });
+          await tenantPage.locator('xpath=//div[@data-id="customerAnalysis"]//button[normalize-space(.)="查看结果" and not(@disabled)]').setTimeout(5000).click();
+          await tenantPage.locator('[role="dialog"] button[aria-label="查看镜头 S02"]').setTimeout(5000).click();
+          await tenantPage.locator('xpath=//button[normalize-space(.)="与上一镜头合并" and not(@disabled)]').setTimeout(5000).click();
+          await tenantPage.waitForFunction(() => Reflect.get(globalThis, "document").querySelectorAll('[role="dialog"] .sceneItem').length === 2);
+          await tenantPage.locator('[role="dialog"] button[aria-label="查看镜头 S01"]').setTimeout(5000).click();
+          await tenantPage.select('[role="dialog"] select[aria-label="修改镜头背景组"]', "1");
+          await waitForSaved(async () => {
+            const parsed = z.object({ lastResult: reportResult }).safeParse((await readCustomerAnalysis())?.frameAnalysis);
+            return parsed.success && parsed.data.lastResult.backgroundReview.assignments[0]?.referenceShot === 1 ? true : undefined;
+          });
+          await tenantPage.locator('[role="dialog"] button[aria-label="查看镜头 S02"]').setTimeout(5000).click();
+          await tenantPage.select('[role="dialog"] select[aria-label="修改镜头背景组"]', "1");
+          const sourceReport = await waitForSaved(async () => {
+            const parsed = z.object({ lastResult: reportResult }).safeParse((await readCustomerAnalysis())?.frameAnalysis);
+            return parsed.success && parsed.data.lastResult.backgroundReview.assignments[1]?.referenceShot === 1
+              ? analysisSnapshot.parse(parsed.data.lastResult) : undefined;
+          });
+          expect(sourceReport.scenes).toHaveLength(2);
+          const modelCallsBeforeReuse = sentReasoningBudgets.length;
+          await tenantPage.locator('[role="dialog"]:has(.sceneList) .el-dialog__headerbtn').click();
+          await tenantPage.waitForSelector('[role="dialog"] .sceneList', { hidden: true, timeout: 5000 });
+          await tenantPage.locator(`${customerAnalysis} .titleBar`).setTimeout(5000).click();
+          await tenantPage.locator('xpath=//div[@data-id="customerAnalysis"]//button[normalize-space(.)="视频翻拍" and not(@disabled)]').setTimeout(5000).click();
+          await tenantPage.waitForSelector(".remakeStages", { visible: true, timeout: 5000 });
+          await tenantPage.locator('xpath=//button[normalize-space(.)="沿用拉片结果" and not(@disabled)]').setTimeout(8000).click().catch(async error => {
+            const panel = await tenantPage.$eval(".remakeBody", element => Reflect.get(element, "innerText"));
+            throw Error(`旧拉片结果未能用于翻拍：${panel}`, { cause: error });
+          });
+          const carried = await waitForSaved(async () => {
+            const parsed = z.object({ analysis: analysisSnapshot, shots: z.array(z.object({ group: z.number().nullable() })) })
+              .safeParse((await readCustomerAnalysis())?.guidedRemake);
+            return parsed.success ? parsed.data : undefined;
+          });
+          expect(carried.analysis).toEqual(sourceReport);
+          expect(carried.shots.map(({ group }) => group)).toEqual([1, 1]);
+          expect(fullScans).toBe(firstScan + 1);
+          expect(sentReasoningBudgets).toHaveLength(modelCallsBeforeReuse);
+          await tenantPage.locator('[role="dialog"]:has(.remakeStages) .el-dialog__headerbtn').click();
+          await tenantPage.waitForSelector(".remakeStages", { hidden: true, timeout: 5000 });
+          await tenantPage.reload({ waitUntil: "domcontentloaded" });
+          await tenantPage.locator(`${customerAnalysis} .titleBar`).setTimeout(8000).click();
+          await tenantPage.locator('xpath=//div[@data-id="customerAnalysis"]//button[normalize-space(.)="视频翻拍" and not(@disabled)]').setTimeout(5000).click();
+          const persistedRemake = await tenantPage.waitForSelector(".remakeSummary", { visible: true, timeout: 8000 });
+          expect(await persistedRemake?.evaluate(element => element.textContent)).toContain("2 段 · 1 组背景");
+          expect(fullScans).toBe(firstScan + 1);
+          await tenantPage.locator('[role="dialog"]:has(.remakeStages) .el-dialog__headerbtn').click();
+          await tenantPage.waitForSelector(".remakeStages", { hidden: true, timeout: 5000 });
           await tenantPage.locator('.vue-flow__node[data-id="staleTrim"] .titleBar').click();
           await tenantPage.locator('xpath=//button[normalize-space(.)="截取片段"]').click();
           const check = tenantPage.locator('xpath=//button[normalize-space(.)="检查并恢复" and not(@disabled)]');
@@ -975,19 +1300,63 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
           expect(await savedTrim()).toEqual(pendingTrim);
           expect(trimChecks).toBe(1);
 
-          trimReview.queued = true;
+          trimReview.state = "queued";
           await clear.click();
           await check.wait();
           expect(await savedTrim()).toEqual(pendingTrim);
           expect(trimChecks).toBe(2);
 
-          trimReview.queued = false;
+          trimReview.state = "notFound";
           await check.click();
           await clear.click();
           await tenantPage.waitForSelector('.videoActionPanel', { hidden: true });
           expect(await savedTrim()).toBeUndefined();
           expect(await readFile(customerVideo)).toEqual(sourceVideoBytes);
           expect(trimChecks).toBe(4);
+
+          const deleteNode = '.vue-flow__node[data-id="deleteTrim"]';
+          const ordinaryDelete = '.vue-flow__node[data-id="ordinaryDelete"]';
+          const deleteButton = tenantPage.locator(`${deleteNode} button[aria-label="移除节点"]`).setTimeout(5000);
+          trimReview.request = { ...trimReview.request, operationId: pendingDelete.operationId };
+          trimReview.state = "queued";
+          await tenantPage.locator(`${ordinaryDelete} .titleBar`).click();
+          await tenantPage.keyboard.down("Shift");
+          await tenantPage.locator(`${deleteNode} .titleBar`).click();
+          await tenantPage.keyboard.up("Shift");
+          expect(await tenantPage.$(`${ordinaryDelete}.selected`)).not.toBeNull();
+          expect(await tenantPage.$(`${deleteNode}.selected`)).not.toBeNull();
+          await tenantPage.keyboard.press("Backspace");
+          await tenantPage.waitForSelector(ordinaryDelete, { hidden: true, timeout: 5000 });
+          await tenantPage.waitForSelector('xpath=//*[@role="alert" and contains(., "截取正在排队")]', { visible: true, timeout: 5000 });
+          expect(await tenantPage.$(deleteNode)).not.toBeNull();
+          expect(trimChecks).toBe(5);
+
+          trimReview.state = "notFound";
+          await deleteButton.click();
+          await tenantPage.waitForSelector(deleteNode, { hidden: true, timeout: 5000 });
+
+          const readyNode = '.vue-flow__node[data-id="readyTrim"]';
+          trimReview.request = { ...trimReview.request, operationId: readyTrim.operationId };
+          trimReview.state = "ready";
+          await tenantPage.locator(`${readyNode} .titleBar`).setTimeout(5000).click();
+          await tenantPage.locator(`${readyNode} button[aria-label="移除节点"]`).setTimeout(5000).click();
+          await tenantPage.waitForSelector('xpath=//*[@role="alert" and contains(., "请先检查并恢复截取结果")]', { visible: true, timeout: 5000 });
+          expect(await tenantPage.$(readyNode)).not.toBeNull();
+
+          const removedFromDisk = async () => {
+            const saved = JSON.parse(await readFile(customerCanvas, "utf8"));
+            return !saved.nodes.some((item: { id: string }) => ["deleteTrim", "ordinaryDelete"].includes(item.id));
+          };
+          const deletionDeadline = Date.now() + 5000;
+          while (!await removedFromDisk() && Date.now() < deletionDeadline) await Bun.sleep(50);
+          expect(await removedFromDisk()).toBe(true);
+          await tenantPage.reload({ waitUntil: "domcontentloaded" });
+          await tenantPage.waitForSelector(readyNode, { visible: true, timeout: 8000 });
+          expect(await tenantPage.$(deleteNode)).toBeNull();
+          expect(await tenantPage.$(ordinaryDelete)).toBeNull();
+          expect(JSON.parse(await readFile(customerCanvas, "utf8")).nodes.find((item: { id: string }) => item.id === "readyTrim").data.pendingTrim).toEqual(readyTrim);
+          expect(await readFile(customerVideo)).toEqual(sourceVideoBytes);
+          expect(trimChecks).toBe(7);
           expect(trimSubmissions).toBe(0);
         }
         const result = await tenantPage.evaluate(async () => {
@@ -1099,3 +1468,37 @@ test("short, overlong and delayed AAC each stay inside their own video segment",
     await rm(root, { recursive: true, force: true });
   }
 }, 30000);
+
+test("guided remake restores fast cuts and keeps the source audio packets", async () => {
+  const { inspectBackgroundVideo, mergeBackgroundVideo, planGuidedSegments, splitBackgroundVideo } = await import("../media/backgroundPlan");
+  const root = await realpath(await mkdtemp(join(tmpdir(), "toonflowGuidedRemake")));
+  try {
+    const source = join(root, "source.mp4");
+    execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "color=red:s=64x96:r=30:d=0.1", "-f", "lavfi", "-i",
+      "color=green:s=64x96:r=30:d=0.3", "-f", "lavfi", "-i", "color=blue:s=64x96:r=30:d=0.6", "-f", "lavfi", "-i",
+      "sine=frequency=440:duration=1", "-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0[v]",
+      "-map", "[v]", "-map", "3:a", "-c:v", "libx264", "-c:a", "aac", source]);
+    const signal = AbortSignal.timeout(40000);
+    const media = await inspectBackgroundVideo(source, signal, false);
+    const timeline = { frameRate: media.frameRate, fps: media.fps, frameCount: media.frameCount };
+    const segments = planGuidedSegments(media, [0.1, 0.4]);
+    expect(() => planGuidedSegments(media, [0.1, 0.11])).toThrow("严格递增");
+    const parts = await splitBackgroundVideo(root, source, randomUUID(), segments, signal, undefined, timeline);
+    expect(parts.map(part => part.duration)).toEqual([2, 2, 2]);
+    const merged = await mergeBackgroundVideo(root, source, parts.map(part => part.path), randomUUID(), signal,
+      segments.map(part => part.endSeconds - part.startSeconds), "assets/generated", 512 * 1024 * 1024, timeline);
+    const output = join(root, merged.path);
+    expect((await inspectBackgroundVideo(output, signal, false)).frameCount).toBe(30);
+    const hashAudio = (file: string) => execFileSync("ffmpeg", ["-v", "error", "-i", file,
+      "-map", "0:a", "-c", "copy", "-f", "hash", "-hash", "sha256", "-"], { encoding: "utf8" });
+    expect(hashAudio(output)).toBe(hashAudio(source));
+    const decoded = execFileSync("ffmpeg", ["-v", "error", "-i", output, "-an", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"]);
+    const firstPixel = (frame: number) => [...decoded.subarray(frame * 64 * 96 * 3, frame * 64 * 96 * 3 + 3)];
+    expect([2, 3, 11, 12].map(frame => {
+      const pixel = firstPixel(frame);
+      return pixel.indexOf(Math.max(...pixel));
+    })).toEqual([0, 1, 1, 2]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 45000);

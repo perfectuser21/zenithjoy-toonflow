@@ -15,8 +15,8 @@ from imageTransfer import ensureImage, errorClass, validateCosTransfer, validate
 from productionCandidate import verifyProductionCandidate
 from releasePolicy import generationProfile, imagePattern, publicOrigins, publicReceipt, releaseIdentityFields, requireQuotaVolume, validateReceipt
 from verifyBusiness import (newPublicClient, publicClient, rootJson, validateBusinessConfig,
-                            verifyContainer, verifyPublicCandidate)
-from verifyGeneration import validateGenerationConfig
+                            verifyContainer, verifyPublicCandidate, localClient)
+from verifyGeneration import studioGenerationCase, validateGenerationConfig
 
 configPath = Path('/etc/aivideo/release.json')
 diagnosticPath = None
@@ -126,6 +126,88 @@ def verifyTransaction(config, request, transaction, journal):
     print(json.dumps(publicReceipt(receipt)))
 
 
+def resolvedTransaction(state, journal, environment):
+    transaction = json.loads(journal.read_text())
+    if transaction.get('phase') == 'completed':
+        return True
+    if environment != 'staging' or transaction.get('phase') != 'verifying':
+        return False
+    marker = state / ('rejected-' + journal.name)
+    if not marker.exists():
+        return False
+    rejection = rootJson(marker, private=True)
+    return (rejection.get('transactionSha256') == hashlib.sha256(journal.read_bytes()).hexdigest()
+            and rejection.get('result') == 'verificationRejected'
+            and rejection.get('environment') == 'staging'
+            and 'receipt' not in transaction)
+
+
+def rejectStagingVerification(key):
+    # This operation is available only through the root operator CLI. The restricted
+    # release and witness wrappers accept no arguments and do not route stdin here.
+    require(os.geteuid() == 0 and re.fullmatch(r'[1-9][0-9]{0,19}-[1-9][0-9]{0,19}', key),
+            '只能显式核销一笔香港测试发布')
+    config = rootJson(configPath)
+    require(config['environment'] == 'staging' and config['publicOrigin'] == publicOrigins['staging'], '只支持香港测试服')
+    state = Path(config['stateDirectory'])
+    require(rootJson(state / 'identity.json')['environment'] == 'staging', '发布账本身份不匹配')
+    with (state / 'release.lock').open('rb') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        journal = state / (key + '.json')
+        transaction = rootJson(journal, private=True)
+        request = transaction['request']
+        require(transaction.get('phase') == 'verifying' and 'receipt' not in transaction
+                and request.get('environment') == 'staging'
+                and key == request['runId'] + '-' + request['runAttempt'], '仅核销尚未通过验收的指定事务')
+        marker = state / ('rejected-' + journal.name)
+        require(not marker.exists() and not marker.is_symlink(), '验收失败已登记')
+        failure = rootJson(state / ('diagnostic-' + key + '.json'), private=True)
+        require(failure.get('exit') == 1, '缺少原验收失败证据')
+        backup = transaction['backup']
+        require(all(backup.get(field) is True for field in ('backupVerified', 'restoreVerified', 'quotaRestoreVerified'))
+                and re.fullmatch(r'[0-9]{19}', backup['backupId']), '缺少原事务回滚证据')
+        backupFolder = Path(config['backupDirectory']) / backup['backupId']
+        rootFile(backupFolder / 'capsule.ext4')
+        receipt = rootJson(backupFolder / 'receipt.json', private=True)
+        require(receipt.get('backupId') == backup['backupId']
+                and all(receipt.get(field) is True for field in ('backupVerified', 'restoreVerified', 'quotaRestoreVerified')),
+                '原事务回滚证据不一致')
+        business = rootJson(config['businessConfig'], private=True)
+        require(business.get('environment') == 'staging' and business.get('publicOrigin') == config['publicOrigin'], '业务配置不属于香港测试服')
+        validateBusinessConfig(business)
+        payload, _, account = validateGenerationConfig(business)
+        studioPayload, _, studioAccount = studioGenerationCase(business)
+        verifyContainer(config, request, business['localOrigin'])
+        bootId = verifyPublicCandidate(newPublicClient(business), localClient(business), request)
+        cases = [('generation-', payload, account), ('studioImageGeneration-', studioPayload, studioAccount)]
+        outcomes = []
+        for prefix, modelRequest, owner in cases:
+            job = rootJson(state / (prefix + key + '.json'), private=True)
+            taskId = job.get('taskId', '')
+            hashed = hashlib.sha256(json.dumps({**modelRequest, 'taskId': taskId}, sort_keys=True).encode()).hexdigest()
+            require(job.get('request') == {field: request[field] for field in releaseIdentityFields}
+                    and job.get('bootId') == bootId and job.get('publicOrigin') == config['publicOrigin']
+                    and job.get('phase') in ('generated', 'completed')
+                    and job.get('requestSha256') == hashed and re.fullmatch(r'[a-f0-9-]{36}', taskId),
+                    '原模型任务身份或阶段无法核对')
+            client = newPublicClient(business)
+            client.login(owner)
+            status = client.request('POST', '/api/ai/media/tasks/status',
+                                    body={'directory': modelRequest['directory'], 'taskIds': [taskId],
+                                          'resume': False, 'readOnly': True})
+            require(isinstance(status, list) and len(status) == 1 and status[0].get('taskId') == taskId
+                    and status[0].get('state') == 'succeeded', '原模型任务尚无确定终态')
+            outcomes.append({'case': prefix.rstrip('-'), 'taskId': taskId, 'state': 'succeeded'})
+        verifyContainer(config, request, business['localOrigin'])
+        verifyPublicCandidate(newPublicClient(business), localClient(business), request, bootId)
+        rejection = {'result': 'verificationRejected', 'environment': 'staging',
+                     'transactionSha256': hashlib.sha256(journal.read_bytes()).hexdigest(),
+                     'rejectedAt': time.time(), 'backupId': backup['backupId'], 'tasks': outcomes}
+        atomicJson(marker, rejection)
+        require(resolvedTransaction(state, journal, 'staging'), '验收失败记录读回不一致')
+        print(json.dumps({'run': key, 'result': rejection['result'], 'terminalModelTasks': len(outcomes)}))
+
+
 def main():
     global diagnosticPath, diagnosticPhase
     require(os.geteuid() == 0, '必须通过受限 sudo 入口运行')
@@ -167,12 +249,13 @@ def main():
         key = request['runId'] + '-' + request['runAttempt']
         diagnosticPath = state / ('diagnostic-' + key + '.json')
         journal = state / (key + '.json')
-        require(not any(json.loads(p.read_text()).get('phase') != 'completed'
-                        and not (operation == 'verify' and p == journal)
+        require(not any(not resolvedTransaction(state, p, request['environment'])
+                        and not (operation == 'verify' and p == journal and not (state / ('rejected-' + p.name)).exists())
                         for p in state.glob('[0-9]*-[0-9]*.json')), '有尚未结束的发布事务')
         if journal.exists():
             previous = json.loads(journal.read_text())
             if operation == 'verify':
+                require(not (state / ('rejected-' + journal.name)).exists(), '已核销的验收禁止重放')
                 diagnosticPath = state / ('diagnostic-' + key + '-' + str(time.time_ns()) + '.json')
                 require(previous.get('phase') == 'verifying', '仅能继续已完成切换的验收阶段')
                 require({k:v for k,v in previous['request'].items() if k != 'operation'}
@@ -285,7 +368,11 @@ def main():
 
 if __name__ == '__main__':
     try:
-        main()
+        if len(sys.argv) == 3 and sys.argv[1] == '--reject-staging-verification':
+            rejectStagingVerification(sys.argv[2])
+        else:
+            require(len(sys.argv) == 1, '发布入口参数非法')
+            main()
     except Exception as error:
         try:
             recordTopFailure(error)

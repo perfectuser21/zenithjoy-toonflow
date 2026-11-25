@@ -5,6 +5,7 @@ import { join, relative } from "node:path";
 import { constants } from "node:fs";
 import { createHash } from "node:crypto";
 import { getImageReferenceLimit, mediaProviders, type Provider, type ProviderTaskData } from "@toonflow/providers";
+import { minimaxH3ProviderId, minimaxH3VideoUrl } from "@toonflow/providers/media/minimaxH3";
 import type { GeneratedMedia, MediaGenerationRequest, MediaModel, MediaReference } from "@toonflow/tools-scaffold/runtime";
 import conf from "@/utils/conf";
 import { getAccountProvider } from "@/utils/ai/provider";
@@ -179,7 +180,7 @@ export async function listMediaModels(): Promise<MediaModel[]> {
       providerId: provider.id, providerLabel: provider.label, modelId: model.id, label: model.label, type: model.type,
       supportsPrice: "supportsPrice" in provider && provider.supportsPrice === true,
       rules: model.rules,
-      mode: model.mode, durationResolutionMap: model.durationResolutionMap, audio: model.audio,
+      mode: model.mode, durationResolutionMap: model.durationResolutionMap, audio: model.audio, adaptiveFrameRatio: model.adaptiveFrameRatio,
       ...(model.type === "audio" ? { voices: model.voices } : {}),
       ...(model.type === "image" ? {
         maxReferenceImages: getImageReferenceLimit(provider.id, model),
@@ -204,19 +205,19 @@ export async function readReference(cwd: string, reference: MediaReference, medi
   return { type: "base64", data: bytes.toString("base64"), mimeType, name: reference.path };
 }
 
-async function downloadAsset(url: string, signal?: AbortSignal) {
+async function downloadAsset(url: string, signal?: AbortSignal, validateUrl?: (url: URL) => void) {
   let mimeType = "";
   const bytes = await downloadPublicFile(url, { signal: signal ?? AbortSignal.timeout(120000), maxBytes: maxMediaSize,
-    label: "生成结果", classifyExpired: true, onContentType: value => { mimeType = value; } });
+    label: "生成结果", classifyExpired: true, validateUrl, onContentType: value => { mimeType = value; } });
   return { bytes, mimeType };
 }
 
-async function assetBytes(asset: MediaAsset, mediaType: "image" | "video" | "audio", signal?: AbortSignal) {
+async function assetBytes(asset: MediaAsset, mediaType: "image" | "video" | "audio", signal?: AbortSignal, validateUrl?: (url: URL) => void) {
   if (!asset || asset.mediaType !== mediaType) invalid("供应商返回的媒体类型不正确");
   let bytes: Uint8Array;
   let mimeType = asset.mimeType ?? "";
   if (asset.type === "url") {
-    const result = await downloadAsset(asset.url, signal);
+    const result = await downloadAsset(asset.url, signal, validateUrl);
     bytes = result.bytes;
     const responseMimeType = result.mimeType.split(";")[0].trim().toLowerCase();
     mimeType = responseMimeType && responseMimeType !== "application/octet-stream" ? result.mimeType : mimeType;
@@ -249,7 +250,7 @@ function resumableAssets(assets: MediaAsset[], mediaType: "image" | "video" | "a
 async function prepareRequest<T>(directory: string | undefined, mediaType: "image" | "video" | "audio", request: MediaGenerationRequest,
   read: (cwd: string, reference: MediaReference, type: string, signal?: AbortSignal) => Promise<T>, signal?: AbortSignal) {
   // ACT: 仅向已适配引用映射的内置供应商传递，其他第三方适配器仍接收原有公共参数。
-  const referenceOrder = mediaType === "video" && ["toonflow", "apiMart", "metaso", "compshare", "aliyun"].includes(request.providerId) ? request.referenceOrder : undefined;
+  const referenceOrder = mediaType === "video" && ["toonflow", "apiMart", "metaso", "compshare", "aliyun", minimaxH3ProviderId].includes(request.providerId) ? request.referenceOrder : undefined;
   if (referenceOrder) {
     const media = { image: request.images, video: request.videos, audio: request.audios };
     for (const [index, reference] of referenceOrder.entries()) {
@@ -331,7 +332,7 @@ async function preparePriceRequest(directory: string | undefined, mediaType: "im
   const combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
   try {
     const prepared = await prepareRequest(directory, mediaType, request, readPriceReference, combined);
-    if (prepared.type === "video") delete prepared.referenceOrder;
+    if (prepared.type === "video" && request.providerId !== minimaxH3ProviderId) delete prepared.referenceOrder;
     return prepared;
   }
   catch (error) {
@@ -601,13 +602,14 @@ async function executeMedia(
     if (checkpoint?.assetCount !== undefined && checkpoint.assetCount !== assets.length) invalid("恢复任务的结果数量发生变化");
     // ACT: 只持久化下载地址；二进制直接落盘，避免把大媒体复制进任务 JSON。未落盘部分由 resumeTask 重新取回。
     await task?.save({ assetCount: assets.length, assets: resumableAssets(assets, mediaType) });
+    const validateUrl = checkpoint?.providerData?.kind === minimaxH3ProviderId ? minimaxH3VideoUrl : undefined;
     let refreshed = false;
     for (let index = 0; index < assets.length; index++) {
       signal?.throwIfAborted();
       const existing = saved.get(index);
       if (existing) { result.push(existing); continue; }
       let content: Awaited<ReturnType<typeof assetBytes>>;
-      try { content = await assetBytes(assets[index]!, mediaType, signal); }
+      try { content = await assetBytes(assets[index]!, mediaType, signal, validateUrl); }
       catch (cause) {
         if (refreshed || !checkpoint?.providerData || (cause as { code?: string } | null)?.code !== "MEDIA_ASSET_URL_EXPIRED") throw cause;
         // 下载地址过期时只重新查询原任务一次，不重提生成，也不无限重试同一失效地址。
@@ -615,7 +617,7 @@ async function executeMedia(
         refreshed = true;
         if (!Array.isArray(assets) || assets.length !== checkpoint.assetCount) invalid("恢复任务的结果数量发生变化");
         await task!.save({ assets: resumableAssets(assets, mediaType) });
-        content = await assetBytes(assets[index]!, mediaType, signal);
+        content = await assetBytes(assets[index]!, mediaType, signal, validateUrl);
       }
       const { bytes, mimeType } = content;
       signal?.throwIfAborted();

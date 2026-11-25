@@ -100,7 +100,7 @@ import { EventSourceParserStream } from "eventsource-parser/stream";
 
 const props = defineProps<{ file?: NodeMediaValue; src: string; disabled?: boolean }>();
 const { node } = useNode();
-const { addNodes, addEdges, removeNodes, findNode, getNodes, nodeTypes, removeSelectedElements, addSelectedNodes, nodesSelectionActive, fitView, setCenter } = useVueFlow();
+const { addNodes, addEdges, removeNodes, findNode, getNodes, getEdges, nodeTypes, removeSelectedElements, addSelectedNodes, nodesSelectionActive, fitView, setCenter } = useVueFlow();
 const files = useNodeFiles();
 const getPersistence = useNodePersistence();
 const loadFfmpeg = useNodeFfmpeg();
@@ -218,8 +218,8 @@ watch(playbackSrc, () => { clearPreview(); duration.value = 0; frames.value = []
 onBeforeUnmount(() => { cancel(); clearPreview(); });
 nodeEvent.on("save", reason => {
   if (reason === "reload" && processing.value) throw new Error("视频处理中，请完成或取消后再刷新节点");
+  if (reason === "delete") return prepareDelete();
 });
-nodeEvent.on("delete", async () => { cancel(); await job; if (pendingTrim.value) throw new Error("请先恢复未完成的截取，再删除节点"); });
 nodeEvent.on("copy", () => ({ pendingTrim: undefined }));
 
 function open(value: keyof typeof actionLabels) {
@@ -232,7 +232,7 @@ function open(value: keyof typeof actionLabels) {
   if (value !== "trim") run();
 }
 
-async function createFrameAnalysis() {
+async function createFrameAnalysis(guided = false) {
   if (processing.value || creatingAnalysis.value || props.disabled || !props.file) return;
   const type = "remote-frameAnalysisNode";
   const canvasId = getCanvas?.()?.id;
@@ -242,6 +242,29 @@ async function createFrameAnalysis() {
   try {
     if (!nodeTypes?.value?.[type]) throw new Error("请先启用逐帧拉片节点插件");
     if (findNode(node.id) !== node) throw new Error("原视频节点已变化，请重新操作");
+    const analysisInputs = getEdges.value.filter(edge => edge.targetHandle === "in");
+    const linked = analysisInputs.flatMap(edge => {
+      if (edge.source !== node.id || edge.sourceHandle !== "video") return [];
+      const target = findNode(edge.target);
+      return target?.type === type ? [target] : [];
+    });
+    if (linked.length > 1) throw new Error("此视频已连接多个拉片节点，请在要沿用的节点中打开视频翻拍");
+    const existing = linked[0];
+    if (existing) {
+      if (analysisInputs.filter(edge => edge.target === existing.id).length !== 1) throw new Error("已连接的拉片节点有多个视频输入，请先确认素材");
+      removeSelectedElements();
+      addSelectedNodes([existing]);
+      nodesSelectionActive.value = false;
+      if (guided) {
+        existing.data.openGuidedRemake = true;
+        return;
+      }
+      await nextTick();
+      if (findNode(existing.id) === existing && getCanvas?.()?.id === canvasId) {
+        await fitView({ nodes: [existing.id], padding: 0.4, maxZoom: 1, duration: 200 });
+      }
+      return;
+    }
     const width = Math.max(240, node.dimensions.width || 320);
     const x = node.computedPosition.x + (node.dimensions.width || 320) + 80;
     let y = node.computedPosition.y;
@@ -255,7 +278,7 @@ async function createFrameAnalysis() {
     await batchHistory(async () => {
       try {
         // 组内视频使用绝对坐标，新拉片节点直接放到画布，不继承父组的相对位置。
-        addNodes({ id: nodeId, type, position: { x, y }, data: { label: `${node.data.label || "视频"} · 逐帧拉片` } });
+        addNodes({ id: nodeId, type, position: { x, y }, data: { label: `${node.data.label || "视频"} · ${guided ? "视频翻拍" : "逐帧拉片"}`, ...(guided ? { openGuidedRemake: true } : {}) } });
         await nextTick();
         if (getCanvas?.()?.id !== canvasId || findNode(node.id) !== node || props.file?.url !== source
           || !nodeTypes?.value?.[type] || !findNode(nodeId)) throw new Error("画布或视频已变化，请重新操作");
@@ -521,6 +544,36 @@ async function finishTrimRecord(signal: AbortSignal, expectedOperationId: string
   delete node.data.pendingTrim;
   try { await persistence.save(signal); }
   catch (error) { if (!pendingTrim.value) node.data.pendingTrim = saved; throw error; }
+}
+
+async function prepareDelete() {
+  cancel();
+  await job;
+  if (processing.value) throw new Error("截取状态确认中，请完成后再删除节点");
+  const pending = pendingTrim.value;
+  if (!pending || pending.recoverOnly) return;
+  const saved = { ...pending };
+  const persistence = getPersistence?.();
+  const signal = AbortSignal.timeout(15000);
+  processing.value = true;
+  try {
+    if (!persistence || persistence.directory !== saved.directory || !saved.ownerId
+      || props.file?.url !== saved.source || await usesCustomerAccount(signal) !== saved.ownerId) {
+      throw new Error("截取记录与当前账号、画布或视频不一致，请恢复后再删除节点");
+    }
+    const state = await readTrimStatus(saved, signal);
+    if (state?.status === "pending" && state.phase === "queued") throw new Error("截取正在排队，结束后可检查并恢复，再删除节点");
+    if (state?.status !== "notFound") throw new Error("请先检查并恢复截取结果，再删除节点");
+    const userId = await usesCustomerAccount(signal);
+    const current = getPersistence?.();
+    if (userId !== saved.ownerId || current?.directory !== saved.directory || current.canvasPath !== persistence.canvasPath
+      || findNode(node.id) !== node || pendingTrim.value !== pending || props.file?.url !== saved.source) {
+      throw new Error("账号、画布或截取记录已变化，请重新删除节点");
+    }
+    delete node.data.pendingTrim;
+    try { await persistence.save(signal); }
+    catch (error) { if (!pendingTrim.value) node.data.pendingTrim = pending; throw error; }
+  } finally { processing.value = false; }
 }
 
 async function clearUnsubmittedTrim() {

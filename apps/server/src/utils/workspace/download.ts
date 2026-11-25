@@ -79,11 +79,12 @@ function requestFile(url: URL, signal: AbortSignal, accept: string) {
   });
 }
 
-export async function downloadPublicFile(value: string, options: { signal: AbortSignal; maxBytes: number; label: string; httpsOnly?: boolean; accept?: string; classifyExpired?: boolean; onContentType?: (value: string) => void }) {
-  const { signal, maxBytes, label, httpsOnly = false, accept = "*/*", classifyExpired = false, onContentType } = options;
+export async function downloadPublicFile(value: string, options: { signal: AbortSignal; maxBytes: number; label: string; httpsOnly?: boolean; accept?: string; classifyExpired?: boolean; onContentType?: (value: string) => void; validateUrl?: (url: URL) => void }) {
+  const { signal, maxBytes, label, httpsOnly = false, accept = "*/*", classifyExpired = false, onContentType, validateUrl } = options;
   let url = remoteAddress(value, httpsOnly);
   for (let redirects = 0; redirects <= 5; redirects++) {
     signal.throwIfAborted();
+    validateUrl?.(url);
     const response = await requestFile(url, signal, accept);
     if ([301, 302, 303, 307, 308].includes(response.statusCode ?? 0)) {
       const location = response.headers.location;

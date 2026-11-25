@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
+import { minimaxH3ProviderId } from "@toonflow/providers/media/minimaxH3";
 import { validateFields } from "@/lib/middleware";
 import { success, error, errorFromCause } from "@/lib/responseFormat";
 import u from "@/utils";
@@ -27,7 +28,7 @@ export default Router().post("/", validateFields({
   if (req.aborted || res.destroyed) return;
   const controller = new AbortController();
   let heartbeat: ReturnType<typeof setInterval> | undefined;
-  const executionTaskId = u.multiTenant.modelGateway.enabled() ? randomUUID() : undefined;
+  const executionTaskId = u.multiTenant.modelGateway.enabled() || parsed.data.providerId === minimaxH3ProviderId ? randomUUID() : undefined;
   const close = () => { clearInterval(heartbeat); controller.abort(); };
   res.once("close", close);
   req.once("aborted", close);

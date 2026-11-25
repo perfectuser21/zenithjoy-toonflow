@@ -5,6 +5,7 @@ import apiMart from "./src/media/apiMart";
 import metaso from "./src/media/metaso";
 import compshare from "./src/media/compshare";
 import openaiImage from "./src/media/openaiImage";
+import minimaxH3 from "./src/media/minimaxH3";
 
 export type Provider = ProviderDefinition;
 export type ProviderPrice = NonNullable<Awaited<ReturnType<NonNullable<Provider["getPrice"]>>>>;
@@ -17,7 +18,7 @@ export type AudioConvertOptions = Parameters<ProviderTools["audio"]["convert"]>[
 export type { FfmpegFactory, FfmpegCommand } from "@toonflow/ffmpeg/types";
 
 export const languageProviders = [deepSeek] as const;
-export const mediaProviders = [apiMart, metaso, compshare, openaiImage] as const;
+export const mediaProviders = [apiMart, metaso, compshare, openaiImage, minimaxH3] as const;
 
 const imageReferenceLimits = new Map<string, ReadonlyMap<string, number>>([
   ["aliyun", new Map([

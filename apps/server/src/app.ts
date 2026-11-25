@@ -13,7 +13,7 @@ import initializePlugins, { initializeHostedSharedCanvasNodes, initializeTrusted
 import { languageRequest, setLocaleFallback, translateError, translateMessage } from "@/lib/i18n";
 import { detectLocale, normalizeLocale } from "@toonflow/i18n";
 
-const autoInstallProviders = ["apiMart.ts", "metaso.ts", "compshare.ts"];
+const autoInstallProviders = ["apiMart.ts", "metaso.ts", "compshare.ts", "minimaxH3.ts"];
 declare const __toonflowWebHashes__: Record<string, string> | undefined;
 const trustedWebHashes = typeof __toonflowWebHashes__ === "undefined" ? {} : __toonflowWebHashes__;
 
@@ -67,10 +67,11 @@ export async function createApp({
   if (dataDirectory && nodesRoot) {
     const target = resolve(dataDirectory, "nodes");
     await initializePlugins(target, nodesRoot, /^[a-z][a-zA-Z0-9]*\.umd\.js$/, pluginRevision);
-    if (process.env.TOONFLOW_TRUSTED_CANVAS_BETA === "1") {
-      await initializeTrustedNodes(target, nodesRoot);
-      const { isStaffAccessConfigured } = await import("@/utils/multiTenant/staffAccess");
-      if (isStaffAccessConfigured()) await initializeHostedSharedCanvasNodes(target, nodesRoot);
+    const trustedCanvas = process.env.TOONFLOW_TRUSTED_CANVAS_BETA === "1";
+    if (trustedCanvas) await initializeTrustedNodes(target, nodesRoot);
+    if (process.env.TOONFLOW_BACKGROUND_PRODUCTION === "1" ||
+      (trustedCanvas && (await import("@/utils/multiTenant/staffAccess")).isStaffAccessConfigured())) {
+      await initializeHostedSharedCanvasNodes(target, nodesRoot);
     }
   }
   if (dataDirectory && extRoot) {

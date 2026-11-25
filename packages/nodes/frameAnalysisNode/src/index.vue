@@ -10,7 +10,8 @@
       <el-card class="mediaToolbar" shadow="never" :bodyStyle="{ padding: '6px', display: 'flex', alignItems: 'center' }">
         <el-button :icon="IconTransfer" text :disabled="busy || connected" @click="fileInput?.click()">替换视频</el-button>
         <el-button :icon="IconMaximize" text :disabled="!player?.ready" @click="player?.enterFullscreen()">全屏</el-button>
-        <el-button :icon="IconFileText" text :disabled="!lastResultMatches" @click="openReport">查看结果</el-button>
+        <el-button :icon="IconFileText" text :disabled="!lastResultMatches && !hasGuidedAnalysis" @click="openReport">{{ !lastResultMatches && hasGuidedAnalysis ? "查看翻拍的分析结果" : "查看结果" }}</el-button>
+        <el-button text :disabled="!source || busy" @click="remakeVisible = true">视频翻拍</el-button>
       </el-card>
     </template>
     <div class="analysisContent">
@@ -40,7 +41,7 @@
     </div>
     <template #bottom>
       <el-card class="promptCard nodrag nopan nowheel" shadow="never" :bodyStyle="{ padding: '14px 16px 12px' }" @pointerdown.stop @dblclick.stop>
-        <div class="promptHeader">
+        <div v-if="!scopedAnalysis" class="promptHeader">
           <div class="dimensionOptions">
             <el-checkbox v-model="settings.frames" :disabled="busy" title="每个镜头提取一张关键帧"><icon-photo :size="15" />分镜</el-checkbox>
             <el-checkbox v-model="settings.clips" :disabled="busy" title="按镜头边界切割视频片段"><icon-movie :size="15" />动态</el-checkbox>
@@ -56,11 +57,11 @@
             </div>
           </el-popover>
         </div>
-        <template v-if="settings.aiEnabled">
+        <template v-if="settings.aiEnabled && !scopedAnalysis">
           <promptInput v-model="focusModel" v-model:text="settings.focus" :references="[]" placeholder="填写分析重点，例如：镜头如何推动叙事、节奏如何变化…" />
           <div class="promptHint"><span>逐镜头观察，再归纳叙事、节奏与剪辑 · 模型需支持图片理解</span><span :class="{ overLimit: settings.focus.length > 2000 }">{{ settings.focus.length }}/2000</span></div>
         </template>
-        <p v-else class="localHint">本地检测分镜、提取关键帧与原音轨，结果直接生成到画布。</p>
+        <p v-else class="localHint">{{ scopedAnalysis ? "检测镜头切点并保存代表帧，分镜可继续用于视频翻拍。" : "本地检测分镜、提取关键帧与原音轨，结果直接生成到画布。" }}</p>
         <div class="promptFooter">
           <el-select v-if="settings.aiEnabled" :modelValue="selectedModel ? settings.aiModel : ''" class="modelSelect" :loading="modelsLoading" :disabled="busy" filterable placeholder="选择语言模型" aria-label="拉片语言模型" noDataText="请先在设置中添加模型" placement="top-start" @update:modelValue="settings.aiModel = $event" @visible-change="visible => visible && loadModels()">
             <template v-if="!selectedModel" #prefix><icon-sparkles :size="17" /></template>
@@ -71,14 +72,15 @@
               </el-option>
             </el-option-group>
           </el-select>
-          <span v-else class="localLabel"><icon-scissors :size="17" />本地分析</span>
+          <span v-else class="localLabel"><icon-scissors :size="17" />{{ scopedAnalysis ? "分镜分析" : "本地分析" }}</span>
           <div class="promptActions">
             <el-switch v-model="settings.aiEnabled" :disabled="busy" activeText="AI 辅助" aria-label="AI 辅助拉片" />
             <el-button v-if="processing" :icon="IconPlayerStop" :disabled="cancelling" @click="cancel">{{ cancelling ? '正在取消' : '取消' }}</el-button>
             <template v-else>
-              <el-button v-if="settings.aiEnabled && lastResultMatches" :icon="IconSparkles" text :disabled="busy || !selectedModel || settings.focus.length > 2000" @click="runAi">{{ retryOverview ? '重试归纳' : lastResult?.ai ? '重新分析' : '补充分析' }}</el-button>
-              <el-button v-if="settings.aiEnabled && lastResultMatches" text :disabled="busy || !selectedModel" @click="runBackgroundReview">复核背景</el-button>
-              <el-button class="sendButton" :icon="IconArrowUp" :disabled="busy || !source || !hasDimensions || (settings.aiEnabled && (!selectedModel || settings.focus.length > 2000))" @click="run">{{ lastResultMatches ? '重新拉片' : '开始拉片' }}</el-button>
+              <el-button v-if="!scopedAnalysis && settings.aiEnabled && lastResultMatches" :icon="IconSparkles" text :disabled="busy || !selectedModel || settings.focus.length > 2000" @click="runAi">{{ retryOverview ? '重试归纳' : lastResult?.ai ? '重新分析' : '补充分析' }}</el-button>
+              <el-button v-if="settings.aiEnabled && lastResultMatches" text
+                :disabled="busy || !selectedModel || scopedAnalysis && lastResult?.scenes.some(scene => !scene.image)" @click="runBackgroundReview">复核背景</el-button>
+              <el-button class="sendButton" :icon="IconArrowUp" :disabled="busy || !source || !hasDimensions || (!scopedAnalysis && settings.aiEnabled && (!selectedModel || settings.focus.length > 2000))" @click="run">{{ lastResultMatches || hasGuidedAnalysis ? '重新拉片' : '开始拉片' }}</el-button>
             </template>
           </div>
         </div>
@@ -86,7 +88,8 @@
       </el-card>
     </template>
   </nodeSkeleton>
-  <analysisReport v-if="lastResultMatches && lastResult" v-model="reportVisible" :result="lastResult" />
+  <analysisReport v-if="lastResultMatches && lastResult" v-model="reportVisible" :result="lastResult" :editable="scopedAnalysis && !!lastResult.sourceRevision" :editing="editing" :editError="editError" @edit="applyAnalysisEdit" />
+  <remakePanel v-if="remakeVisible" v-model="remakeVisible" :source="source" :savedAnalysis="lastResultMatches ? lastResult : undefined" />
 </template>
 
 <script setup lang="ts">
@@ -99,10 +102,14 @@ import {
 } from "@toonflow/nodes-scaffold/runtime";
 import { analyzeVideo, type AnalysisResult } from "./videoAnalysis";
 import { useResultNodes } from "./resultNodes";
+import { editAnalysis, type AnalysisEdit } from "./analysisEdits";
+import { useNodePersistence } from "@toonflow/nodes-scaffold/nodeDocument";
 import { analyzeSceneDescriptions } from "./aiAnalysis";
 import { restoreBackgroundReview } from "./backgroundAssignments";
 import { reviewBackgrounds } from "./backgroundReview";
+import { callRemakeApi, remakeAnalysisSchema, remakeStateSchema, requiresScopedAnalysis } from "./remakeWorkflow";
 import analysisReport from "./analysisReport.vue";
+import remakePanel from "./remakePanel.vue";
 import videoPlayer from "@toonflow/node-video/videoPlayer";
 import promptInput from "@toonflow/node-shared/promptInput";
 import { groupNodeModels } from "@toonflow/node-shared/groupNodeModels";
@@ -134,7 +141,7 @@ const { id, node, nodeProps, outputs, ai, nodeEvent, files, ffmpeg: loadFfmpeg, 
 // ACT: 拉片结果由独立素材节点承载，本节点仅保留视频输入；迁移旧版遗留输出。
 outputs.value = {};
 node.data.outputs = outputs.value;
-const nodeData = node.data as typeof node.data & { frameAnalysis?: AnalysisState };
+const nodeData = node.data as typeof node.data & { frameAnalysis?: AnalysisState; openGuidedRemake?: boolean; guidedRemake?: unknown };
 const saved = nodeData.frameAnalysis;
 const settings = reactive<AnalysisSettings>({
   method: saved?.method === "content" ? "content" : "adaptive",
@@ -165,17 +172,31 @@ const fileInput = ref<HTMLInputElement>();
 const previewFailed = ref(false);
 const metadata = reactive({ duration: 0, width: 0, height: 0 });
 const processing = ref(false);
+const editing = ref(false);
 const uploading = ref(false);
 const cancelling = ref(false);
 const progress = ref(0);
 const progressLabel = ref("");
 const errorMessage = ref("");
 const previewUrl = files.useFileUrl(source, error => { previewFailed.value = true; errorMessage.value = readError(error, "视频读取失败"); });
-const busy = computed(() => processing.value || uploading.value || !!player.value?.capturing);
-const hasDimensions = computed(() => settings.frames || settings.clips || settings.audio);
+const busy = computed(() => processing.value || uploading.value || editing.value || !!player.value?.capturing);
+const scopedAnalysis = ref(false);
+const hasDimensions = computed(() => scopedAnalysis.value || settings.frames || settings.clips || settings.audio);
 const lastResultMatches = computed(() => !!lastResult.value && resultSource.value === source.value?.url);
 const nodeWidth = computed(() => metadata.width && metadata.height ? Math.max(180, 240 * metadata.width / metadata.height) + 18 : 240);
 const reportVisible = ref(false);
+const editError = ref("");
+const getPersistence = useNodePersistence();
+const remakeVisible = ref(false);
+const hasGuidedAnalysis = computed(() => {
+  const guided = remakeStateSchema.safeParse(nodeData.guidedRemake);
+  return guided.success && guided.data.source === source.value?.url;
+});
+watch(() => nodeData.openGuidedRemake, requested => {
+  if (!requested) return;
+  delete nodeData.openGuidedRemake;
+  remakeVisible.value = true;
+}, { immediate: true, flush: "sync" });
 const models = ref<NodeAiModel[]>([]);
 const modelsLoading = ref(false);
 const modelError = ref("");
@@ -193,6 +214,8 @@ let controller: AbortController | undefined;
 let job: Promise<void> | undefined;
 let uploadJob: Promise<void> | undefined;
 let disposed = false;
+const accountCheck = new AbortController();
+void requiresScopedAnalysis(accountCheck.signal).then(value => { scopedAnalysis.value = value; }).catch(() => {});
 
 function persist() {
   nodeData.frameAnalysis = { ...settings, source: uploadedSource.value, lastResult: lastResult.value, resultSource: resultSource.value };
@@ -209,11 +232,12 @@ watch([() => source.value?.url, () => getCanvas?.()?.id, readDirectory], () => {
   preview?.pause();
   preview = undefined;
   reportVisible.value = false;
+  editError.value = "";
   metadata.duration = metadata.width = metadata.height = 0;
   previewFailed.value = false;
   errorMessage.value = "";
 }, { flush: "sync" });
-onScopeDispose(() => { disposed = true; cancel(); preview?.pause(); });
+onScopeDispose(() => { disposed = true; accountCheck.abort(); cancel(); preview?.pause(); });
 
 nodeEvent.on("canConnect", (connection, context) => {
   const edges = context.edges.filter(edge => edge.source !== connection.source || edge.sourceHandle !== connection.sourceHandle
@@ -271,7 +295,33 @@ function formatDuration(value: number) {
 }
 
 function openReport() {
-  reportVisible.value = true;
+  if (!lastResultMatches.value && hasGuidedAnalysis.value) remakeVisible.value = true;
+  else reportVisible.value = true;
+}
+
+async function applyAnalysisEdit(edit: AnalysisEdit) {
+  const previous = lastResult.value;
+  const context = getPersistence?.();
+  if (!scopedAnalysis.value || !previous?.sourceRevision || !lastResultMatches.value || editing.value || !context) return;
+  editing.value = true;
+  editError.value = "";
+  const sourceUrl = source.value?.url;
+  try {
+    const result = editAnalysis(previous, edit);
+    const folder = previous.manifest.slice(0, previous.manifest.lastIndexOf("/") + 1);
+    result.manifest = `${folder}analysisEdit${crypto.randomUUID().replaceAll("-", "")}.json`;
+    await files.getWorkspaceFiles().writeJson(result.manifest, result, true);
+    if (disposed || source.value?.url !== sourceUrl || lastResult.value !== previous
+      || getPersistence?.()?.directory !== context.directory || getPersistence?.()?.canvasPath !== context.canvasPath) {
+      throw new Error("画布或原视频已变化，请重新打开拉片报告");
+    }
+    await batchHistory(async () => {
+      lastResult.value = result;
+      try { await context.save(); }
+      catch (error) { lastResult.value = previous; throw error; }
+    });
+  } catch (error) { editError.value = readError(error, "镜头修改未保存"); }
+  finally { editing.value = false; }
 }
 
 function uploadVideo(event: Event) {
@@ -350,7 +400,8 @@ async function processBackgroundReview(video: string, result: AnalysisResult, mo
   errorMessage.value = "";
   try {
     const workspace = files.getWorkspaceFiles();
-    const ffmpeg = await loadFfmpeg(current.signal);
+    const scoped = await requiresScopedAnalysis(current.signal);
+    const ffmpeg = scoped || result.sourceRevision ? undefined : await loadFfmpeg(current.signal);
     const reviewed = await reviewBackgrounds({
       ai, model, ffmpeg, workspace, source: video, result, signal: current.signal,
       onProgress: (value, label) => {
@@ -443,13 +494,14 @@ async function processAi() {
 
 async function processVideo() {
   const video = source.value!;
+  const workspaceDirectory = readDirectory();
   const options = { ...settings };
   const model = selectedModel.value;
-  if (options.aiEnabled && (!model || (!options.frames && !options.clips))) {
+  if (!scopedAnalysis.value && options.aiEnabled && (!model || (!options.frames && !options.clips))) {
     errorMessage.value = !model ? "请选择支持图片理解的模型" : "AI 辅助拉片需要开启分镜或动态";
     return;
   }
-  if (options.aiEnabled && options.focus.trim().length > 2000) {
+  if (!scopedAnalysis.value && options.aiEnabled && options.focus.trim().length > 2000) {
     errorMessage.value = "分析重点最多填写 2000 字";
     return;
   }
@@ -473,24 +525,34 @@ async function processVideo() {
   const previousResult = lastResult.value;
   const previousSource = resultSource.value;
   try {
-    resultNodes.verify(options);
+    const scoped = await requiresScopedAnalysis(current.signal);
+    scopedAnalysis.value = scoped;
+    resultNodes.verify(scoped ? { frames: true, clips: false, audio: false } : options);
     workspace = files.getWorkspaceFiles();
-    const ffmpeg = await loadFfmpeg(current.signal);
-    current.signal.throwIfAborted();
-    for (const parent of ["assets", `assets/${id}`]) {
-      await workspace.mkdir(parent).catch(error => { if (error?.response?.data?.data?.code !== "EEXIST") throw error; });
+    let ffmpeg: BrowserFfmpegFactory | undefined;
+    let result: AnalysisResult;
+    if (scoped) {
+      progressLabel.value = "检测镜头切点和代表帧";
+      if (!workspaceDirectory) throw new Error("请先打开原片工作区");
+      result = await callRemakeApi("analyze", { directory: workspaceDirectory, videoPath: video.url }, remakeAnalysisSchema, current.signal);
+    } else {
+      ffmpeg = await loadFfmpeg(current.signal);
+      current.signal.throwIfAborted();
+      for (const parent of ["assets", `assets/${id}`]) {
+        await workspace.mkdir(parent).catch(error => { if (error?.response?.data?.data?.code !== "EEXIST") throw error; });
+      }
+      current.signal.throwIfAborted();
+      await workspace.mkdir(directory);
+      directoryCreated = true;
+      result = await analyzeVideo({
+        ffmpeg, workspace, source: video.url, directory, ...options, signal: current.signal,
+        onProgress: (value, label) => {
+          if (current.signal.aborted) return;
+          progress.value = Math.max(0, Math.min(99, Math.round(value)));
+          progressLabel.value = label;
+        },
+      });
     }
-    current.signal.throwIfAborted();
-    await workspace.mkdir(directory);
-    directoryCreated = true;
-    const result = await analyzeVideo({
-      ffmpeg, workspace, source: video.url, directory, ...options, signal: current.signal,
-      onProgress: (value, label) => {
-        if (current.signal.aborted) return;
-        progress.value = Math.max(0, Math.min(99, Math.round(value)));
-        progressLabel.value = label;
-      },
-    });
     current.signal.throwIfAborted();
     await batchHistory(async () => {
       current.signal.throwIfAborted();
@@ -511,7 +573,7 @@ async function processVideo() {
     metadata.duration = result.duration;
     metadata.width = result.width;
     metadata.height = result.height;
-    if (options.aiEnabled && model) {
+    if (options.aiEnabled && model && ffmpeg) {
       progress.value = 0;
       progressLabel.value = "本地分镜已保存，开始 AI 分析";
       await enhanceResult(result, workspace, ffmpeg, current.signal, model, options.focus);

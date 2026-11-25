@@ -19,10 +19,10 @@ const runtimes = new WeakMap<Application, Runtime>();
 const userRoutes = new Set(["register", "login", "session", "logout", "host"].map(name => `/api/multitenant/user/${name}`));
 const controlRoutes = new Set(["status", "setup", "login", "logout", "state", "enabled", "registration", "hostsession"].map(name => `/api/multitenant/${name}`));
 const userReadRoutes = new Set(["/api/ai/models", "/api/ai/media/models", "/api/multitenant/user/balance", "/api/nodes/get", "/api/nodes/files", "/api/ext/list", "/api/ext/read", "/api/tools/get"]);
-const modelWriteRoutes = new Set(["/api/ai/generate", "/api/ai/media/price", "/api/ai/media/generate", "/api/ai/media/tasks/status", "/api/ai/media/tasks/cancel"]);
+const modelWriteRoutes = new Set(["/api/ai/ipcard/render", "/api/ai/generate", "/api/ai/media/price", "/api/ai/media/generate", "/api/ai/media/tasks/status", "/api/ai/media/tasks/cancel"]);
 const qianchuanRoutes = new Set(["/api/ai/media/qianchuan/start", "/api/ai/media/qianchuan/status", "/api/ai/media/qianchuan/retry", "/api/ai/media/qianchuan/organizations"]);
-const backgroundBetaRoutes = new Set(["/api/ai/media/background/frame", "/api/ai/media/background/plan", "/api/ai/media/background/prepare",
-  "/api/ai/media/background/confirm", "/api/ai/media/background/status", "/api/ai/media/background/cancel", "/api/ai/media/background/finish",
+const backgroundBetaRoutes = new Set(["/api/ai/media/background/analyze", "/api/ai/media/background/frame", "/api/ai/media/background/plan", "/api/ai/media/background/prepare",
+  "/api/ai/media/background/confirm", "/api/ai/media/background/retry", "/api/ai/media/background/status", "/api/ai/media/background/cancel", "/api/ai/media/background/finish",
   "/api/ai/media/background/cleanup", "/api/ai/media/background/cleanupframe", "/api/ai/media/background/reservations"]);
 const tenantAgentRoutes = new Set([
   "POST /api/agent", "POST /api/agent/create", "GET /api/agent/get", "GET /api/agent/list", "GET /api/agent/skills",

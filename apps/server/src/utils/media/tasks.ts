@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { dirname, join, relative } from "node:path";
 import { lstat, mkdir, readFile, realpath, writeAtomic } from "@toonflow/file";
 import type { ProviderTaskData } from "@toonflow/providers";
+import { minimaxH3ProviderId } from "@toonflow/providers/media/minimaxH3";
 import type { GeneratedMedia, MediaGenerationRequest } from "@toonflow/tools-scaffold/runtime";
 import type { AuthIdentity } from "@toonflow/multi-tenant-auth";
 import type { ModelActor, ModelOutcome } from "@toonflow/multi-tenant-gateway/types";
@@ -274,6 +275,7 @@ async function load(cwd: string, taskId: string, key: string, owner?: AuthIdenti
 async function resumable(task: MediaTask) {
   const { checkpoint, state } = task.record;
   if (state !== "running" && state !== "interrupted") return false;
+  if (checkpoint.providerData?.kind === minimaxH3ProviderId) return checkpoint.providerData.state === "accepted";
   if (checkpoint.providerData || checkpoint.assets?.length) return true;
   if (!checkpoint.assetCount || checkpoint.files?.length !== checkpoint.assetCount) return false;
   for (const file of checkpoint.files) {
@@ -282,6 +284,10 @@ async function resumable(task: MediaTask) {
     if (!info?.isFile() || info.isSymbolicLink()) return false;
   }
   return true;
+}
+
+function hasUnknownMinimaxH3Submission(checkpoint: MediaGenerationCheckpoint) {
+  return checkpoint.providerData?.kind === minimaxH3ProviderId && checkpoint.providerData.state === "submitting";
 }
 
 function publicData(task: MediaTask) {
@@ -322,6 +328,12 @@ async function settleCharge(task: MediaTask, files: GeneratedMedia[], signal = t
   if (record.chargeStatus === "settled" || record.chargeStatus === "released") { task.chargeFinalized = true; return; }
   if (!record.modelRouteCipher || !record.request || !record.mediaType) invalid("媒体任务扣费记录无效", 409);
   if (!files.length) invalid("媒体任务扣费记录无效", 409);
+  const providerData = record.checkpoint.providerData;
+  const officialH3 = providerData?.kind === minimaxH3ProviderId;
+  const officialSeconds = providerData?.outputSeconds;
+  if (officialH3 && (typeof officialSeconds !== "number" || !Number.isFinite(officialSeconds) || officialSeconds <= 0 || officialSeconds > 15)) {
+    invalid("MiniMax H3 任务缺少可核验的官方用量", 503);
+  }
   let seconds = record.wanInput?.seconds ?? 0;
   let durationKnown = record.mediaType === "video";
   const paths = await Promise.all(files.map(file => resolveWorkspacePath(record.cwd, file.path)));
@@ -335,12 +347,16 @@ async function settleCharge(task: MediaTask, files: GeneratedMedia[], signal = t
       if (!original || createHash("sha256").update(bytes).digest("hex") !== original.hash) invalid("任务结果文件已被修改，不能覆盖", 409);
       if (record.mediaType === "video") {
         const metadata = await readPriceReference(record.cwd, file, "video", signal);
-        if (!metadata.duration || !Number.isFinite(metadata.duration) || metadata.duration <= 0) durationKnown = false;
+        if (!metadata.duration || !Number.isFinite(metadata.duration) || metadata.duration <= 0) {
+          if (officialH3) invalid("MiniMax H3 成片无法读取有效时长", 503);
+          durationKnown = false;
+        }
         else seconds += metadata.duration;
       }
     }
   } finally { release(); }
   signal?.throwIfAborted();
+  if (officialH3 && typeof officialSeconds === "number") seconds = officialSeconds;
   // ACT: 媒体仅证明交付与实际用量，缺失时长是否阻止结算由统一网关按价格快照决定。
   const charge = await finalizeCharge(task, { kind: "usage", usage: { requests: 1, ...(durationKnown ? { seconds } : {}) } });
   if (!charge || charge.status === "held") invalid("媒体任务扣费记录无效", 503);
@@ -350,6 +366,10 @@ async function releaseCharge(task: MediaTask, notSubmitted = false) {
   const { record } = task;
   if (!record.ownerUserId || task.chargeFinalized || !record.chargeId && !record.modelRouteCipher) return;
   if (record.chargeStatus === "settled" || record.chargeStatus === "released") { task.chargeFinalized = true; return; }
+  if (record.state === "cancelled" && hasUnknownMinimaxH3Submission(record.checkpoint)) {
+    await finalizeCharge(task, { kind: "unknown" });
+    return;
+  }
   if (!record.chargeId) {
     let existing;
     try { existing = await modelGateway.getCharge(record.taskId, record.ownerUserId); }
@@ -432,7 +452,10 @@ async function execute(task: MediaTask, resume: boolean) {
       save: patch => locked(task.key, async () => {
         if (record.state !== "running") throw new Error("生成已停止");
         if (task.executionLease && !await renewMediaLease(task.executionLease)) throw new Error("媒体任务租约已失效");
-        const accepted = record.mediaType === "video" && !record.checkpoint.providerData && patch.providerData?.kind === "aliyunWanVideo";
+        const accepted = record.mediaType === "video" && (
+          !record.checkpoint.providerData && patch.providerData?.kind === "aliyunWanVideo"
+          || record.checkpoint.providerData?.state === "submitting" && patch.providerData?.kind === minimaxH3ProviderId && patch.providerData.state === "accepted"
+        );
         Object.assign(record.checkpoint, patch);
         await persist(task);
         if (accepted) logVideoTiming(record.taskId, "provider_accepted", record.createdAt);
@@ -795,8 +818,15 @@ export async function cancel(cwd: string, taskIds: string[], owner?: AuthIdentit
         await reconcileCharge(task);
         return;
       }
+      const abandonUnknown = task.record.state === "interrupted" && !task.active
+        && hasUnknownMinimaxH3Submission(task.record.checkpoint);
+      if (task.record.checkpoint.providerData?.kind === minimaxH3ProviderId && !abandonUnknown) {
+        invalid("MiniMax H3 任务已进入付费提交，需查询原供应商任务后确认结果", 409);
+      }
       task.record.state = "cancelled";
-      task.record.result = error<GeneratedMedia[]>("生成已取消", null, 499);
+      task.record.result = error<GeneratedMedia[]>(abandonUnknown ? "已放弃画布任务，供应商提交状态仍待核查" : "生成已取消", null, 499);
+      if (abandonUnknown && task.record.chargeId && !task.chargeFinalized
+        && task.record.chargeStatus !== "released" && task.record.chargeStatus !== "settled") task.record.chargeStatus = "pendingReview";
       // 取消先落盘；包括尚未收到提交的 ID，防止乱序请求稍后创建付费任务。
       await persist(task, exclusive);
       await releaseCharge(task);

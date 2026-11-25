@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { getImageReferenceLimit } from "@toonflow/providers";
+import { minimaxH3ModelId, minimaxH3PlatformCostPerSecond, minimaxH3PlatformResolution, minimaxH3ProviderId } from "@toonflow/providers/media/minimaxH3";
 import type { ModelAdapter, ModelExecution, ModelType } from "@toonflow/multi-tenant-gateway/types";
 import { modelRouteSchema } from "@toonflow/multi-tenant-models/config";
 import type { ModelPrice, ModelRoute } from "@toonflow/multi-tenant-models/config";
@@ -37,11 +38,26 @@ const legacyMediaSchema = mediaUpstreamSchema.extend({
 });
 const requestSchema = z.object({
   other: z.unknown().optional(), duration: z.number().finite().positive().optional(),
+  resolution: z.string().optional(),
   images: z.array(z.unknown()).optional(),
 });
 const secretField = /^keys?$|^host(?:name)?$|^port$|^protocol$|^proxy$|^model(?:Id)?$|^provider(?:Id)?$|api.?key|token|secret|password|auth|bearer|headers|cookie|credential|private.?key|access.?key|signature|url|endpoint|source|config/i;
 
 function fail(message: string, status = 400): never { throw Object.assign(new Error(message), { status }); }
+
+function isMinimaxH3PlatformPilot(route: ModelRoute) {
+  return route.type === "video" && route.target === "backend" && route.providerId === minimaxH3ProviderId
+    && route.upstreamModelId === minimaxH3ModelId;
+}
+
+function validateMediaRoute(route: ModelRoute) {
+  if (!isMinimaxH3PlatformPilot(route)) return;
+  const { costPrice, salePrice } = route;
+  if (costPrice?.mode !== "perSecond" || costPrice.currency !== "CNY" || Number(costPrice.amount) !== minimaxH3PlatformCostPerSecond) {
+    fail("MiniMax H3 平台试点的 768P 成本须为每秒 0.50 元");
+  }
+  if (salePrice.mode !== "perSecond" || salePrice.currency !== "CNY") fail("MiniMax H3 平台试点的用户售价须以人民币按秒设置");
+}
 
 export function formatModelPrice(price: ModelPrice) {
   if (price.mode === "perMillionTokens") return `${translateMessage("输入")} ${price.input} / ${translateMessage("输出")} ${price.output} ${price.currency}/1M Token`;
@@ -195,6 +211,12 @@ function validateMedia({ route, upstream }: ModelExecution<MediaUpstream>, reque
   const parsed = requestSchema.safeParse(request);
   if (!parsed.success) fail("模型参数不在平台允许的范围内");
   const { images, other } = parsed.data;
+  if (isMinimaxH3PlatformPilot(route)) {
+    const { resolution, duration } = parsed.data;
+    if (resolution?.toUpperCase() !== minimaxH3PlatformResolution) fail("MiniMax H3 平台试点只支持 768P");
+    if (!upstream.model.durationResolutionMap?.some(row => row.resolution.includes(minimaxH3PlatformResolution)
+      && duration !== undefined && row.duration.includes(duration))) fail("MiniMax H3 平台试点不支持所选时长");
+  }
   if (route.type === "image" && images?.length) {
     const limit = getImageReferenceLimit(route.providerId, upstream.model);
     if (limit !== undefined && images.length > limit) fail(`${route.label}最多支持 ${limit} 张参考图，当前 ${images.length} 张，请减少 ${images.length - limit} 张。`);
@@ -242,11 +264,16 @@ function mediaCapabilities({ route, upstream: { model, secretValues } }: ModelEx
     mode: z.array(z.union([mode, z.array(referenceMode).min(1).max(3)])).max(32).optional(),
     durationResolutionMap: z.array(z.object({ duration: z.array(z.number().positive()).max(100), resolution: z.array(safeString).max(100) })).max(100).optional(),
     audio: z.union([z.boolean(), z.literal("optional")]).optional(),
+    adaptiveFrameRatio: z.boolean().optional(),
     imageSizes: z.array(safeString).max(100).optional(), imageRatios: z.array(z.string().regex(/^[1-9]\d{0,3}:[1-9]\d{0,3}$/)).max(100).optional(),
     maxReferenceImages: mediaModelsSchema.element.shape.maxReferenceImages,
     voices: z.array(z.object({ title: safeString, voice: safeString })).max(1000).optional(),
   }).safeParse({
     ...model,
+    durationResolutionMap: isMinimaxH3PlatformPilot(route)
+      ? model.durationResolutionMap?.filter(row => row.resolution.includes(minimaxH3PlatformResolution))
+        .map(row => ({ duration: row.duration, resolution: [minimaxH3PlatformResolution] }))
+      : model.durationResolutionMap,
     maxReferenceImages: route.type === "image" ? getImageReferenceLimit(route.providerId, model) : undefined,
   });
   if (!safe.success || containsSecret(safe.data, secretValues)) fail("平台模型能力配置无效", 503);
@@ -307,6 +334,7 @@ const mediaAdapter: ModelAdapter<MediaUpstream, MediaCapabilities, Cloud> = {
     return { route: parsed.data.route, revision: parsed.data.revision, upstream: restoreMedia(parsed.data, parsed.data.route) };
   },
   publicModel: mediaCapabilities,
+  validateRoute: validateMediaRoute,
   validate: validateMedia,
   maximumUsage(execution, request) {
     validateMedia(execution, request);

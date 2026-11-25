@@ -1,5 +1,6 @@
 import { useNode, useVueFlow, type Node } from "@vue-flow/core";
 import type { AnalysisResult, AnalysisScene } from "./videoAnalysis";
+import { remakeImageType } from "./remakeWorkflow";
 
 type ResultDimensions = { frames: boolean; clips: boolean; audio: boolean };
 
@@ -88,7 +89,7 @@ export function useResultNodes() {
             data: {
               label: item.label,
               frameAnalysisResult: { ownerId: node.id, manifest: result.manifest, sceneIndex: item.sceneIndex, kind: dimension.key },
-              outputs: { [dimension.output]: { dataType: dimension.dataType, value: { url: item.path, mimeType: dimension.mimeType } } },
+              outputs: { [dimension.output]: { dataType: dimension.dataType, value: { url: item.path, mimeType: dimension.key === "frames" ? remakeImageType(item.path) : dimension.mimeType } } },
             },
           });
         });

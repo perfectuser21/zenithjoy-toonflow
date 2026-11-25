@@ -44,9 +44,20 @@
                     <el-radio-button value="video">视频片段</el-radio-button>
                   </el-radio-group>
                 </div>
+                <div v-if="editable" class="sceneEditActions">
+                  <el-button v-if="selectedScene.index > 1" size="small" text :disabled="editing" @click="emit('edit', { kind: 'merge', shot: selectedScene.index })">与上一镜头合并</el-button>
+                  <label>背景组
+                    <select :value="selectedGroup ?? ''" :disabled="editing" aria-label="修改镜头背景组" @change="changeGroup">
+                      <option value="">待确认</option>
+                      <option v-for="group in groups" :key="group" :value="group">背景 {{ group }}</option>
+                      <option v-if="!groups.includes(selectedScene.index)" :value="selectedScene.index">独立成组</option>
+                    </select>
+                  </label>
+                </div>
+                <p v-if="editError" role="alert">{{ editError }}</p>
                 <div v-if="previewFile" class="previewStage">
                   <p v-if="previewError" class="previewMessage" role="alert">{{ previewError }}</p>
-                  <img v-else-if="previewUrl && previewFile.mimeType === 'image/jpeg'" :key="previewUrl" :src="previewUrl" :alt="`镜头 S${String(selectedScene.index).padStart(2, '0')} 关键帧`" @error="previewError = '关键帧无法预览，文件可能已被移动或删除'" />
+                  <img v-else-if="previewUrl && previewFile.mimeType.startsWith('image/')" :key="previewUrl" :src="previewUrl" :alt="`镜头 S${String(selectedScene.index).padStart(2, '0')} 关键帧`" @error="previewError = '关键帧无法预览，文件可能已被移动或删除'" />
                   <video v-else-if="previewUrl" ref="previewVideo" :key="previewUrl" :src="previewUrl" controls playsinline preload="metadata" :aria-label="`镜头 S${String(selectedScene.index).padStart(2, '0')} 视频片段`" @error="previewError = '视频片段无法预览，文件可能已被移动或删除'" />
                   <p v-else class="previewMessage" role="status">正在读取画面…</p>
                 </div>
@@ -106,8 +117,11 @@ import { useNodeFiles } from "@toonflow/nodes-scaffold/workspaceFiles";
 import type { NodeMediaValue } from "@toonflow/nodes-scaffold/values";
 import type { AnalysisResult } from "./videoAnalysis";
 import { formatSceneTime } from "./resultNodes";
+import { remakeImageType } from "./remakeWorkflow";
+import type { AnalysisEdit } from "./analysisEdits";
 
-const props = defineProps<{ result: AnalysisResult }>();
+const props = defineProps<{ result: AnalysisResult; editable?: boolean; editing?: boolean; editError?: string }>();
+const emit = defineEmits<{ edit: [event: AnalysisEdit] }>();
 const visible = defineModel<boolean>({ required: true });
 const files = useNodeFiles();
 const activeTab = ref("scenes");
@@ -116,11 +130,21 @@ const previewKind = ref("image");
 const previewVideo = ref<HTMLVideoElement>();
 const detailScroll = ref<InstanceType<typeof ElScrollbar>>();
 const selectedScene = computed(() => props.result.scenes.find(scene => scene.index === selectedIndex.value) ?? props.result.scenes[0]);
+const selectedGroup = computed(() => props.result.backgroundReview
+  ? props.result.backgroundReview.assignments.find(row => row.shot === selectedScene.value?.index)?.referenceShot
+  : selectedScene.value?.index);
+const groups = computed(() => props.result.backgroundReview
+  ? [...new Set(props.result.backgroundReview.assignments.flatMap(row => row.referenceShot === null ? [] : [row.referenceShot]))]
+  : props.result.scenes.map(scene => scene.index));
+function changeGroup(event: Event) {
+  if (!(event.target instanceof HTMLSelectElement) || !selectedScene.value) return;
+  emit("edit", { kind: "group", shot: selectedScene.value.index, group: event.target.value ? Number(event.target.value) : null });
+}
 const previewFile = computed<NodeMediaValue | undefined>(() => {
   const scene = selectedScene.value;
   if (!visible.value || activeTab.value !== "scenes" || !scene) return;
   if (scene.video && (previewKind.value === "video" || !scene.image)) return { url: scene.video, mimeType: "video/mp4" };
-  if (scene.image) return { url: scene.image, mimeType: "image/jpeg" };
+  if (scene.image) return { url: scene.image, mimeType: remakeImageType(scene.image) };
 });
 const previewError = ref("");
 const manifestError = ref("");

@@ -418,12 +418,17 @@ async function deleteSelection(selection = selectedNodes.value) {
       if (flow.getNodes.value.some(item => item.parentNode === node.id && !nodeIds.has(item.id))) throw new Error("分组中存在不可删除的节点");
       if (flow.getConnectedEdges(node.id).some((edge) => edge.deletable === false)) throw new Error("节点存在不可删除的连接");
     }
+    let firstFailure: { error: unknown } | undefined;
     for (const node of nodes) {
       if (node.deletable === false || flow.findNode(node.id) !== node) continue;
-      await useNodeEvent(node.id, flow).emit("delete");
-      if (flow.getNodes.value.some(item => item.parentNode === node.id)) throw new Error("分组内容已变化，请重新删除");
-      if (flow.findNode(node.id) === node) flow.removeNodes(node.id, true);
+      try {
+        if (flow.getNodes.value.some(item => item.parentNode === node.id)) throw new Error("分组内有尚未删除的节点");
+        await useNodeEvent(node.id, flow).emit("delete");
+        if (flow.getNodes.value.some(item => item.parentNode === node.id)) throw new Error("分组内容已变化，请重新删除");
+        if (flow.findNode(node.id) === node) flow.removeNodes(node.id, true);
+      } catch (error) { firstFailure ??= { error }; }
     }
+    if (firstFailure) throw firstFailure.error;
     menu.value?.handleClose();
   } catch (error) {
     const message = (error as { response?: { data?: { message?: string } } })?.response?.data?.message;
