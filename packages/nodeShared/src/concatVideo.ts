@@ -4,13 +4,16 @@ import {
   canEncodeAudio, canEncodeVideo, Input, MP4, Mp4OutputFormat, NullTarget, Output, QTFF, QUALITY_HIGH, VideoSample, VideoSampleSource, WavOutputFormat,
   type EncodedPacket, type InputTrack,
 } from "mediabunny";
-import type { WorkspaceFiles } from "@toonflow/nodes-scaffold/runtime";
 
 const workspaceFileLimit = 100 * 1024 * 1024;
 export const maxConcatClips = 6;
 
 export async function prepareConcatClip(
-  { blob, workspace, path }: { blob: Blob; workspace: Pick<WorkspaceFiles, "normalizeVideo">; path: string },
+  { blob, workspace, path }: {
+    blob: Blob;
+    workspace: { normalizeVideo?(path: string, signal?: AbortSignal): Promise<Blob> };
+    path: string;
+  },
   signal: AbortSignal,
 ) {
   signal.throwIfAborted();
