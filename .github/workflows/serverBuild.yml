@@ -77,17 +77,21 @@ jobs:
           PY
           fi
           python3 -B - <<'PY'
+          from contextlib import ExitStack
           import hashlib
           import io
           import json
           from pathlib import Path
+          import subprocess
           import tempfile
           import unittest
+          import wave
           from unittest.mock import patch
 
           import sys
           sys.path.insert(0, 'deploy/delivery')
           import releaseHost
+          import verifyGeneration
 
 
           class ProductionCutoverTest(unittest.TestCase):
@@ -175,6 +179,128 @@ jobs:
                           self.assertTrue(json.loads(output.getvalue())['productionCandidateGate'])
                   self.assertEqual((state / '42-1.json').exists(), candidate_passes)
                   return public, verification
+
+          class IsolatedGenerationRetryTest(unittest.TestCase):
+              def setUp(self):
+                  contexts = ExitStack()
+                  self.addCleanup(contexts.close)
+                  self.state = Path(contexts.enter_context(tempfile.TemporaryDirectory()))
+                  (self.state / 'identity.json').write_text('{"environment":"production"}')
+                  self.journal = self.state / 'generation-42-1.json'
+                  self.request = {'environment': 'production', 'sourceSha': '1' * 40,
+                                  'image': 'ghcr.io/perfectuser21/zenithjoy-toonflow@sha256:' + 'a' * 64,
+                                  'runId': '42', 'runAttempt': '1'}
+                  self.boot = '2' * 8 + '-2222-4222-8222-' + '2' * 12
+                  self.owner = {'userId': 'owner', 'directory': '/fixture/owner'}
+                  self.config = {'accounts': [self.owner, {'userId': 'other'}], 'localOrigin': 'http://127.0.0.1:38000',
+                                 'publicOrigin': releaseHost.publicOrigins['production']}
+                  self.payload = {'directory': '/fixture/owner', 'mediaType': 'audio', 'providerId': 'multiTenant',
+                                  'modelId': 'fixture-tts', 'prompt': 'A sample prompt'}
+                  self.expected = {'fileCount': 1, 'timeoutSeconds': 1, 'pollSeconds': 1,
+                                   'minDuration': 0.9, 'maxDuration': 1.1}
+                  self.calls = []
+                  self.audio = self.sample(1)
+                  self.taskId = None
+
+                  def readJson(path, private=False):
+                      if path == self.journal:
+                          self.assertTrue(private)
+                          self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                      return json.loads(path.read_text())
+
+                  contexts.enter_context(patch.multiple(
+                      verifyGeneration, rootJson=readJson, newPublicClient=lambda *_a, **_k: self.client(),
+                      localClient=lambda *_: object(), verifyContainer=lambda *_a, **_k: None,
+                      verifyPublicCandidate=lambda *_: None,
+                      run=lambda args, timeout: subprocess.check_output(args, timeout=timeout),
+                  ))
+
+              def sample(self, amplitude):
+                  out = io.BytesIO()
+                  with wave.open(out, 'wb') as wav:
+                      wav.setparams((1, 2, 8000, 0, 'NONE', 'not compressed'))
+                      wav.writeframes(amplitude.to_bytes(2, 'little') * 8000)
+                  return out.getvalue()
+
+              def client(self):
+                  test = self
+
+                  class Client:
+                      def login(self, account):
+                          self.user = account['userId']
+
+                      def request(self, method, path, query=None, body=None, expected=200, **_):
+                          test.calls.append((self.user, method, path, expected))
+                          if path == '/api/ai/media/generate':
+                              test.assertIsNone(test.taskId, 'duplicate generation')
+                              test.taskId = body['taskId']
+                              return {'taskId': test.taskId}
+                          test.assertEqual(expected, 403 if self.user == 'other' else 200)
+                          if path == '/api/ai/media/tasks/status':
+                              test.assertEqual(body, {'directory': '/fixture/owner', 'taskIds': [test.taskId],
+                                                      'resume': False, 'readOnly': True})
+                              return [{'taskId': test.taskId, 'state': 'succeeded', 'result': {'code': 200, 'data': [
+                                  {'path': 'assets/audio.wav', 'mediaType': 'audio', 'mimeType': 'audio/wav'}]}}]
+                          test.assertEqual(path, '/api/workspaces/files/read')
+                          test.assertEqual(query, {'directory': '/fixture/owner', 'path': 'assets/audio.wav'})
+                          return test.audio
+
+                  return Client()
+
+              def verify(self, isolated=True):
+                  return verifyGeneration.verifyGenerationCase(
+                      self.config, {'stateDirectory': str(self.state)}, self.request, self.boot,
+                      (dict(self.payload), self.expected, self.owner), False, isolated=isolated)
+
+              def test_retry_reads_completed_task_without_another_generation(self):
+                  receipt = self.verify()
+                  contents = self.journal.read_bytes()
+                  self.calls.clear()
+                  self.assertEqual(self.verify(), receipt)
+                  self.assertEqual(self.journal.read_bytes(), contents)
+                  self.assertCountEqual(self.calls, [
+                      ('owner', 'POST', '/api/ai/media/tasks/status', 200),
+                      ('other', 'POST', '/api/ai/media/tasks/status', 403),
+                      ('owner', 'GET', '/api/workspaces/files/read', 200),
+                      ('owner', 'GET', '/api/workspaces/files/read', 200),
+                      ('other', 'GET', '/api/workspaces/files/read', 403),
+                  ])
+
+              def test_unknown_or_mismatched_record_cannot_trigger_generation(self):
+                  self.verify()
+                  completed = json.loads(self.journal.read_text())
+                  for fields in ({'phase': 'prepared'}, {'phase': 'submitted'}, {'phase': 'generated'},
+                                 {'phase': 'unknown'}, {'bootId': 'another-boot'},
+                                 {'request': {**self.request, 'sourceSha': '3' * 40}},
+                                 {'requestSha256': '0' * 64}, {'taskId': 'unexpected'},
+                                 {'receipt': {**completed['receipt'], 'generationVerified': False}}):
+                      with self.subTest(fields=fields):
+                          contents = json.dumps({**completed, **fields})
+                          self.journal.write_text(contents)
+                          self.calls.clear()
+                          with self.assertRaises((RuntimeError, FileExistsError)):
+                              self.verify()
+                          self.assertEqual(self.calls, [])
+                          self.assertEqual(self.journal.read_text(), contents)
+
+              def test_retry_rejects_artifact_with_changed_bytes(self):
+                  self.verify()
+                  contents = self.journal.read_bytes()
+                  self.audio = self.sample(2)
+                  self.calls.clear()
+                  with self.assertRaisesRegex(RuntimeError, '生成产物.*原回执'):
+                      self.verify()
+                  self.assertIn(('owner', 'GET', '/api/workspaces/files/read', 200), self.calls)
+                  self.assertNotIn(('owner', 'POST', '/api/ai/media/generate', 200), self.calls)
+                  self.assertEqual(self.journal.read_bytes(), contents)
+
+              def test_live_verifier_still_rejects_same_release(self):
+                  self.verify(isolated=False)
+                  self.calls.clear()
+                  with self.assertRaises(FileExistsError):
+                      self.verify(isolated=False)
+                  self.assertEqual(self.calls, [])
+
 
           unittest.main()
           PY

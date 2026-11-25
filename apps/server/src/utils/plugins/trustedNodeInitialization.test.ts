@@ -44,7 +44,7 @@ test("existing workspaces receive trusted nodes from each release", async () => 
     await writeFile(join(source, "frameAnalysisNode.umd.js"), "candidate:frameAnalysis");
     await writeFile(join(target, "frameAnalysisNode.umd.js"), "old:frameAnalysis");
     await writeFile(join(target, "videoNode.umd.js"), "old:video");
-    const updatedNodes = ["videoGenerationNode", "mashupNode", "videoConcatNode"];
+    const updatedNodes = ["videoGenerationNode", "mashupNode", "videoConcatNode", "ipCardNode"];
     for (const node of updatedNodes) await writeFile(join(target, node + ".umd.js"), "old");
     await initializeHostedSharedCanvasNodes(target, source);
     for (const node of updatedNodes) expect(await readFile(join(target, node + ".umd.js"), "utf8")).toBe(`candidate:${node}.umd.js`);
