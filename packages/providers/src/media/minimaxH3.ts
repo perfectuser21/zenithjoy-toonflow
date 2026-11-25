@@ -5,12 +5,14 @@ const rules = [
 ] as const;
 
 export const minimaxH3ProviderId = "minimaxH3";
-const modelId = "MiniMax-H3";
+export const minimaxH3ModelId = "MiniMax-H3";
 const apiOrigin = "https://api.minimax.cn";
 const modelSpecifications = {
   "768P": { minSeconds: 4, maxSeconds: 15, yuanPerSecond: 0.50 },
   "2K": { minSeconds: 4, maxSeconds: 15, yuanPerSecond: 0.80 },
 } as const;
+export const minimaxH3PlatformResolution = "768P";
+export const minimaxH3PlatformCostPerSecond = modelSpecifications[minimaxH3PlatformResolution].yuanPerSecond;
 const textRatios = ["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"] as const;
 const frameModes = ["endFrameOptional", "startFrameOptional", "startEndRequired"] as const;
 const maxImageSize = 30_000_000;
@@ -36,7 +38,7 @@ function rejected(message: string, status = 400): never {
 }
 
 function videoSpecification(request: VideoSpecification, frames: { first: boolean; last: boolean }) {
-  if (request.model !== modelId) rejected("MiniMax 官方供应商仅支持 MiniMax-H3");
+  if (request.model !== minimaxH3ModelId) rejected("MiniMax 官方供应商仅支持 MiniMax-H3");
   const resolution = request.resolution?.toUpperCase();
   if (resolution !== "768P" && resolution !== "2K") rejected("MiniMax H3 的分辨率须为 768P 或 2K");
   const spec = modelSpecifications[resolution];
@@ -108,7 +110,7 @@ function object(value: unknown): Record<string, unknown> {
 
 function parseQuery(value: unknown, id: string, context: Context): QueryResult {
   const task = object(object(value).task);
-  if (task.id !== id || task.model !== modelId) throw new Error("MiniMax H3 返回的任务身份不匹配");
+  if (task.id !== id || task.model !== minimaxH3ModelId) throw new Error("MiniMax H3 返回的任务身份不匹配");
   switch (task.status) {
     case "queued":
     case "running":
@@ -185,7 +187,7 @@ export default {
     const apiKey = authorizedKey(this);
     const { ratio, resolution, duration, text } = videoSpecification(request, { first: !!request.firstFrame, last: !!request.lastFrame });
     const body = JSON.stringify({
-      model: modelId, ...videoContent(request, ratio, text), resolution, duration, response_format: "task",
+      model: minimaxH3ModelId, ...videoContent(request, ratio, text), resolution, duration, response_format: "task",
       ...(request.generateAudio !== undefined ? { generate_audio: request.generateAudio } : {}),
     });
     if (Buffer.byteLength(body) > maxRequestSize) rejected("MiniMax H3 的请求体不能超过 64 MB，请缩小首尾帧图片");
