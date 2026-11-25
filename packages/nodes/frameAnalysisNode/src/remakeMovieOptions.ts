@@ -9,7 +9,7 @@ export function remakeMovieOptions(view: OptionsInput) {
   const reference = view.productSwap?.reference;
   if (reference) return view.shots.map(() => ({
     image: reference,
-    prompt: "只替换原视频中出现的商品，替换成参考图里的新商品。保留原镜头时长和构图、真实人物、手部动作、背景和字幕。新商品外形、配色和包装细节以图片参考为准，出现在原商品的位置，不新增商品出现的镜头。",
+    prompt: "只替换原视频中出现的商品，替换成参考图里的新商品。保留原镜头时长、构图、背景、字幕，以及原有的人物、手部和动作。不得新增人物、手或动作，不新增镜头。严格保留参考图中的商品轮廓、颜色、包装和标签图案，商品位置跟随原视频。",
   }));
   return view.shots.map(shot => {
     const group = view.groups.find(item => item.id === shot.group);

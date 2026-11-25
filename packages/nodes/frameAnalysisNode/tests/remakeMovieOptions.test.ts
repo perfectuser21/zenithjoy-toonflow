@@ -13,6 +13,7 @@ test("换品的每个镜头使用新商品参考，并保留镜头和人物", ()
   expect(result).toHaveLength(2);
   expect(result.every(shot => shot.image === replacement && /替换.*商品/.test(shot.prompt))).toBe(true);
   expect(result.every(shot => /镜头.*人物/.test(shot.prompt) && !shot.prompt.includes("仅使用背景参考换景"))).toBe(true);
+  expect(result.every(shot => shot.prompt.includes("不得新增人物、手或动作") && shot.prompt.includes("标签图案"))).toBe(true);
 });
 
 test("既有视频翻拍仍使用背景样张并保留真实商品", () => {
