@@ -1,54 +1,24 @@
 #!/usr/bin/env python3
-import argparse
-import datetime
 import fcntl
 import json
 import os
 from pathlib import Path
 import re
-import subprocess
 import sys
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 
 product = 'ZenithJoy Canvas'
-releaseRuns = 'https://github.com/perfectuser21/zenithjoy-toonflow/actions/runs/'
+repository = 'perfectuser21/zenithjoy-toonflow'
+releaseRuns = f'https://github.com/{repository}/actions/runs/'
+sourceFiles = f'https://raw.githubusercontent.com/{repository}/'
 environments = {
-    'staging': ('https://aivideo-staging.zenjoymedia.media', 'hk-vps', 'python3 -B -', '香港测试站', '香港发布记录'),
-    'production': ('https://aivideo.zenithjoy.tech', 'aliyun-cn-public', 'sudo -n python3 -B -', '杭州正式站', '杭州发布记录'),
+    'staging': ('https://aivideo-staging.zenjoymedia.media', '香港测试站', '香港发布记录', '验收通过'),
+    'production': ('https://aivideo.zenithjoy.tech', '杭州正式站', '杭州发布记录', '已上线'),
 }
-
-hostRead = '''
-import json, pathlib, re, subprocess
-config=json.loads(pathlib.Path('/etc/aivideo/release.json').read_text())
-state=pathlib.Path(config['stateDirectory'])
-live=json.loads(subprocess.check_output(['docker','inspect',config['container']]))[0]
-assert live['State']['Running']
-rows=[]
-for file in state.glob('[0-9]*-[0-9]*.json'):
-    if not re.fullmatch(r'[0-9]+-[0-9]+',file.stem): continue
-    row=json.loads(file.read_text())
-    request=row['request']
-    if request['image'] == live['Config']['Image'] and request['environment'] == config['environment']:
-        rows.append((row.get('startedAt',0),file,row))
-assert rows, 'running image missing from release ledger'
-_,file,row=max(rows,key=lambda entry:entry[0])
-request=row['request']
-prefix='diagnostic-'+file.stem
-diagnostics=[state/(prefix+'.json'), *(entry for entry in state.glob(prefix+'-*.json')
-             if re.fullmatch(re.escape(prefix)+r'-[0-9]+',entry.stem))]
-current=[entry for entry in diagnostics if entry.exists()
-         and entry.stat().st_mtime >= row.get('verificationResumedAt', 0)]
-diagnostic=json.loads(max(current,key=lambda entry:entry.stat().st_mtime).read_text()) if current else {}
-receipt=row.get('receipt') or {}
-print(json.dumps({'environment':config['environment'],'origin':config['publicOrigin'],
-    'sha':request['sourceSha'],'image':request['image'],'run':request['runId'],
-    'phase':row['phase'],'diagnostic':{'exit':diagnostic.get('exit'),'timedOut':diagnostic.get('timedOut')},
-    'rejected':(state/('rejected-'+file.name)).exists(),
-    'verified':receipt.get('businessVerified') is True,'boot':receipt.get('bootId'),
-    'started':live['State']['StartedAt']}))
-'''
+serviceHome = Path('/var/lib/canvas-notes')
+settingsPath = Path('/etc/aivideo/canvas-notion.json')
 
 
 def request(url, *, method='GET', body=None, headers=None):
@@ -64,39 +34,37 @@ def select(value):
     return {'select': {'name': value}}
 
 
-def minute(value):
-    withoutFraction = re.sub(r'\.\d+(?=[Z+-])', '', value)
-    timestamp = datetime.datetime.fromisoformat(withoutFraction.replace('Z', '+00:00'))
-    return timestamp.astimezone(datetime.timezone.utc).replace(second=0, microsecond=0).isoformat()
+def sourceText(sha, path):
+    with urlopen(sourceFiles + sha + '/' + path, timeout=15) as response:
+        content = response.read(100001)
+    if len(content) > 100000:
+        raise ValueError('release source file is too large')
+    return content.decode()
 
 
-def releaseProperties(env, identity, evidence):
-    origin, _, _, stateField, linkField = environments[env]
-    if (evidence['environment'], evidence['origin'], evidence['sha'], evidence['image']) != (
-        env, origin, identity['sourceSha'], identity['image']
-    ):
-        raise ValueError('public identity and host release ledger disagree')
-    if not re.fullmatch(r'[1-9][0-9]*', evidence['run']):
-        raise ValueError('invalid release run')
-    if evidence['phase'] == 'completed' and evidence['verified'] and evidence['boot'] == identity['bootId']:
-        status = '验收通过' if env == 'staging' else '已上线'
-    elif evidence['phase'] == 'verifying':
-        diagnostic = evidence['diagnostic']
-        exitCode = diagnostic.get('exit')
-        failed = evidence['rejected'] or diagnostic.get('timedOut') is True or (type(exitCode) is int and exitCode != 0)
-        status = '完整验收未通过' if failed else '验收中'
+def releaseProperties(event, version, identity):
+    env = event['environment']
+    _, stateField, linkField, passed = environments[env]
+    running = identity.get('sourceSha') == event['sourceSha']
+    receipt = event.get('receipt')
+    if event['outcome'] == 'success':
+        if (not receipt or receipt.get('businessVerified') is not True
+                or (receipt.get('environment'), receipt.get('sourceSha')) != (env, event['sourceSha'])
+                or not re.fullmatch(r'ghcr\.io/' + re.escape(repository) + r'@sha256:[a-f0-9]{64}', receipt.get('image') or '')
+                or not re.fullmatch(r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}', receipt.get('bootId') or '')):
+            raise ValueError('invalid successful release receipt')
+        if not event['replay'] and (not running or receipt['image'] != identity.get('image')
+                                    or receipt['bootId'] != identity.get('bootId')
+                                    or identity.get('product') != {'name': product, 'version': version}):
+            raise ValueError('published identity does not match the successful release receipt')
+        status = passed
     else:
-        raise ValueError('release ledger has no current verification state')
-    properties = {stateField: select(status), linkField: {'url': releaseRuns + evidence['run']}}
-    if env == 'staging':
-        properties['香港切换时间'] = {'date': {'start': minute(evidence['started'])}}
-    return properties
+        status = '完整验收未通过' if running else '发布未完成'
+    return {stateField: select(status), linkField: {'url': releaseRuns + event['run']}}
 
 
 def value(properties, key, kind):
     candidate = properties.get(key, {}).get(kind)
-    if kind == 'date':
-        return minute(candidate['start']) if candidate else None
     if kind == 'select':
         return candidate['name'] if candidate else None
     return candidate
@@ -112,6 +80,12 @@ def updateVersion(notion, dataSource, version, changes, notes):
         raise RuntimeError('duplicate Notion product and version')
     if rows:
         row = rows[0]
+        linkField = next(field for field in changes if field.endswith('发布记录'))
+        previous = value(row['properties'], linkField, 'url') or ''
+        expected = changes[linkField]['url']
+        if previous.startswith(releaseRuns) and previous[len(releaseRuns):].isdigit():
+            if int(previous[len(releaseRuns):]) > int(expected[len(releaseRuns):]):
+                return 'unchanged', row['id']
         updates = {key: new for key, new in changes.items() if any(
             value(row['properties'], key, kind) != value(changes, key, kind) for kind in new
         )}
@@ -135,48 +109,49 @@ def updateVersion(notion, dataSource, version, changes, notes):
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--repo', type=Path, required=True)
-    parser.add_argument('--token-file', type=Path, required=True)
-    parser.add_argument('--data-source', required=True)
-    args = parser.parse_args()
-    if not re.fullmatch(r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}', args.data_source):
+    if os.environ.get('SSH_ORIGINAL_COMMAND'):
+        raise ValueError('unexpected SSH command')
+    payload = sys.stdin.buffer.read(20001)
+    if len(payload) > 20000:
+        raise ValueError('release event is too large')
+    event = json.loads(payload)
+    fields = {'environment', 'sourceSha', 'run', 'outcome', 'receipt', 'replay'}
+    if (set(event) != fields or event['environment'] not in environments
+            or event['outcome'] not in {'success', 'failure', 'cancelled', 'timed_out'}
+            or type(event['replay']) is not bool
+            or not re.fullmatch(r'[a-f0-9]{40}', event['sourceSha'])
+            or not re.fullmatch(r'[1-9][0-9]{0,19}', event['run'])):
+        raise ValueError('invalid Canvas delivery event')
+    settings = json.loads(settingsPath.read_text())
+    dataSource = settings['dataSource']
+    if not re.fullmatch(r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}', dataSource):
         raise ValueError('invalid Notion data source')
-    if args.token_file.stat().st_mode & 0o077:
-        raise ValueError('token file must be private')
-    headers = {'Authorization': 'Bearer ' + args.token_file.read_text().strip(),
+    headers = {'Authorization': 'Bearer ' + settings['token'],
                'Notion-Version': '2026-03-11', 'Content-Type': 'application/json'}
 
     def notion(method, path, body):
         return request('https://api.notion.com/v1' + path, method=method, body=body, headers=headers)
 
-    def notes(version):
-        subprocess.run(['/usr/bin/git', '-C', str(args.repo), 'fetch', '--quiet', 'origin', 'master'], check=True, timeout=35)
-        return subprocess.check_output(['/usr/bin/git', '-C', str(args.repo), 'show', f'FETCH_HEAD:releaseNotes/v{version}.md'], text=True, timeout=20)
-
-    with (args.token_file.parent / 'canvasReleaseNotes.lock').open('a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        observed = {}
-        failed = False
-        for env, (origin, sshHost, command, _, _) in environments.items():
-            try:
-                identity = request(origin + '/api/delivery/identity')['data']
-                version = (identity.get('product') or {}).get('version')
-                if not version:
-                    continue  # Older builds predate product versioning.
-                if identity['product']['name'] != product or not re.fullmatch(r'\d+\.\d+\.\d+', version):
-                    raise ValueError('invalid product identity')
-                evidence = json.loads(subprocess.check_output(['/usr/bin/ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', sshHost, command], input=hostRead, text=True, timeout=25))
-                props = releaseProperties(env, identity, evidence)
-                observed.setdefault(version, {}).update(props)
-            except Exception as error:
-                print(f'{env} 未同步: {error}', file=sys.stderr)
-                failed = True
-        for version, changes in observed.items():
-            action, page = updateVersion(notion, args.data_source, version, changes, notes)
-            print(f'{product} v{version} {action} {page}', flush=True)
-        return int(failed)
+    sha = event['sourceSha']
+    source = sourceText(sha, 'canvasRelease.ts')
+    versionMatch = re.search(r'\bversion:\s*"([0-9]+\.[0-9]+\.[0-9]+)"', source)
+    if not versionMatch or not re.search(r'\bname:\s*"' + re.escape(product) + '"', source):
+        raise ValueError('invalid Canvas product version manifest')
+    version = versionMatch.group(1)
+    origin = environments[event['environment']][0]
+    identity = request(origin + '/api/delivery/identity')['data']
+    properties = releaseProperties(event, version, identity)
+    with (serviceHome / 'sync.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        action, page = updateVersion(notion, dataSource, version, properties,
+                                     lambda _: sourceText(sha, 'releaseNotes/v' + version + '.md'))
+    print(f'{product} v{version} {action} https://app.notion.com/p/{page.replace("-", "")}', flush=True)
+    return 0
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except (OSError, ValueError, RuntimeError, TypeError, KeyError) as error:
+        print(f'Canvas release notes sync failed: {type(error).__name__}', file=sys.stderr)
+        sys.exit(1)
