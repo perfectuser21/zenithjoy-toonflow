@@ -404,7 +404,11 @@ jobs:
                       return ''
                   with patch.object(backupVolume, 'command', side_effect=system) as calls:
                       self.assertTrue(backupVolume.compactRestoreScratch(self.payload, self.snapshot))
-                  self.assertEqual([call.args[0][0] for call in calls.call_args_list], ['losetup', 'fstrim'])
+                  self.assertEqual([call.args[0] for call in calls.call_args_list], [
+                      ['losetup', '--associated', str(self.clone)],
+                      ['sync', '-f', str(self.payload)],
+                      ['fstrim', str(self.payload)],
+                  ])
                   self.assertEqual(self.snapshot.read_bytes(), b'original backup')
 
               def test_attached_clone_and_unexpected_path_are_retained(self):
