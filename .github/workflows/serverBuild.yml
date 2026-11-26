@@ -91,6 +91,8 @@ jobs:
 
           import sys
           sys.path.insert(0, 'deploy/delivery')
+          import backupVolume
+          import stagingBackupRetention
           from verifyProductSwap import verifySavedSwap
           import releaseHost
           import verifyGeneration
@@ -382,6 +384,83 @@ jobs:
                       verifySavedSwap(canvas, canvas, jobId,
                                       lambda client, path, *_: f'{client}/{path}'.encode())
 
+
+          class StagingBackupScratchTest(unittest.TestCase):
+              def setUp(self):
+                  directory = tempfile.TemporaryDirectory()
+                  self.addCleanup(directory.cleanup)
+                  self.payload = Path(directory.name)
+                  self.snapshot = self.payload / 'data.ext4'
+                  self.snapshot.write_bytes(b'original backup')
+                  self.clone = self.payload / 'quotaRestore.ext4'
+                  self.clone.write_bytes(b'disposable verification clone')
+                  (self.payload / 'quotaRestore').mkdir()
+
+              def test_compacts_only_the_unmounted_verification_clone(self):
+                  def system(args, timeout=120):
+                      if args[0] == 'fstrim':
+                          self.assertFalse(self.clone.exists())
+                          self.assertEqual(self.snapshot.read_bytes(), b'original backup')
+                      return ''
+                  with patch.object(backupVolume, 'command', side_effect=system) as calls:
+                      self.assertTrue(backupVolume.compactRestoreScratch(self.payload, self.snapshot))
+                  self.assertEqual([call.args[0][0] for call in calls.call_args_list], ['losetup', 'fstrim'])
+                  self.assertEqual(self.snapshot.read_bytes(), b'original backup')
+
+              def test_attached_clone_and_unexpected_path_are_retained(self):
+                  with patch.object(backupVolume, 'command', return_value='/dev/loop9'):
+                      self.assertFalse(backupVolume.compactRestoreScratch(self.payload, self.snapshot))
+                  self.assertTrue(self.clone.is_file())
+                  self.clone.unlink()
+                  self.clone.symlink_to(self.snapshot)
+                  with patch.object(backupVolume, 'command') as command:
+                      self.assertFalse(backupVolume.compactRestoreScratch(self.payload, self.snapshot))
+                      command.assert_not_called()
+                  self.assertEqual(self.snapshot.read_bytes(), b'original backup')
+
+          class StagingBackupRetentionTest(unittest.TestCase):
+              def setUp(self):
+                  directory = tempfile.TemporaryDirectory()
+                  self.addCleanup(directory.cleanup)
+                  self.backups = Path(directory.name)
+                  self.source = self.backups / '100' / 'capsule.ext4'
+                  self.source.parent.mkdir(mode=0o700)
+                  self.source.write_bytes(b'full backup')
+                  self.source.chmod(0o600)
+                  self.latest = self.backups / '200' / 'capsule.ext4'
+                  self.latest.parent.mkdir(mode=0o700)
+                  self.latest.write_bytes(b'latest backup')
+                  self.manifest = {'backupId': '100', 'capsuleCapacityBytes': self.source.stat().st_size,
+                                   'capsuleSha256': hashlib.sha256(self.source.read_bytes()).hexdigest(),
+                                   'backupVerified': True, 'restoreVerified': True, 'quotaRestoreVerified': True}
+
+              def test_pinned_and_latest_are_not_candidates(self):
+                  eligible = stagingBackupRetention.eligible
+                  self.assertTrue(eligible(self.source, '200'))
+                  self.assertFalse(eligible(self.latest, '200'))
+                  (self.source.parent / 'referenceFor-50.json').touch()
+                  self.assertFalse(eligible(self.source, '200'))
+                  (self.source.parent / 'referenceFor-50.json').unlink()
+                  (self.source.parent / 'compactArchive.json').touch()
+                  self.assertFalse(eligible(self.source, '200'))
+
+              def test_recovery_readback_precedes_removal_and_retries_are_safe(self):
+                  fingerprint = stagingBackupRetention.fingerprint(self.source)
+                  persisted = self.source.parent / 'coldArchive.json'
+                  validate = stagingBackupRetention.retire
+                  verification = {'key': stagingBackupRetention.archiveKey(self.manifest), 'capsuleSha256': self.manifest['capsuleSha256'],
+                                  'capsuleCapacityBytes': self.manifest['capsuleCapacityBytes']}
+                  with self.assertRaisesRegex(RuntimeError, 'archive identity mismatch'):
+                      validate(self.source, fingerprint, self.manifest, {**verification, 'capsuleSha256': 'a' * 64})
+                  self.assertTrue(self.source.exists())
+                  self.assertFalse(persisted.exists())
+                  with patch.object(stagingBackupRetention, 'rootJson', side_effect=lambda path, **_: json.loads(path.read_text())):
+                      with patch.object(stagingBackupRetention, 'command', return_value=''):
+                          self.assertTrue(validate(self.source, fingerprint, self.manifest, verification))
+                          self.assertFalse(validate(self.source, fingerprint, self.manifest, verification))
+                  self.assertFalse(self.source.exists())
+                  self.assertEqual(json.loads(persisted.read_text())['capsuleSha256'], self.manifest['capsuleSha256'])
+                  self.assertTrue(self.latest.exists())
 
           unittest.main()
           PY

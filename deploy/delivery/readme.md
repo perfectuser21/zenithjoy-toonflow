@@ -19,6 +19,16 @@
 
 在对应发布主机运行 `sudo python3 deploy/delivery/verifyProductSwap.py --source-sha <SHA> --boot-id <启动编号> --job-id <画布的 guidedRemake.job.id>`。它从两个普通账号会话复核公网候选、成片节点、MP4、原音轨和访问隔离，输出绑定候选的 JSON 回执。仅在香港读回和视觉复核通过后执行本功能的杭州晋级，杭州切换后重复同一验收。
 
+## 香港测试备份留存
+
+备份仍先为完整恢复演练预留空间。验收成功且临时可写副本已卸载后，香港备份器回收演练占用，并核对原快照哈希。回执的 `restoreScratchCompacted` 记录结果。核验失败的事务保留现场。
+
+独立的 `aivideoStagingBackupRetention.timer` 定期运行 `stagingBackupRetention.py`。自动清理只处理已完成发布中被后继版本替代、没有增量恢复点引用的完整胶囊。最新回滚、失败事务和旧链的依赖都保留。它先写入私有 COS 的香港专用前缀，使用 AES-GCM 加密并从 COS 流式读回、解密，校验大小和 SHA-256，再持发布锁重新核对并持久化 `coldArchive.json` 后释放本机副本。归档失败时保留本机文件，下次重试时复用同一备份对象。
+
+只在香港以 root 安装已审查的主机执行器及这两个 systemd 单元。固定执行目录为 `/opt/aivideo/delivery-staging-retention`，Python 需可导入 `qcloud_cos` 和 `cryptography`。在 root 私有配置 `/etc/aivideo/stagingBackupArchive.json` 中填写 `bucket`、`region`、`secretId`、`secretKey`、`keyFile`。凭据仅允许访问 `aivideoReleaseBackups/hk/retention/`，不得删除已提交对象。加密密钥为独立保存的 32 字节文件，属主 root，权限 0600。启用定时器前先用隔离样本验证上传、私有访问检查和恢复。生产站不启用这两个单元。
+
+恢复时使用 `stagingBackupRetention.py --restore <backupId> <新输出路径>`。程序读取 `coldArchive.json`，下载、解密并核对原始胶囊哈希，写入不覆盖已有文件的恢复目标。验真后再进入现有配额卷回滚流程。
+
 镜像传输失败时保留本次已接收 OCI 和 root 私有阶段诊断；启动时遇到已有 `imageTransfer*` 临时目录即拒绝新传输，由运维先读回身份、空间和事务后处理，不能自动删除未知结果。启动时保留至少两个归档上限加 1 GiB 空间；最终归档与加载后读回归档各有独立上限。归档验证后通过 Docker Engine `image load` 加载，与此前人工 898 导入使用的入口一致，再完整导出读回验证；这不说明之前失败的根因已确定。本机缓存导出或校验失败只是缓存未命中，其不完整缓存文件会删除；随后从 COS 接收的归档失败时保留。香港见证只提供验收回执。
 
 ## 主机接入条件

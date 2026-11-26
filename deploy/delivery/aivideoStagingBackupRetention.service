@@ -1,0 +1,14 @@
+[Unit]
+Description=Archive superseded Toonflow Hong Kong rollback capsules
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -B /opt/aivideo/delivery-staging-retention/stagingBackupRetention.py
+TimeoutStartSec=45min
+Nice=10
+IOSchedulingClass=idle
+UMask=0077
+PrivateTmp=yes
+NoNewPrivileges=yes

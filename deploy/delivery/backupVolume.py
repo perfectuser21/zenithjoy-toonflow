@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import stat
 import subprocess
 import sys
 import time
@@ -38,6 +39,25 @@ def digest(path):
         for block in iter(lambda: handle.read(4 * 1024 * 1024), b''):
             value.update(block)
     return value.hexdigest()
+
+
+def compactRestoreScratch(payload, snapshot):
+    # Only the verified writable copy is disposable. The immutable snapshot is
+    # the rollback artifact and must remain byte-for-byte unchanged.
+    clone = payload / 'quotaRestore.ext4'
+    try:
+        info = clone.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_dev != snapshot.stat().st_dev):
+            return False
+        if command(['losetup', '--associated', str(clone)]).strip():
+            return False
+        clone.unlink()
+        command(['fstrim', str(payload)], timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        # A diagnostic clone or untrimmed free blocks can still be retained.
+        return False
+    return True
 
 
 def main():
@@ -180,10 +200,15 @@ def main():
         proof = json.loads(validation.stdout)
         if proof.get('snapshot') != str(snapshot) or proof.get('quotaRestoreVerified') is not True:
             raise RuntimeError('quota restore has not been verified')
+        snapshotHash = digest(snapshot)
         receipt = {'backupId':key, 'backupVerified':True, 'restoreVerified':True,
                    'quotaRestoreVerified':True,
-                   'sha256':digest(snapshot), 'filesVerifiedReadable':fileCount,
+                   'sha256':snapshotHash, 'filesVerifiedReadable':fileCount,
                    'databasesVerified':databaseCount, 'storage':storage, 'sourceSha':request['sourceSha']}
+        if config['environment'] == 'staging':
+            receipt['restoreScratchCompacted'] = compactRestoreScratch(payload, snapshot)
+            if digest(snapshot) != snapshotHash:
+                raise RuntimeError('restore scratch cleanup changed snapshot bytes')
         command(['umount', str(payload)])
         capsuleMounted = False
         capsuleHash = digest(capsule)
