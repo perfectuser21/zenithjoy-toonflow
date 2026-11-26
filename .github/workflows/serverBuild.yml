@@ -38,6 +38,7 @@ jobs:
         env:
           RELEASE_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
+          bun -e 'import { canvasRelease } from "./canvasRelease"; import { readFileSync } from "@toonflow/file"; const version = canvasRelease.version; if (!/^\d+\.\d+\.\d+$/.test(version) || !readFileSync(`releaseNotes/v${version}.md`, "utf8").trim()) throw Error("缺少此版本的发布说明");'
           if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
             python3 - "${RELEASE_PR_BASE_SHA:?Missing PR base SHA}" <<'PY'
           import ast
@@ -91,12 +92,55 @@ jobs:
 
           import sys
           sys.path.insert(0, 'deploy/delivery')
+          sys.path.insert(0, 'releaseNotes')
           import backupVolume
+          import syncCanvasRelease
           import stagingBackupRetention
           from verifyProductSwap import verifySavedSwap
           import releaseHost
           import verifyGeneration
 
+
+          class CanvasReleaseNotesTest(unittest.TestCase):
+              def test_failed_staging_verification_is_not_promotion(self):
+                  identity = {'sourceSha': 'a' * 40, 'image': 'image', 'bootId': 'current'}
+                  evidence = {'environment': 'staging', 'origin': syncCanvasRelease.environments['staging'][0],
+                              'sha': identity['sourceSha'], 'image': identity['image'], 'run': '123',
+                              'phase': 'verifying', 'rejected': False, 'verified': False, 'boot': None,
+                              'started': '2026-11-26T03:44:42Z'}
+                  for diagnostic in ({'exit': 1}, {'exit': 2}, {'timedOut': True}, {}):
+                      with self.subTest(diagnostic=diagnostic):
+                          properties = syncCanvasRelease.releaseProperties('staging', identity, {
+                              **evidence, 'diagnostic': diagnostic,
+                          })
+                          status = '完整验收未通过' if diagnostic else '验收中'
+                          self.assertEqual(properties['香港测试站'], syncCanvasRelease.select(status))
+                          self.assertNotIn('杭州正式站', properties)
+                  with self.assertRaises(ValueError):
+                      syncCanvasRelease.releaseProperties('staging', identity, {
+                          **evidence, 'phase': 'completed', 'verified': True, 'boot': 'stale',
+                      })
+
+              def test_repeat_updates_one_row_without_replacing_notes(self):
+                  rows = []
+                  writes = []
+                  def notion(method, path, body):
+                      if path.endswith('/query'):
+                          return {'results': rows}
+                      writes.append((method, body))
+                      if method == 'POST':
+                          rows.append({'id': 'release-page', 'properties': body['properties']})
+                      else:
+                          rows[0]['properties'].update(body['properties'])
+                      return rows[0]
+                  staging = {'香港测试站': syncCanvasRelease.select('验收通过')}
+                  production = {'杭州正式站': syncCanvasRelease.select('已上线')}
+                  update = lambda changes: syncCanvasRelease.updateVersion(notion, 'test-db', '1.0.0', changes, lambda _: 'release content')
+                  self.assertEqual(update(staging), ('created', 'release-page'))
+                  self.assertEqual(update(staging), ('unchanged', 'release-page'))
+                  self.assertEqual(update(production), ('updated', 'release-page'))
+                  self.assertEqual(writes[-1], ('PATCH', {'properties': production}))
+                  self.assertEqual(rows[0]['properties']['香港测试站'], staging['香港测试站'])
 
           class CustomerPointsBudgetTest(unittest.TestCase):
               def test_release_budget_preserves_the_same_cap_across_denominations(self):
