@@ -179,7 +179,9 @@ function createMediaTasks() {
               task.failedAt = undefined;
               try { await task.onStatus?.(item); }
               catch (error) { task.fail(error); continue; }
-              if (item.result) task.finish(item.result);
+              if (item.result) task.finish(item.state === "failed" || item.state === "interrupted"
+                ? { ...item.result, message: `${item.result.message}\n任务编号 ${id}` }
+                : item.result);
             }
           } catch (error) {
             for (const id of batch) {

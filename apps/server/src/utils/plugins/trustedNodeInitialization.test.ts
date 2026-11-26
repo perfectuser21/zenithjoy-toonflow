@@ -16,6 +16,38 @@ import { createSceneDetector } from "../../../../../packages/nodes/frameAnalysis
 import { combinationCount, combinationAt, renderBatch, type MashupClip } from "../../../../../packages/nodes/mashupNode/src/mashupBatch";
 import { initializeHostedSharedCanvasNodes, initializeTrustedNodes, trustedNodeNames } from "./initialize";
 import { canvasRelease } from "../../../../../canvasRelease";
+import { aliyunImageFailure, browserCanvasDiagnosticSchema, workspaceErrorDiagnostic } from "../../lib/diagnosticReport";
+
+test("workspace errors identify the route and reason without retaining paths or error messages", () => {
+  const failure = Object.assign(new Error("user-project.txt"), { code: "WORKSPACE_NOT_FOUND" });
+  expect(workspaceErrorDiagnostic("/api/workspaces/files/list", 404, failure)).toEqual({
+    event: "canvasWorkspaceError", operation: "list", status: 404, reason: "WORKSPACE_NOT_FOUND",
+  });
+  expect(workspaceErrorDiagnostic("/api/workspaces/files/read", 404, { code: "ENOENT" })?.reason).toBe("ENOENT");
+  expect(workspaceErrorDiagnostic("/api/workspaces/files/write", 507, { code: "ENOSPC" })?.reason).toBe("ENOSPC");
+  expect(workspaceErrorDiagnostic("/api/workspaces/files/read", 403, failure)).toBeUndefined();
+  expect(workspaceErrorDiagnostic("/api/workspaces/files/mkdir", 409, { code: "EEXIST" })).toBeUndefined();
+  expect(workspaceErrorDiagnostic("/api/workspaces/files/private-project.txt", 500, failure)).toBeUndefined();
+});
+
+test("browser reports accept only a predefined canvas failure stage", () => {
+  for (const stage of ["load", "render", "save"]) {
+    expect(browserCanvasDiagnosticSchema.safeParse({ stage }).success).toBe(true);
+  }
+  expect(browserCanvasDiagnosticSchema.safeParse({ stage: "render", message: "project contents" }).success).toBe(false);
+  expect(browserCanvasDiagnosticSchema.safeParse({ stage: "private-path" }).success).toBe(false);
+});
+
+test("Aliyun terminal image failures retain only the status, safe code and a valid request ID", () => {
+  const requestId = "9526edbf-b95f-4dea-bc9c-129c349eaef1";
+  expect(aliyunImageFailure({
+    request_id: requestId, output: { task_status: "FAILED", code: "DataInspectionFailed", message: "private prompt" },
+  })).toEqual({ upstreamStatus: "FAILED", upstreamCode: "DataInspectionFailed", upstreamRequestId: requestId });
+  expect(aliyunImageFailure({
+    request_id: "Bearer secret", output: { task_status: "CANCELED", code: "invalid token", message: "private prompt" },
+  })).toEqual({ upstreamStatus: "CANCELED" });
+  expect(aliyunImageFailure({ output: { task_status: "RUNNING" } })).toBeUndefined();
+});
 
 test("delivery identity includes a Canvas product version distinct from the platform version", async () => {
   const sourceSha = "a".repeat(40);
@@ -679,6 +711,7 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     const advertiserId = "1234567890123456789";
     const prepareResponses: number[] = [];
     const nativeDownloads: number[] = [];
+    const nativeDownloadPaths: string[] = [];
     const backgroundAssignments = [
       { shot: 1, referenceShot: 1, evidence: "同一红色墙面" },
       { shot: 2, referenceShot: null, evidence: "可见信息不足" },
@@ -709,6 +742,7 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       }
       if (ordinaryWeb && req.method === "POST" && req.path === "/api/ffmpeg/trim") trimSubmissions++;
       if (req.method === "GET" && req.path === "/api/workspaces/files/mashupZip") {
+        nativeDownloadPaths.push(req.originalUrl);
         const index = nativeDownloads.push(0) - 1;
         res.once("finish", () => { nativeDownloads[index] = res.statusCode; });
       }
@@ -1147,6 +1181,12 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     expect(Object.keys(entries)).toHaveLength(100);
     for (const [name, original] of originals) expect(Buffer.from(entries[name]!).equals(original)).toBe(true);
 
+    const retry = await page.evaluate(async url => {
+      const response = await fetch(url);
+      return { status: response.status, bytes: (await response.arrayBuffer()).byteLength };
+    }, nativeDownloadPaths[0]!);
+    expect(retry).toEqual({ status: 200, bytes: (await readFile(join(downloads, files[0]!))).byteLength });
+
     const denied = await postFrom("outsider", "start", {
       directory: project.directory, organizationId: organization.organizationId, accountId: organization.accountId,
       jobId: randomUUID(), items: [clips[0]!],
@@ -1169,7 +1209,7 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     await clickDownload();
     await page.waitForSelector(`xpath=//*[@role="alert" and contains(., ${JSON.stringify(clips[88]!.name)})]`, { visible: true, timeout: 10000 });
     expect(prepareResponses).toEqual([200, 404]);
-    expect(nativeDownloads).toEqual([200]);
+    expect(nativeDownloads).toEqual([200, 200]);
     expect(await readdir(downloads)).toEqual(files);
 
     const { createMultiTenant } = await import("@toonflow/multi-tenant-auth");
@@ -1257,6 +1297,27 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
         expect(sessionCookie?.session).toBe(true);
         await tenantPage.waitForSelector(".workspacePage:not([inert]) .canvasPanel:not([inert]), .el-result", { visible: true, timeout: 15000 });
         if (!simulateCatalogOutage) {
+          const diagnostics = await tenantPage.evaluate(async directory => {
+            const headers = { "Content-Type": "application/json", "x-toonflow-workspace": "1" };
+            const missing = await fetch("/api/workspaces/files/list?" + new URLSearchParams({ directory: directory + "/missingDiagnosticFixture" }), { headers });
+            const report = (body: object, requestHeaders: Record<string, string> = headers) => fetch("/api/workspaces/canvasDiagnostic", {
+              method: "POST", headers: requestHeaders, body: JSON.stringify(body),
+            });
+            const denied = await report({ stage: "load" }, { "Content-Type": "application/json" });
+            const rejected = await report({ stage: "load", path: directory });
+            const accepted = await report({ stage: "render" });
+            const receipt = await accepted.json() as { data?: { diagnosticId?: string } };
+            return {
+              missing: missing.status, missingId: missing.headers.get("x-toonflow-diagnostic-id"),
+              denied: denied.status, rejected: rejected.status, accepted: accepted.status,
+              reportedId: receipt.data?.diagnosticId,
+            };
+          }, customerProject.directory);
+          const uuidPattern = /^[a-f0-9-]{36}$/i;
+          expect(diagnostics).toMatchObject({ missing: 404, denied: 403, rejected: 400, accepted: 200 });
+          expect(diagnostics.missingId).toMatch(uuidPattern);
+          expect(diagnostics.reportedId).toMatch(uuidPattern);
+          expect(diagnostics.missingId).not.toBe(diagnostics.reportedId);
           const guided = await tenantPage.evaluate(async input => {
             const headers = { "Content-Type": "application/json", "x-toonflow-workspace": "1" };
             const post = (path: string, body: unknown) => fetch(path, { method: "POST", headers, body: JSON.stringify(body) });
@@ -1648,3 +1709,24 @@ test("guided remake restores fast cuts and keeps the source audio packets", asyn
     await rm(root, { recursive: true, force: true });
   }
 }, 45000);
+
+// The standalone route loads app config, so run this after the isolated canvas fixture.
+test("same-origin remote standalone canvas can submit a diagnostic", async () => {
+  const app = express();
+  app.use(express.json());
+  app.use("/diagnostic", (await import("../../routes/workspaces/canvasDiagnostic")).default);
+  const server = app.listen(0, "127.0.0.1");
+  try {
+    await once(server, "listening");
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Missing standalone test address");
+    const headers = { host: "standalone.example.test", "content-type": "application/json", "x-toonflow-workspace": "1" };
+    const report = (origin: string) => fetch(`http://127.0.0.1:${address.port}/diagnostic`, {
+      method: "POST", headers: { ...headers, origin }, body: JSON.stringify({ stage: "render" }),
+    });
+    expect((await report("https://standalone.example.test")).status).toBe(200);
+    expect((await report("https://foreign.example.test")).status).toBe(403);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
+});
