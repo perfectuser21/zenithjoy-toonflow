@@ -13,6 +13,12 @@
 - `canvasDelivery.yml`：master 自动触发；同一发布锁串行、进行中的发布不取消；staging 成功后 production 才能启动；生产不重新构建镜像。
 - `remoteRelease.sh`：固定 SSH 主机密钥、专用 SSH 身份、请求经 stdin；校验 run/attempt、源码 SHA、固定镜像 digest、普通账号业务验收及配额卷备份恢复。缺项、SSH 断线、未知结果均失败。
 
+## ZenithJoy Canvas 产品版本
+
+`canvasRelease.ts` 是网页画布的产品版本来源。网页「设置 → 关于」和 `/api/delivery/identity` 的 `product` 都从这里读取。接口的 `platformVersion` 来自 `appVersion.ts`，用于记录 Toonflow 底座版本。候选仍以完整源码 SHA 和镜像摘要验收。
+
+每次确定新的产品版本时，在 GitHub Releases 用 `zenithjoy-canvas-vX.Y.Z` 创建草稿，写明新增、修复、香港与杭州发布范围、验收证据和回退版本。上线后按实际运行版本填写各环境的上线时间和验收结果。这个标签前缀用于画布网页版本，与桌面包的 `vX.Y.Z` 标签分开。
+
 ## 一键换品专项验收
 
 香港候选切换后，在发布配置首个普通验收账号的专用画布操作。先从 `/api/delivery/identity` 记录候选 SHA 和启动编号，再上传短原片和新商品图，从「逐帧拉片 → 视频翻拍 → 一键换品」生成并合成。逐段查看商品、人物、动作和背景，在专用画布保存结果。
