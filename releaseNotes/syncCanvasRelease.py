@@ -35,7 +35,9 @@ for file in state.glob('[0-9]*-[0-9]*.json'):
 assert rows, 'running image missing from release ledger'
 _,file,row=max(rows,key=lambda entry:entry[0])
 request=row['request']
-diagnostics=[state/('diagnostic-'+file.name), *state.glob('diagnostic-'+file.stem+'-*.json')]
+prefix='diagnostic-'+file.stem
+diagnostics=[state/(prefix+'.json'), *(entry for entry in state.glob(prefix+'-*.json')
+             if re.fullmatch(re.escape(prefix)+r'-[0-9]+',entry.stem))]
 current=[entry for entry in diagnostics if entry.exists()
          and entry.stat().st_mtime >= row.get('verificationResumedAt', 0)]
 diagnostic=json.loads(max(current,key=lambda entry:entry.stat().st_mtime).read_text()) if current else {}
