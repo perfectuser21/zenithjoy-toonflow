@@ -12,11 +12,13 @@ import { isWithin, resolveWorkspacePath } from "@/utils/workspace/files";
 
 type Item = { name: string; path: string };
 type PreparedFile = { item: Item; path: string; info: Stats };
-type Ticket = { actor: string; directory: string; files: PreparedFile[]; expiresAt: number };
+type Ticket = { actor: string; directory: string; files: PreparedFile[]; expiresAt: number; starts: number; active: boolean };
 
-// Browser download handoffs are single-use and confined to the serving Bun process.
+// The browser may restart a truncated download with the same link.
 const tickets = new Map<string, Ticket>();
 const ticketLifetimeMs = 120_000;
+const retryLifetimeMs = 300_000;
+const maxStarts = 3;
 const openFlags = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
 
 function fail(message: string, status: number): never {
@@ -85,26 +87,45 @@ export async function prepareMashupZip(actor: string, directory: string, items: 
     files.push(await inspectFile(directory, item));
   }
   const now = Date.now();
-  for (const [id, ticket] of tickets) if (ticket.expiresAt <= now) tickets.delete(id);
+  for (const [id, ticket] of tickets) {
+    if (!ticket.active && (ticket.expiresAt <= now || ticket.starts >= maxStarts)) tickets.delete(id);
+  }
   let pendingFiles = files.length;
   let actorTickets = 0;
-  for (const ticket of tickets.values()) {
+  const idleRetries: [string, Ticket][] = [];
+  for (const [id, ticket] of tickets) {
     pendingFiles += ticket.files.length;
-    if (ticket.actor === actor) actorTickets++;
+    if (ticket.actor === actor && (ticket.active || !ticket.starts)) actorTickets++;
+    if (!ticket.active && ticket.starts) idleRetries.push([id, ticket]);
+  }
+  if (tickets.size >= 128 || pendingFiles > 4096) {
+    for (const [id, ticket] of idleRetries) {
+      tickets.delete(id);
+      pendingFiles -= ticket.files.length;
+      if (tickets.size < 128 && pendingFiles <= 4096) break;
+    }
   }
   if (tickets.size >= 128 || pendingFiles > 4096 || actorTickets >= 4) {
     fail("已有过多等待中的下载，请稍后重试", 429);
   }
   const ticket = randomUUID();
-  tickets.set(ticket, { actor, directory, files, expiresAt: now + ticketLifetimeMs });
+  tickets.set(ticket, { actor, directory, files, expiresAt: now + ticketLifetimeMs, starts: 0, active: false });
   return ticket;
 }
 
 export function takeMashupZip(ticket: string, actor: string) {
   const batch = tickets.get(ticket);
-  if (!batch || batch.expiresAt <= Date.now() || batch.actor !== actor) fail("下载已失效，请重新点击下载", 404);
-  tickets.delete(ticket);
+  if (!batch || batch.actor !== actor) fail("下载已失效，请重新点击下载", 404);
+  if (batch.active) fail("成片正在下载，请稍后重试", 409);
+  if (batch.expiresAt <= Date.now() || batch.starts >= maxStarts) fail("下载已失效，请重新点击下载", 404);
+  batch.active = true;
+  batch.starts++;
   return batch;
+}
+
+export function releaseMashupZip(batch: Ticket) {
+  batch.expiresAt = Date.now() + retryLifetimeMs;
+  batch.active = false;
 }
 
 export async function streamMashupZip(batch: Ticket, directory: string, response: Response) {
@@ -151,6 +172,7 @@ export async function streamMashupZip(batch: Ticket, directory: string, response
     input: readFileEntry(file),
   }));
   response.attachment("混剪成片.zip").set({
+    "Accept-Ranges": "none",
     "Cache-Control": "no-store, no-transform",
     "Content-Length": String(predictLength(entries)),
     "Referrer-Policy": "no-referrer",
