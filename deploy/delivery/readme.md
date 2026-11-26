@@ -41,6 +41,8 @@
 
 安装固定发布入口 `/usr/local/sbin/aivideo-release`。专用 SSH key 的 forced-command 仅调用该入口，禁用任意 shell、端口转发和 PTY。执行器独立核对主机环境、源码标签、镜像 digest、香港回执和前驱镜像。
 
+现役香港和杭州裁剪任务上限均为 2 GiB。宿主将本目录的 `trimDockerMemory.sh` 安装到 root 持有的 `/opt/aivideo/delivery/trimDockerMemory.sh`，并在各站现有 `worker.env` 中把 `TOONFLOW_TRIM_DOCKER` 指向该文件。它只调整带协议 2 裁剪标签、原本请求 1 GiB 的 Docker 创建调用。更新时等待 worker 空闲，重启后用实际裁剪任务核对 Docker 容器的 `HostConfig.Memory == 2147483648`。两站部署和回退时继续保留此配置。
+
 香港：将 CI staging 环境指向新公网入口对应的客户服务，验收使用同一实例和同一配额卷。设定固定容器启动方式，核对持久挂载、备份容量、配额 helper 和裁剪 worker、store。提供两个不同普通账号、专用画布和截取源，以及可实际生成视频的模型配置。
 
 杭州：演练保留原容器配置与镜像的事务切换。停止写入后完整备份工作区、数据库、项目配额登记和扩展属性，在隔离环境验证恢复。切换后核验真实业务，失败时按事务记录判断候选是否已产生新写入。
