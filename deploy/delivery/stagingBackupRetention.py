@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Move completed Hong Kong rollback capsules to an encrypted off-host repository."""
+"""Move superseded rollback capsules to an environment-specific encrypted archive."""
 import contextlib
 import fcntl
 import json
@@ -76,9 +76,9 @@ def command(args):
     return subprocess.run(args, check=True, capture_output=True, text=True, timeout=1800).stdout
 
 
-def retire(capsule, expected, receipt, verified):
+def retire(capsule, expected, receipt, verified, *, environment='staging'):
     archive = capsule.parent / 'coldArchive.json'
-    require(verified.get('key') == archiveKey(receipt)
+    require(verified.get('key') == archiveKey(receipt, environment)
             and all(verified.get(field) == receipt[field] for field in
                     ('capsuleSha256', 'capsuleCapacityBytes')), 'archive identity mismatch')
     pointer = {'format': formatName, 'backupId': receipt['backupId'],
@@ -108,15 +108,16 @@ def lock(path):
 
 def completedBackups(config):
     state = Path(config['stateDirectory'])
+    environment = config['environment']
     running = inspect(config['container'])
     require(running['State']['Running'], 'staging application is not running')
     completed = {}
     for path in state.glob('[0-9]*-[0-9]*.json'):
         transaction = rootJson(path, private=True)
-        require(resolvedTransaction(state, path, 'staging'), 'unresolved release transaction')
+        require(resolvedTransaction(state, path, environment), 'unresolved release transaction')
         if transaction.get('phase') == 'completed':
             request = transaction['request']
-            require(request['environment'] == 'staging', 'unexpected release environment')
+            require(request['environment'] == environment, 'unexpected release environment')
             identifier = transaction['backup']['backupId']
             require(isinstance(identifier, str) and re.fullmatch(r'[1-9][0-9]{0,19}', identifier),
                     'invalid transaction backup identity')
@@ -132,9 +133,14 @@ def completedBackups(config):
     return latest, completed
 
 
-def run(config, archive):
-    require(config.get('environment') == 'staging' and config.get('publicOrigin') == publicOrigins['staging'],
-            'retention is only available on Hong Kong staging')
+def requireEnvironment(config, environment):
+    require(config.get('environment') == environment and config.get('publicOrigin') == publicOrigins[environment],
+            'backup retention environment mismatch')
+
+
+def run(config, archive, *, environment='staging'):
+    requireEnvironment(config, environment)
+    require(archive.environment == environment, 'backup archive environment mismatch')
     backup = Path(config['backupDirectory'])
     state = Path(config['stateDirectory'])
     allowed = set()
@@ -157,16 +163,16 @@ def run(config, archive):
             latest, completed = completedBackups(config)
             if identifier in completed and eligible(capsule, latest):
                 require(releaseBackupReceipt(backup, identifier, completed[identifier]) == receipt, 'backup receipt changed')
-                if retire(capsule, expected, receipt, verified):
+                if retire(capsule, expected, receipt, verified, environment=environment):
                     retired.append(identifier)
     return {'retiredBackups': retired}
 
 
-def restore(config, archive, identifier, target):
+def restore(config, archive, identifier, target, *, environment='staging'):
     backup = Path(config['backupDirectory'])
     receipt = backupReceipt(backup, identifier)
     saved = rootJson(backup / identifier / 'coldArchive.json', private=True)
-    require(saved == {'format': formatName, 'backupId': identifier, 'key': archiveKey(receipt),
+    require(saved == {'format': formatName, 'backupId': identifier, 'key': archiveKey(receipt, environment),
                       'capsulePath': str(backup / identifier / 'capsule.ext4'),
                       'capsuleSha256': receipt['capsuleSha256'],
                       'capsuleCapacityBytes': receipt['capsuleCapacityBytes']}, 'cold archive pointer mismatch')
@@ -192,15 +198,18 @@ def restore(config, archive, identifier, target):
 def main():
     require(os.geteuid() == 0, 'root required')
     config = rootJson('/etc/aivideo/release.json')
-    require(config.get('environment') == 'staging' and config.get('publicOrigin') == publicOrigins['staging'],
-            'retention is only available on Hong Kong staging')
-    archive = CosArchive()
-    if len(sys.argv) == 4 and sys.argv[1] == '--restore':
-        print(json.dumps(restore(config, archive, sys.argv[2], Path(sys.argv[3]))))
+    arguments = sys.argv[1:]
+    environment = 'production' if arguments[:1] == ['--production'] else 'staging'
+    if environment == 'production':
+        arguments = arguments[1:]
+    requireEnvironment(config, environment)
+    archive = CosArchive(environment=environment)
+    if len(arguments) == 3 and arguments[0] == '--restore':
+        print(json.dumps(restore(config, archive, arguments[1], Path(arguments[2]), environment=environment)))
         return
-    require(len(sys.argv) == 1, 'invalid retention arguments')
+    require(not arguments, 'invalid retention arguments')
     with lock(Path(config['stateDirectory']) / 'backupRetention.lock'):
-        print(json.dumps(run(config, archive)), flush=True)
+        print(json.dumps(run(config, archive, environment=environment)), flush=True)
 
 
 if __name__ == '__main__':
@@ -208,5 +217,5 @@ if __name__ == '__main__':
         main()
     except Exception as error:
         # The downloader or cloud client can include credentials in errors.
-        print('香港旧备份归档待重试: ' + type(error).__name__, file=sys.stderr)
+        print('旧备份归档待重试: ' + type(error).__name__, file=sys.stderr)
         sys.exit(1)

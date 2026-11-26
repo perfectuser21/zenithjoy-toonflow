@@ -1,0 +1,14 @@
+[Unit]
+Description=Archive superseded Toonflow Hangzhou rollback capsules
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/aivideo/delivery-production-retention-venv/bin/python -B /opt/aivideo/delivery-production-retention/stagingBackupRetention.py --production
+TimeoutStartSec=90min
+Nice=10
+IOSchedulingClass=idle
+UMask=0077
+PrivateTmp=yes
+NoNewPrivileges=yes

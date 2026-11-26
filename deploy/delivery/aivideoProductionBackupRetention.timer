@@ -1,0 +1,9 @@
+[Unit]
+Description=Retry archiving old Toonflow Hangzhou rollback capsules
+
+[Timer]
+OnCalendar=*-*-* *:15/20:00
+Persistent=yes
+
+[Install]
+WantedBy=timers.target
