@@ -711,6 +711,7 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     const advertiserId = "1234567890123456789";
     const prepareResponses: number[] = [];
     const nativeDownloads: number[] = [];
+    const nativeDownloadPaths: string[] = [];
     const backgroundAssignments = [
       { shot: 1, referenceShot: 1, evidence: "同一红色墙面" },
       { shot: 2, referenceShot: null, evidence: "可见信息不足" },
@@ -741,6 +742,7 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       }
       if (ordinaryWeb && req.method === "POST" && req.path === "/api/ffmpeg/trim") trimSubmissions++;
       if (req.method === "GET" && req.path === "/api/workspaces/files/mashupZip") {
+        nativeDownloadPaths.push(req.originalUrl);
         const index = nativeDownloads.push(0) - 1;
         res.once("finish", () => { nativeDownloads[index] = res.statusCode; });
       }
@@ -1179,6 +1181,12 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     expect(Object.keys(entries)).toHaveLength(100);
     for (const [name, original] of originals) expect(Buffer.from(entries[name]!).equals(original)).toBe(true);
 
+    const retry = await page.evaluate(async url => {
+      const response = await fetch(url);
+      return { status: response.status, bytes: (await response.arrayBuffer()).byteLength };
+    }, nativeDownloadPaths[0]!);
+    expect(retry).toEqual({ status: 200, bytes: (await readFile(join(downloads, files[0]!))).byteLength });
+
     const denied = await postFrom("outsider", "start", {
       directory: project.directory, organizationId: organization.organizationId, accountId: organization.accountId,
       jobId: randomUUID(), items: [clips[0]!],
@@ -1201,7 +1209,7 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     await clickDownload();
     await page.waitForSelector(`xpath=//*[@role="alert" and contains(., ${JSON.stringify(clips[88]!.name)})]`, { visible: true, timeout: 10000 });
     expect(prepareResponses).toEqual([200, 404]);
-    expect(nativeDownloads).toEqual([200]);
+    expect(nativeDownloads).toEqual([200, 200]);
     expect(await readdir(downloads)).toEqual(files);
 
     const { createMultiTenant } = await import("@toonflow/multi-tenant-auth");
