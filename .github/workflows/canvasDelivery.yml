@@ -17,7 +17,6 @@ on:
       - '.dockerignore'
       - 'deploy/**'
       - '.github/workflows/candidateImage.yml'
-      - '.github/workflows/canvasDelivery.yml'
       - '!apps/**/*.test.ts'
       - '!packages/**/*.test.ts'
   workflow_dispatch:
@@ -29,6 +28,9 @@ on:
         description: 'The team tested and approved this version on Hong Kong staging.'
         type: boolean
         default: false
+      notes_run:
+        description: 'Sync Notion only for this completed Canvas delivery run ID.'
+        type: string
 
 permissions:
   contents: read
@@ -39,7 +41,7 @@ concurrency:
 
 jobs:
   regression:
-    if: vars.CANVAS_DELIVERY_ENABLED == 'true' && (github.event_name == 'push' || inputs.staging_run == '')
+    if: vars.CANVAS_DELIVERY_ENABLED == 'true' && !inputs.notes_run && (github.event_name == 'push' || inputs.staging_run == '')
     uses: ./.github/workflows/serverBuild.yml
 
   candidate:
@@ -103,7 +105,7 @@ jobs:
           fi
 
   production:
-    if: vars.CANVAS_DELIVERY_ENABLED == 'true' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && inputs.staging_run != '' && inputs.team_verified
+    if: vars.CANVAS_DELIVERY_ENABLED == 'true' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && !inputs.notes_run && inputs.staging_run != '' && inputs.team_verified
     permissions:
       actions: read
       contents: read
@@ -124,9 +126,11 @@ jobs:
           [[ "$STAGING_RUN" =~ ^[1-9][0-9]*$ ]]
           run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$STAGING_RUN")
           jq -e '.path == ".github/workflows/canvasDelivery.yml" and
-            .head_branch == "master" and .status == "completed" and .conclusion == "success" and
+            .head_branch == "master" and .status == "completed" and
             (.event == "push" or .event == "workflow_dispatch")' <<< "$run" > /dev/null
-          attempt=$(jq -er '.run_attempt' <<< "$run")
+          attempt=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$STAGING_RUN/jobs?filter=latest&per_page=100" \
+            --jq '.jobs[] | select(.name == "staging" and .conclusion == "success") | .run_attempt')
+          [[ "$attempt" =~ ^[1-9][0-9]*$ ]]
           source=$(jq -er '.head_sha' <<< "$run")
           gh run download "$STAGING_RUN" --repo "$GITHUB_REPOSITORY" --name "staging-release-$attempt" --dir "$RUNNER_TEMP/approved-staging"
           receipt="$RUNNER_TEMP/approved-staging/releaseReceipt.json"
@@ -150,12 +154,21 @@ jobs:
               print('archive_bytes=' + str(transfer['bytes']), file=output)
               print('receipt=' + json.dumps(publicReceipt(receipt), separators=(',', ':')), file=output)
           PY
+          jq -n --arg source "$source" '{sourceSha: $source}' > releaseContext.json
+      - name: Save production candidate identity for release notes
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: production-release-context-${{ github.run_attempt }}
+          path: releaseContext.json
+          if-no-files-found: error
       - name: Install COS signing SDK
         run: |
           python3 -m venv "$RUNNER_TEMP/cos-venv"
           "$RUNNER_TEMP/cos-venv/bin/pip" install setuptools==80.9.0 wheel==0.45.1
           "$RUNNER_TEMP/cos-venv/bin/pip" install --no-build-isolation -r deploy/delivery/cosRequirements.txt
       - name: Promote same digest to Hangzhou
+        id: deploy
         env:
           RELEASE_HOST: ${{ vars.CANVAS_RELEASE_HOST }}
           RELEASE_PORT: ${{ vars.CANVAS_RELEASE_PORT }}
@@ -179,9 +192,44 @@ jobs:
           CANVAS_COS_SECRET_ID: ${{ secrets.CANVAS_COS_SECRET_ID }}
           CANVAS_COS_SECRET_KEY: ${{ secrets.CANVAS_COS_SECRET_KEY }}
         run: bash deploy/delivery/remoteRelease.sh
+      - name: Save verified production receipt
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: production-release-${{ github.run_attempt }}
+          path: releaseReceipt.json
+          if-no-files-found: error
       - name: Publish production evidence
         if: always()
         run: |
           if [ -f releaseReceipt.json ]; then
             cat releaseReceipt.json >> "$GITHUB_STEP_SUMMARY"
           fi
+
+  release_notes:
+    name: Sync Notion release notes
+    needs: [staging, production]
+    if: >-
+      always() && github.ref == 'refs/heads/master' &&
+      (inputs.notes_run != '' || needs.staging.result != 'skipped' || needs.production.result != 'skipped')
+    permissions:
+      actions: read
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment:
+      name: release-notes
+      deployment: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Record release result in Notion
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NOTES_RUN: ${{ inputs.notes_run }}
+          NOTES_HOST: ${{ vars.CANVAS_NOTES_HOST }}
+          NOTES_PORT: ${{ vars.CANVAS_NOTES_PORT }}
+          NOTES_SSH_KEY: ${{ secrets.CANVAS_NOTES_SSH_KEY }}
+          NOTES_KNOWN_HOSTS: ${{ vars.CANVAS_NOTES_KNOWN_HOSTS }}
+        run: bash releaseNotes/syncCanvasReleaseFromCd.sh

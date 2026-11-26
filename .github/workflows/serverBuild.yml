@@ -102,24 +102,27 @@ jobs:
 
 
           class CanvasReleaseNotesTest(unittest.TestCase):
-              def test_failed_staging_verification_is_not_promotion(self):
-                  identity = {'sourceSha': 'a' * 40, 'image': 'image', 'bootId': 'current'}
-                  evidence = {'environment': 'staging', 'origin': syncCanvasRelease.environments['staging'][0],
-                              'sha': identity['sourceSha'], 'image': identity['image'], 'run': '123',
-                              'phase': 'verifying', 'rejected': False, 'verified': False, 'boot': None,
-                              'started': '2026-11-26T03:44:42Z'}
-                  for diagnostic in ({'exit': 1}, {'exit': 2}, {'timedOut': True}, {}):
-                      with self.subTest(diagnostic=diagnostic):
-                          properties = syncCanvasRelease.releaseProperties('staging', identity, {
-                              **evidence, 'diagnostic': diagnostic,
-                          })
-                          status = '完整验收未通过' if diagnostic else '验收中'
-                          self.assertEqual(properties['香港测试站'], syncCanvasRelease.select(status))
-                          self.assertNotIn('杭州正式站', properties)
+              def test_release_notes_distinguish_cutover_failure_and_verified_production(self):
+                  source = 'a' * 40
+                  image = 'ghcr.io/perfectuser21/zenithjoy-toonflow@sha256:' + 'b' * 64
+                  boot = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+                  identity = {'sourceSha': source, 'image': image, 'bootId': boot,
+                              'product': {'name': 'ZenithJoy Canvas', 'version': '1.0.0'}}
+                  event = {'environment': 'staging', 'sourceSha': source, 'run': '123',
+                           'outcome': 'timed_out', 'receipt': None, 'replay': False}
+                  properties = syncCanvasRelease.releaseProperties(event, '1.0.0', identity)
+                  self.assertEqual(properties['香港测试站'], syncCanvasRelease.select('完整验收未通过'))
+                  self.assertNotIn('杭州正式站', properties)
+                  rejected = syncCanvasRelease.releaseProperties(event, '1.0.0', {'sourceSha': 'c' * 40})
+                  self.assertEqual(rejected['香港测试站'], syncCanvasRelease.select('发布未完成'))
+                  receipt = {'environment': 'production', 'sourceSha': source, 'image': image,
+                             'bootId': boot, 'businessVerified': True}
+                  promoted = {**event, 'environment': 'production', 'outcome': 'success', 'receipt': receipt}
+                  properties = syncCanvasRelease.releaseProperties(promoted, '1.0.0', identity)
+                  self.assertEqual(properties['杭州正式站'], syncCanvasRelease.select('已上线'))
+                  self.assertEqual(properties['杭州发布记录']['url'], syncCanvasRelease.releaseRuns + '123')
                   with self.assertRaises(ValueError):
-                      syncCanvasRelease.releaseProperties('staging', identity, {
-                          **evidence, 'phase': 'completed', 'verified': True, 'boot': 'stale',
-                      })
+                      syncCanvasRelease.releaseProperties(promoted, '1.0.0', {**identity, 'bootId': 'stale'})
 
               def test_repeat_updates_one_row_without_replacing_notes(self):
                   rows = []
@@ -133,13 +136,16 @@ jobs:
                       else:
                           rows[0]['properties'].update(body['properties'])
                       return rows[0]
-                  staging = {'香港测试站': syncCanvasRelease.select('验收通过')}
-                  production = {'杭州正式站': syncCanvasRelease.select('已上线')}
+                  link = {'url': syncCanvasRelease.releaseRuns + '123'}
+                  staging = {'香港测试站': syncCanvasRelease.select('验收通过'), '香港发布记录': link}
+                  production = {'杭州正式站': syncCanvasRelease.select('已上线'), '杭州发布记录': link}
                   update = lambda changes: syncCanvasRelease.updateVersion(notion, 'test-db', '1.0.0', changes, lambda _: 'release content')
                   self.assertEqual(update(staging), ('created', 'release-page'))
                   self.assertEqual(update(staging), ('unchanged', 'release-page'))
                   self.assertEqual(update(production), ('updated', 'release-page'))
                   self.assertEqual(writes[-1], ('PATCH', {'properties': production}))
+                  self.assertEqual(update({**production, '杭州发布记录': {'url': syncCanvasRelease.releaseRuns + '122'}}),
+                                   ('unchanged', 'release-page'))
                   self.assertEqual(rows[0]['properties']['香港测试站'], staging['香港测试站'])
 
           class CustomerPointsBudgetTest(unittest.TestCase):
