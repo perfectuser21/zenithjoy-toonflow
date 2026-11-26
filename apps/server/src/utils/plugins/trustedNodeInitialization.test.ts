@@ -1266,7 +1266,7 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
             const denied = await report({ stage: "load" }, { "Content-Type": "application/json" });
             const rejected = await report({ stage: "load", path: directory });
             const accepted = await report({ stage: "render" });
-            const receipt = await accepted.json();
+            const receipt = await accepted.json() as { data?: { diagnosticId?: string } };
             return {
               missing: missing.status, missingId: missing.headers.get("x-toonflow-diagnostic-id"),
               denied: denied.status, rejected: rejected.status, accepted: accepted.status,
