@@ -452,6 +452,12 @@ jobs:
                                    'capsuleSha256': hashlib.sha256(self.source.read_bytes()).hexdigest(),
                                    'backupVerified': True, 'restoreVerified': True, 'quotaRestoreVerified': True}
 
+              def test_production_archives_cannot_use_the_staging_prefix(self):
+                  self.assertTrue(stagingBackupRetention.archiveKey(self.manifest, 'production').startswith(
+                      'aivideoReleaseBackups/hz/retention/'))
+                  self.assertTrue(stagingBackupRetention.archiveKey(self.manifest).startswith(
+                      'aivideoReleaseBackups/hk/retention/'))
+
               def test_pinned_and_latest_are_not_candidates(self):
                   eligible = stagingBackupRetention.eligible
                   self.assertTrue(eligible(self.source, '200'))

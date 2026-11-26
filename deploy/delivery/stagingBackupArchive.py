@@ -1,4 +1,4 @@
-"""Authenticated, compressed cold archives in the private Hong Kong COS prefix."""
+"""Authenticated, compressed cold archives in environment-specific private COS prefixes."""
 import hashlib
 import os
 import struct
@@ -13,10 +13,12 @@ formatName = 'cos-aesgcm-zlib-v1'
 chunkSize = 8 * 1024**2
 partSize = 32 * 1024**2
 magic = b'TFCOLD1\0'
+archivePrefixes = {'staging': 'aivideoReleaseBackups/hk/retention',
+                   'production': 'aivideoReleaseBackups/hz/retention'}
 
 
-def archiveKey(receipt):
-    return f"aivideoReleaseBackups/hk/retention/{receipt['backupId']}/{receipt['capsuleSha256']}.zj"
+def archiveKey(receipt, environment='staging'):
+    return f"{archivePrefixes[environment]}/{receipt['backupId']}/{receipt['capsuleSha256']}.zj"
 
 
 def encryption(master, salt):
@@ -85,20 +87,24 @@ def verifyStream(stream, receipt, master, output=None):
 
 
 class CosArchive:
-    def __init__(self, path='/etc/aivideo/stagingBackupArchive.json'):
+    def __init__(self, path=None, *, environment='staging'):
         from qcloud_cos import CosConfig, CosS3Client
-        config = rootJson(path, private=True)
+        self.environment = environment
+        defaultPath = f'/etc/aivideo/{environment}BackupArchive.json'
+        config = rootJson(path or defaultPath, private=True)
         self.bucket = config['bucket']
         self.region = config['region']
+        endpoint = 'cos-internal.accelerate.tencentcos.cn' if environment == 'staging' else None
+        self.partSize = partSize if environment == 'staging' else chunkSize
         self.master = rootFile(config['keyFile'], private=True).read_bytes()
         require(len(self.master) == 32, 'archive key must be 32 bytes')
         self.client = CosS3Client(CosConfig(Region=self.region, SecretId=config['secretId'],
                                             SecretKey=config['secretKey'], Scheme='https', Timeout=45,
-                                            Endpoint='cos-internal.accelerate.tencentcos.cn'))
+                                            Endpoint=endpoint))
 
     def upload(self, capsule, receipt):
         from qcloud_cos.cos_exception import CosServiceError
-        key = archiveKey(receipt)
+        key = archiveKey(receipt, self.environment)
         try:
             self.client.head_object(Bucket=self.bucket, Key=key)
             return
@@ -120,7 +126,7 @@ class CosArchive:
         try:
             for block in encodedChunks(capsule, receipt, self.master):
                 pending.extend(block)
-                if len(pending) >= partSize:
+                if len(pending) >= self.partSize:
                     put()
             if pending:
                 put()
@@ -135,7 +141,7 @@ class CosArchive:
             raise
 
     def verify(self, receipt, output=None):
-        key = archiveKey(receipt)
+        key = archiveKey(receipt, self.environment)
         try:
             url = f'https://{self.bucket}.cos.{self.region}.myqcloud.com/{key}'
             with urlopen(Request(url, method='HEAD'), timeout=15):
