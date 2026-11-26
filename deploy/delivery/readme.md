@@ -23,7 +23,7 @@
 
 备份仍先为完整恢复演练预留空间。验收成功且临时可写副本已卸载后，香港备份器回收演练占用，并核对原快照哈希。回执的 `restoreScratchCompacted` 记录结果。核验失败的事务保留现场。
 
-独立的 `aivideoStagingBackupRetention.timer` 定期运行 `stagingBackupRetention.py`。自动清理只处理已完成发布中被后继版本替代、没有增量恢复点引用的完整胶囊。最新回滚、失败事务和旧链的依赖都保留。它先写入私有 COS 的香港专用前缀，使用 AES-GCM 加密并从 COS 流式读回、解密，校验大小和 SHA-256，再持发布锁重新核对并持久化 `coldArchive.json` 后释放本机副本。归档失败时保留本机文件，下次重试时复用同一备份对象。
+两个环境各用独立的定时器运行 `stagingBackupRetention.py`。自动清理只处理已完成发布中被后继版本替代、没有增量恢复点引用的完整胶囊。最新回滚、失败事务和旧链的依赖都保留。程序将备份写入本环境的私有 COS 前缀，使用 AES-GCM 加密并从 COS 流式读回、解密，校验大小和 SHA-256，再持发布锁重新核对并持久化 `coldArchive.json` 后释放本机副本。归档失败时保留本机文件，下次重试时复用同一备份对象。
 
 香港以 root 安装 `aivideoStagingBackupRetention` 单元，杭州安装 `aivideoProductionBackupRetention` 单元，生产入口必须显式传 `--production` 并匹配正式域名与发布账本。固定执行目录为 `/opt/aivideo/delivery-staging-retention` 和 `/opt/aivideo/delivery-production-retention`，用各自的 `-venv` 安装 `cosRequirements.txt` 固定的 COS SDK 版本，并确认可导入 `cryptography`。两侧在各自 root 私有的 `stagingBackupArchive.json` 或 `productionBackupArchive.json` 中填写 `bucket`、`region`、`secretId`、`secretKey`、`keyFile`。香港凭据仅允许访问 `aivideoReleaseBackups/hk/retention/`，杭州凭据仅允许访问 `aivideoReleaseBackups/hz/retention/`，不得删除已提交对象。每个环境各有独立的 32 字节加密密钥，属主 root，权限 0600。启用定时器前先用隔离样本验证上传、私有访问检查和恢复。
 
