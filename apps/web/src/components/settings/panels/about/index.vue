@@ -4,6 +4,9 @@
       <div class="brandMark"><img class="brandLogo" :class="{ upstreamLogo: !isBrowserWeb }" :src="appBrand.logoUrl" alt="" /></div>
       <div class="brandInfo">
         <h3>{{ appBrand.name }}</h3>
+        <div v-if="isBrowserWeb" class="brandMeta">
+          <span>{{ canvasRelease.name }} v{{ canvasRelease.version }}</span>
+        </div>
         <div v-if="!isBrowserWeb" class="brandMeta">
           <span v-if="currentVersion">v{{ currentVersion }}</span>
           <el-tag v-if="clientBuild?.channel || snapshot?.channel" type="info" size="small" round>{{ clientBuild?.channel || snapshot?.channel }}</el-tag>
@@ -244,6 +247,7 @@ import {
 } from "@tabler/icons-vue";
 import { appBrand, isBrowserWeb } from "@/lib/branding";
 import upstreamLicense from "../../../../../../../LICENSE?raw";
+import { canvasRelease } from "../../../../../../../canvasRelease";
 import type { Sponsor } from "@toonflow/server/channel";
 import http from "@/lib/http";
 import { saveSettings } from "@/stores/settings";

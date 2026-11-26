@@ -15,6 +15,36 @@ import { remakeMovieOptions } from "../../../../../packages/nodes/frameAnalysisN
 import { createSceneDetector } from "../../../../../packages/nodes/frameAnalysisNode/src/sceneDetector";
 import { combinationCount, combinationAt, renderBatch, type MashupClip } from "../../../../../packages/nodes/mashupNode/src/mashupBatch";
 import { initializeHostedSharedCanvasNodes, initializeTrustedNodes, trustedNodeNames } from "./initialize";
+import { canvasRelease } from "../../../../../canvasRelease";
+
+test("delivery identity includes a Canvas product version distinct from the platform version", async () => {
+  const sourceSha = "a".repeat(40);
+  const image = `ghcr.io/perfectuser21/zenithjoy-toonflow@sha256:${"b".repeat(64)}`;
+  const previousSha = process.env.TOONFLOW_RELEASE_SHA;
+  const previousImage = process.env.TOONFLOW_RELEASE_IMAGE;
+  const app = express();
+  app.locals.appVersion = "2.0.0";
+  app.use("/api/delivery/identity", (await import("../../routes/delivery/identity")).default);
+  const server = app.listen(0, "127.0.0.1");
+  try {
+    await once(server, "listening");
+    process.env.TOONFLOW_RELEASE_SHA = sourceSha;
+    process.env.TOONFLOW_RELEASE_IMAGE = image;
+    const address = server.address();
+    if (!address || typeof address === "string") throw Error("缺少验收端口");
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/delivery/identity`);
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.data).toMatchObject({ sourceSha, image, product: canvasRelease, platformVersion: "2.0.0" });
+    expect(body.data.product.version).toMatch(/^\d+\.\d+\.\d+$/);
+  } finally {
+    if (previousSha === undefined) delete process.env.TOONFLOW_RELEASE_SHA;
+    else process.env.TOONFLOW_RELEASE_SHA = previousSha;
+    if (previousImage === undefined) delete process.env.TOONFLOW_RELEASE_IMAGE;
+    else process.env.TOONFLOW_RELEASE_IMAGE = previousImage;
+    server.close();
+  }
+});
 
 test("existing workspaces receive trusted nodes from each release", async () => {
   const root = await mkdtemp(join(tmpdir(), "toonflowTrustedNodes"));
@@ -808,6 +838,13 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       const invitation = await post({ action: "createInvitation", organizationId, teamId }) as { code: string };
       return { organizationId, accountId, invitation: invitation.code };
     }, ownerToken, advertiserId);
+    await existing.page.waitForSelector('button[aria-label="设置"]', { visible: true });
+    await existing.page.click('button[aria-label="设置"]');
+    await existing.page.waitForSelector('button[aria-label="关于"]', { visible: true });
+    await existing.page.click('button[aria-label="关于"]');
+    await existing.page.waitForSelector(".about .brandMeta", { visible: true });
+    expect(await existing.page.$eval(".about .brandMeta", node => node.textContent?.trim()))
+      .toBe(`${canvasRelease.name} v${canvasRelease.version}`);
     await existing.context.close();
 
     const selectedAccount = `.qianchuanUploadNode .accountInput select option:checked[value=${JSON.stringify(organization.accountId)}]`;

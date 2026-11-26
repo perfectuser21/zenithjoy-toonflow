@@ -10,6 +10,7 @@ on:
       - 'bun.lock'
       - 'package.json'
       - 'appVersion.ts'
+      - 'canvasRelease.ts'
       - 'electrobun.config.ts'
       - 'tsconfig.base.json'
       - 'Dockerfile'
