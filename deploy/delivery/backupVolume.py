@@ -62,6 +62,14 @@ def compactRestoreScratch(payload, snapshot):
     return True
 
 
+def sealRestoreSnapshot(payload, snapshot):
+    snapshotHash = digest(snapshot)
+    compacted = compactRestoreScratch(payload, snapshot)
+    if digest(snapshot) != snapshotHash:
+        raise RuntimeError('restore scratch cleanup changed snapshot bytes')
+    return snapshotHash, compacted
+
+
 def main():
     if os.geteuid() != 0:
         raise RuntimeError('root required')
@@ -152,7 +160,8 @@ def main():
         with open(snapshot, 'rb') as durable:
             os.fsync(durable.fileno())
         # 原始字节级核对，连同 ext4 project id、配额及 xattr 一起核验。
-        command(['cmp', '--silent', str(volume), str(snapshot)], timeout=60)
+        compareTimeout = 160 if config['environment'] == 'production' else 60
+        command(['cmp', '--silent', str(volume), str(snapshot)], timeout=compareTimeout)
         # 手动解冻成功之前保留独立兜底，避免SIGKILL留下永久冻结的卷。
         command(['fsfreeze', '--unfreeze', data], timeout=15)
         frozen = False
@@ -202,15 +211,12 @@ def main():
         proof = json.loads(validation.stdout)
         if proof.get('snapshot') != str(snapshot) or proof.get('quotaRestoreVerified') is not True:
             raise RuntimeError('quota restore has not been verified')
-        snapshotHash = digest(snapshot)
+        snapshotHash, scratchCompacted = sealRestoreSnapshot(payload, snapshot)
         receipt = {'backupId':key, 'backupVerified':True, 'restoreVerified':True,
                    'quotaRestoreVerified':True,
                    'sha256':snapshotHash, 'filesVerifiedReadable':fileCount,
-                   'databasesVerified':databaseCount, 'storage':storage, 'sourceSha':request['sourceSha']}
-        if config['environment'] == 'staging':
-            receipt['restoreScratchCompacted'] = compactRestoreScratch(payload, snapshot)
-            if digest(snapshot) != snapshotHash:
-                raise RuntimeError('restore scratch cleanup changed snapshot bytes')
+                   'databasesVerified':databaseCount, 'storage':storage, 'sourceSha':request['sourceSha'],
+                   'restoreScratchCompacted':scratchCompacted}
         command(['umount', str(payload)])
         capsuleMounted = False
         capsuleHash = digest(capsule)

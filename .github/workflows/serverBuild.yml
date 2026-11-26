@@ -422,6 +422,20 @@ jobs:
                       command.assert_not_called()
                   self.assertEqual(self.snapshot.read_bytes(), b'original backup')
 
+              def test_sealing_keeps_the_verified_snapshot_bytes(self):
+                  with patch.object(backupVolume, 'command', return_value=''):
+                      digest, compacted = backupVolume.sealRestoreSnapshot(self.payload, self.snapshot)
+                  self.assertEqual(digest, backupVolume.digest(self.snapshot))
+                  self.assertTrue(compacted)
+
+              def test_sealing_rejects_a_changed_snapshot(self):
+                  def changeSnapshot(payload, snapshot):
+                      snapshot.write_bytes(b'changed')
+                      return True
+                  with patch.object(backupVolume, 'compactRestoreScratch', side_effect=changeSnapshot):
+                      with self.assertRaisesRegex(RuntimeError, 'changed snapshot bytes'):
+                          backupVolume.sealRestoreSnapshot(self.payload, self.snapshot)
+
           class StagingBackupRetentionTest(unittest.TestCase):
               def setUp(self):
                   directory = tempfile.TemporaryDirectory()
