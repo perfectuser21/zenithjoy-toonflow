@@ -49,26 +49,6 @@ test("Aliyun terminal image failures retain only the status, safe code and a val
   expect(aliyunImageFailure({ output: { task_status: "RUNNING" } })).toBeUndefined();
 });
 
-test("same-origin remote standalone canvas can submit a diagnostic", async () => {
-  const app = express();
-  app.use(express.json());
-  app.use("/diagnostic", (await import("../../routes/workspaces/canvasDiagnostic")).default);
-  const server = app.listen(0, "127.0.0.1");
-  try {
-    await once(server, "listening");
-    const address = server.address();
-    if (!address || typeof address === "string") throw new Error("Missing standalone test address");
-    const headers = { host: "standalone.example.test", "content-type": "application/json", "x-toonflow-workspace": "1" };
-    const report = (origin: string) => fetch(`http://127.0.0.1:${address.port}/diagnostic`, {
-      method: "POST", headers: { ...headers, origin }, body: JSON.stringify({ stage: "render" }),
-    });
-    expect((await report("https://standalone.example.test")).status).toBe(200);
-    expect((await report("https://foreign.example.test")).status).toBe(403);
-  } finally {
-    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-  }
-});
-
 test("delivery identity includes a Canvas product version distinct from the platform version", async () => {
   const sourceSha = "a".repeat(40);
   const image = `ghcr.io/perfectuser21/zenithjoy-toonflow@sha256:${"b".repeat(64)}`;
@@ -1721,3 +1701,24 @@ test("guided remake restores fast cuts and keeps the source audio packets", asyn
     await rm(root, { recursive: true, force: true });
   }
 }, 45000);
+
+// The standalone route loads app config, so run this after the isolated canvas fixture.
+test("same-origin remote standalone canvas can submit a diagnostic", async () => {
+  const app = express();
+  app.use(express.json());
+  app.use("/diagnostic", (await import("../../routes/workspaces/canvasDiagnostic")).default);
+  const server = app.listen(0, "127.0.0.1");
+  try {
+    await once(server, "listening");
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Missing standalone test address");
+    const headers = { host: "standalone.example.test", "content-type": "application/json", "x-toonflow-workspace": "1" };
+    const report = (origin: string) => fetch(`http://127.0.0.1:${address.port}/diagnostic`, {
+      method: "POST", headers: { ...headers, origin }, body: JSON.stringify({ stage: "render" }),
+    });
+    expect((await report("https://standalone.example.test")).status).toBe(200);
+    expect((await report("https://foreign.example.test")).status).toBe(403);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
+});
