@@ -5,7 +5,7 @@
 generationRequest：generate API扁平请求（directory/mediaType/providerId/modelId/
 prompt及该媒体类型已有schema可选项），不允许taskId/nodeId/canvasPath。
 directory必须等于首个普通验收账号的工作区。staging必须生成视频。
-generationExpected：fileCount（1至4）、timeoutSeconds（1至420）、
+generationExpected：fileCount（1至4）、timeoutSeconds（香港视频1至600，其他1至420）、
 pollSeconds（1至30）；video/audio另必填minDuration/maxDuration。
 模型及供应商由root配置明确选择，不内置默认模型或假供应商。
 香港另要求 studioImageVerification={modelId,gatewayHost,maxPoints}，以第二个专用账号
@@ -171,8 +171,9 @@ def validateGenerationConfig(config):
     expected = config.get('generationExpected')
     require(isinstance(expected, dict) and {'fileCount', 'timeoutSeconds', 'pollSeconds'} <= set(expected),
             '缺少generationExpected真实产物验收配置')
+    waitLimit = 600 if config['environment'] == 'staging' and mediaType == 'video' else 420
     require(type(expected['fileCount']) is int and 1 <= expected['fileCount'] <= 4
-            and type(expected['timeoutSeconds']) is int and 1 <= expected['timeoutSeconds'] <= 420
+            and type(expected['timeoutSeconds']) is int and 1 <= expected['timeoutSeconds'] <= waitLimit
             and type(expected['pollSeconds']) is int and 1 <= expected['pollSeconds'] <= 30,
             '生成验收文件数或等待时间配置缺失/非法')
     if mediaType != 'image':

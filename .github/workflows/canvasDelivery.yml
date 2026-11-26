@@ -17,6 +17,8 @@ on:
       - '.dockerignore'
       - 'deploy/**'
       - '.github/workflows/candidateImage.yml'
+      # Host delivery tools are installed and checked before a manual release.
+      - '!deploy/delivery/**'
       - '!apps/**/*.test.ts'
       - '!packages/**/*.test.ts'
   workflow_dispatch:

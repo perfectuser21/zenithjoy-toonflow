@@ -142,6 +142,19 @@ def resolvedTransaction(state, journal, environment):
             and 'receipt' not in transaction)
 
 
+def stagingGenerationJournals(state, key):
+    video = rootJson(state / ('generation-' + key + '.json'), private=True)
+    require(video.get('phase') in ('submitted', 'generated', 'completed'), '原视频提交结果未知')
+    studioFile = state / ('studioImageGeneration-' + key + '.json')
+    if video['phase'] != 'completed':
+        # The verifier durably completes the video before it can reserve the image task.
+        require(not studioFile.exists() and not studioFile.is_symlink(), '原视频未完成前出现图片任务记录')
+        return [('generation', video)]
+    studio = rootJson(studioFile, private=True)
+    require(studio.get('phase') in ('submitted', 'generated', 'completed'), '原图片提交结果未知')
+    return [('generation', video), ('studioImageGeneration', studio)]
+
+
 def rejectStagingVerification(key):
     # This operation is available only through the root operator CLI. The restricted
     # release and witness wrappers accept no arguments and do not route stdin here.
@@ -179,15 +192,14 @@ def rejectStagingVerification(key):
         studioPayload, _, studioAccount = studioGenerationCase(business)
         verifyContainer(config, request, business['localOrigin'])
         bootId = verifyPublicCandidate(newPublicClient(business), localClient(business), request)
-        cases = [('generation-', payload, account), ('studioImageGeneration-', studioPayload, studioAccount)]
+        cases = {'generation': (payload, account), 'studioImageGeneration': (studioPayload, studioAccount)}
         outcomes = []
-        for prefix, modelRequest, owner in cases:
-            job = rootJson(state / (prefix + key + '.json'), private=True)
+        for case, job in stagingGenerationJournals(state, key):
+            modelRequest, owner = cases[case]
             taskId = job.get('taskId', '')
             hashed = hashlib.sha256(json.dumps({**modelRequest, 'taskId': taskId}, sort_keys=True).encode()).hexdigest()
             require(job.get('request') == {field: request[field] for field in releaseIdentityFields}
                     and job.get('bootId') == bootId and job.get('publicOrigin') == config['publicOrigin']
-                    and job.get('phase') in ('generated', 'completed')
                     and job.get('requestSha256') == hashed and re.fullmatch(r'[a-f0-9-]{36}', taskId),
                     '原模型任务身份或阶段无法核对')
             client = newPublicClient(business)
@@ -197,7 +209,7 @@ def rejectStagingVerification(key):
                                           'resume': False, 'readOnly': True})
             require(isinstance(status, list) and len(status) == 1 and status[0].get('taskId') == taskId
                     and status[0].get('state') == 'succeeded', '原模型任务尚无确定终态')
-            outcomes.append({'case': prefix.rstrip('-'), 'taskId': taskId, 'state': 'succeeded'})
+            outcomes.append({'case': case, 'taskId': taskId, 'state': 'succeeded'})
         verifyContainer(config, request, business['localOrigin'])
         verifyPublicCandidate(newPublicClient(business), localClient(business), request, bootId)
         rejection = {'result': 'verificationRejected', 'environment': 'staging',
