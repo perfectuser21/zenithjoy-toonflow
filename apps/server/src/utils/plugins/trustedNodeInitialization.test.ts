@@ -35,8 +35,8 @@ test("delivery identity includes a Canvas product version distinct from the plat
     const response = await fetch(`http://127.0.0.1:${address.port}/api/delivery/identity`);
     expect(response.status).toBe(200);
     const body = await response.json();
-    expect(body.data).toMatchObject({ sourceSha, image, product: canvasRelease, platformVersion: "2.0.0" });
-    expect(body.data.product.version).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(body).toMatchObject({ data: { sourceSha, image, product: canvasRelease, platformVersion: "2.0.0" } });
+    expect(canvasRelease.version).toMatch(/^\d+\.\d+\.\d+$/);
   } finally {
     if (previousSha === undefined) delete process.env.TOONFLOW_RELEASE_SHA;
     else process.env.TOONFLOW_RELEASE_SHA = previousSha;
