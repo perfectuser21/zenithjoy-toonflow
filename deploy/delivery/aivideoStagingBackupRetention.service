@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3 -B /opt/aivideo/delivery-staging-retention/stagingBackupRetention.py
+ExecStart=/opt/aivideo/delivery-staging-retention-venv/bin/python -B /opt/aivideo/delivery-staging-retention/stagingBackupRetention.py
 TimeoutStartSec=45min
 Nice=10
 IOSchedulingClass=idle

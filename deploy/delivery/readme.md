@@ -25,7 +25,7 @@
 
 独立的 `aivideoStagingBackupRetention.timer` 定期运行 `stagingBackupRetention.py`。自动清理只处理已完成发布中被后继版本替代、没有增量恢复点引用的完整胶囊。最新回滚、失败事务和旧链的依赖都保留。它先写入私有 COS 的香港专用前缀，使用 AES-GCM 加密并从 COS 流式读回、解密，校验大小和 SHA-256，再持发布锁重新核对并持久化 `coldArchive.json` 后释放本机副本。归档失败时保留本机文件，下次重试时复用同一备份对象。
 
-只在香港以 root 安装已审查的主机执行器及这两个 systemd 单元。固定执行目录为 `/opt/aivideo/delivery-staging-retention`，Python 需可导入 `qcloud_cos` 和 `cryptography`。在 root 私有配置 `/etc/aivideo/stagingBackupArchive.json` 中填写 `bucket`、`region`、`secretId`、`secretKey`、`keyFile`。凭据仅允许访问 `aivideoReleaseBackups/hk/retention/`，不得删除已提交对象。加密密钥为独立保存的 32 字节文件，属主 root，权限 0600。启用定时器前先用隔离样本验证上传、私有访问检查和恢复。生产站不启用这两个单元。
+只在香港以 root 安装已审查的主机执行器及这两个 systemd 单元。固定执行目录为 `/opt/aivideo/delivery-staging-retention`。在 `/opt/aivideo/delivery-staging-retention-venv` 安装 `cosRequirements.txt` 固定的 COS SDK 版本，确认支持 `ForbidOverwrite`，并确认 Python 可导入 `cryptography`。在 root 私有配置 `/etc/aivideo/stagingBackupArchive.json` 中填写 `bucket`、`region`、`secretId`、`secretKey`、`keyFile`。凭据仅允许访问 `aivideoReleaseBackups/hk/retention/`，不得删除已提交对象。加密密钥为独立保存的 32 字节文件，属主 root，权限 0600。启用定时器前先用隔离样本验证上传、私有访问检查和恢复。生产站不启用这两个单元。
 
 恢复时使用 `stagingBackupRetention.py --restore <backupId> <新输出路径>`。程序读取 `coldArchive.json`，下载、解密并核对原始胶囊哈希，写入不覆盖已有文件的恢复目标。验真后再进入现有配额卷回滚流程。
 

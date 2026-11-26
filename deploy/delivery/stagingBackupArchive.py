@@ -93,7 +93,8 @@ class CosArchive:
         self.master = rootFile(config['keyFile'], private=True).read_bytes()
         require(len(self.master) == 32, 'archive key must be 32 bytes')
         self.client = CosS3Client(CosConfig(Region=self.region, SecretId=config['secretId'],
-                                            SecretKey=config['secretKey'], Scheme='https', Timeout=45))
+                                            SecretKey=config['secretKey'], Scheme='https', Timeout=45,
+                                            Endpoint='cos-internal.accelerate.tencentcos.cn'))
 
     def upload(self, capsule, receipt):
         from qcloud_cos.cos_exception import CosServiceError
