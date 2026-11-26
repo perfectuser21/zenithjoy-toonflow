@@ -7,6 +7,7 @@ import { lstat, readFile, readdir, unlink } from "@toonflow/file";
 import type { Request, Response, NextFunction } from "express";
 import buildRoute from "@/core";
 import { errorFromCause } from "@/lib/responseFormat";
+import { reportDiagnostic, workspaceErrorDiagnostic } from "@/lib/diagnosticReport";
 import desktopRequest from "@/lib/desktop";
 import { getRuntimePlatform } from "@/lib/platform";
 import initializePlugins, { initializeHostedSharedCanvasNodes, initializeTrustedNodes } from "@/utils/plugins/initialize";
@@ -125,6 +126,7 @@ export async function createApp({
   app.use(multiTenantAccess);
   app.use("/a2a", express.json({ limit: "2mb" }));
   app.use(["/api/workspaces/files/write", "/api/assets/save"], express.raw({ type: "application/octet-stream", limit: "100mb" }));
+  app.use("/api/workspaces/canvasDiagnostic", express.json({ limit: "1kb" }));
   app.use(express.json({ limit: "100mb" }));
   app.use(express.urlencoded({ extended: true, limit: "100mb" }));
   app.use("/api/ai/media/background", async (req, res, next) => {
@@ -169,8 +171,10 @@ export async function createApp({
   // 错误处理
   app.use((err: Error & { status?: number }, request: Request, response: Response, next: NextFunction) => {
     if (response.headersSent) return next(err);
-    console.error(err);
     const body = errorFromCause(err);
+    const diagnostic = workspaceErrorDiagnostic(request.path, body.code, err);
+    if (diagnostic) response.set("X-Toonflow-Diagnostic-Id", reportDiagnostic(diagnostic));
+    if (!diagnostic || body.code >= 500) console.error(err);
     response.status(body.code).json(body);
   });
 

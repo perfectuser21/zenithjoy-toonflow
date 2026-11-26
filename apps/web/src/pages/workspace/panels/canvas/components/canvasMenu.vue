@@ -73,6 +73,7 @@
 </template>
 
 <script setup lang="ts">
+import { describeCanvasFailure } from "../canvasDiagnostic";
 import axios from "axios";
 import { locale, translate } from "@toonflow/i18n/vue";
 import { computed, inject, nextTick, onBeforeUnmount, ref, shallowRef, watch, type ShallowRef } from "vue";
@@ -358,7 +359,10 @@ watch(() => props.directory, async (directory, _previous, onCleanup) => {
   } catch (err) {
     if (!cancelled) {
       loadError.value = errorMessage(err, "读取画布失败");
-      if (!props.initialCanvasId) ElMessage.error(loadError.value);
+      const detail = await describeCanvasFailure("load", err, "读取画布失败");
+      if (cancelled) return;
+      loadError.value = detail;
+      if (!props.initialCanvasId) ElMessage.error(detail);
     }
   } finally {
     if (!cancelled) { busy.value = false; initialized.value = true; }

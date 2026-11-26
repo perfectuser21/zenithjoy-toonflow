@@ -1,3 +1,4 @@
+import { aliyunImageFailure } from "@/lib/diagnosticReport";
 import { t, translateMessage, validationOptions } from "@/lib/i18n";
 
 import { createHash, randomUUID } from "node:crypto";
@@ -643,6 +644,11 @@ export async function loadMediaProviderSource(source: string, config: Record<str
             const readJson = response.json;
             Object.assign(response, { json: async function(this: Response) {
               const result = await readJson.call(this);
+              if (this === response && taskId && id === "aliyun"
+                && (name === "generateImage" || (name === "resumeTask" && (request as ProviderTaskData).kind === "aliyunQwenImage"))) {
+                const detail = aliyunImageFailure(result);
+                if (detail) console.info(JSON.stringify({ event: "canvasAliyunImageFailure", taskId, ...detail }));
+              }
               if (this === response && requestId === requestCount && !overlappingRequests && result && typeof result === "object") {
                 const data = result as Record<string, unknown>;
                 const states = [data, data.data, data.task].filter((item): item is Record<string, unknown> => !!item && typeof item === "object");

@@ -132,7 +132,7 @@
 
 <script setup lang="ts">
 import { t, translate } from "@toonflow/i18n/vue";
-import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, onScopeDispose, provide, ref, shallowReactive, shallowRef, watch } from "vue";
+import { computed, markRaw, nextTick, onBeforeUnmount, onErrorCaptured, onMounted, onScopeDispose, provide, ref, shallowReactive, shallowRef, watch } from "vue";
 import axios from "axios";
 import { debounce } from "lodash-es";
 import { ElMessage } from "element-plus";
@@ -173,6 +173,7 @@ import { readClipboardFiles, readClipboardText, writeClipboardImage } from "@/li
 import nodeMenu from "./components/nodeMenu.vue";
 import remoteNode from "./components/remoteNode.vue";
 import canvasMenu from "./components/canvasMenu.vue";
+import { describeCanvasFailure } from "./canvasDiagnostic";
 import canvasControls from "./components/canvasControls.vue";
 import canvasEmpty from "./components/canvasEmpty.vue";
 import canvasViewportHint from "./components/canvasViewportHint.vue";
@@ -249,6 +250,15 @@ const flow = useVueFlow(props.runtimeKey);
 const nodeDocument: NodeDocumentContext = { targets: shallowReactive(new Map()), mounts: new Map(), states: shallowReactive(new Map()) };
 const canvasDirty = ref(false);
 const canvasSaveError = ref("");
+let lastRenderReport = 0;
+onErrorCaptured((_cause, _instance, phase) => {
+  if (!["0", "1", "setup function", "render function"].includes(phase)
+    || !props.active || Date.now() - lastRenderReport < 60_000) return;
+  lastRenderReport = Date.now();
+  void describeCanvasFailure("render", undefined, "画布显示失败").then(detail => {
+    if (props.active) ElMessage.error({ message: detail, duration: 0, showClose: true });
+  });
+});
 const documentObservers = new Set<() => void>();
 onScopeDispose(() => { for (const release of documentObservers) release(); });
 provide("nodeDocument", nodeDocument);
@@ -708,14 +718,8 @@ const saveCanvas = debounce((directory: string, fileName: string) => {
       if (revision === saveRevision) canvasDirty.value = false;
     } catch (err) {
       saveError = err;
-      canvasSaveError.value = axios.isAxiosError<{ message?: string }>(err) ? err.response?.data.message || err.message : err instanceof Error ? err.message : "画布保存失败";
-      ElMessage.error(
-        axios.isAxiosError<{ message?: string }>(err)
-          ? err.response?.data.message || "画布保存失败"
-          : err instanceof Error
-          ? err.message
-          : "画布保存失败"
-      );
+      canvasSaveError.value = await describeCanvasFailure("save", err, "画布保存失败");
+      ElMessage.error(canvasSaveError.value);
     }
   });
 }, 500);

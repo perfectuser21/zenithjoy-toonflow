@@ -1257,6 +1257,27 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
         expect(sessionCookie?.session).toBe(true);
         await tenantPage.waitForSelector(".workspacePage:not([inert]) .canvasPanel:not([inert]), .el-result", { visible: true, timeout: 15000 });
         if (!simulateCatalogOutage) {
+          const diagnostics = await tenantPage.evaluate(async directory => {
+            const headers = { "Content-Type": "application/json", "x-toonflow-workspace": "1" };
+            const missing = await fetch("/api/workspaces/files/list?" + new URLSearchParams({ directory: directory + "/missingDiagnosticFixture" }), { headers });
+            const report = (body: object, requestHeaders: Record<string, string> = headers) => fetch("/api/workspaces/canvasDiagnostic", {
+              method: "POST", headers: requestHeaders, body: JSON.stringify(body),
+            });
+            const denied = await report({ stage: "load" }, { "Content-Type": "application/json" });
+            const rejected = await report({ stage: "load", path: directory });
+            const accepted = await report({ stage: "render" });
+            const receipt = await accepted.json();
+            return {
+              missing: missing.status, missingId: missing.headers.get("x-toonflow-diagnostic-id"),
+              denied: denied.status, rejected: rejected.status, accepted: accepted.status,
+              reportedId: receipt.data?.diagnosticId,
+            };
+          }, customerProject.directory);
+          const uuidPattern = /^[a-f0-9-]{36}$/i;
+          expect(diagnostics).toMatchObject({ missing: 404, denied: 403, rejected: 400, accepted: 200 });
+          expect(diagnostics.missingId).toMatch(uuidPattern);
+          expect(diagnostics.reportedId).toMatch(uuidPattern);
+          expect(diagnostics.missingId).not.toBe(diagnostics.reportedId);
           const guided = await tenantPage.evaluate(async input => {
             const headers = { "Content-Type": "application/json", "x-toonflow-workspace": "1" };
             const post = (path: string, body: unknown) => fetch(path, { method: "POST", headers, body: JSON.stringify(body) });
