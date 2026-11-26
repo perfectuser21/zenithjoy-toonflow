@@ -53,6 +53,8 @@ def compactRestoreScratch(payload, snapshot):
         if command(['losetup', '--associated', str(clone)]).strip():
             return False
         clone.unlink()
+        # Commit the unlinked blocks before FITRIM enumerates free space.
+        command(['sync', '-f', str(payload)])
         command(['fstrim', str(payload)], timeout=120)
     except (OSError, subprocess.SubprocessError):
         # A diagnostic clone or untrimmed free blocks can still be retained.
