@@ -106,11 +106,16 @@ jobs:
                   identity = {'sourceSha': 'a' * 40, 'image': 'image', 'bootId': 'current'}
                   evidence = {'environment': 'staging', 'origin': syncCanvasRelease.environments['staging'][0],
                               'sha': identity['sourceSha'], 'image': identity['image'], 'run': '123',
-                              'phase': 'verifying', 'failed': True, 'verified': False, 'boot': None,
+                              'phase': 'verifying', 'rejected': False, 'verified': False, 'boot': None,
                               'started': '2026-11-26T03:44:42Z'}
-                  properties = syncCanvasRelease.releaseProperties('staging', identity, evidence)
-                  self.assertEqual(properties['香港测试站'], syncCanvasRelease.select('完整验收未通过'))
-                  self.assertNotIn('杭州正式站', properties)
+                  for diagnostic in ({'exit': 1}, {'exit': 2}, {'timedOut': True}, {}):
+                      with self.subTest(diagnostic=diagnostic):
+                          properties = syncCanvasRelease.releaseProperties('staging', identity, {
+                              **evidence, 'diagnostic': diagnostic,
+                          })
+                          status = '完整验收未通过' if diagnostic else '验收中'
+                          self.assertEqual(properties['香港测试站'], syncCanvasRelease.select(status))
+                          self.assertNotIn('杭州正式站', properties)
                   with self.assertRaises(ValueError):
                       syncCanvasRelease.releaseProperties('staging', identity, {
                           **evidence, 'phase': 'completed', 'verified': True, 'boot': 'stale',

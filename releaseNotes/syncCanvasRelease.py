@@ -35,11 +35,15 @@ for file in state.glob('[0-9]*-[0-9]*.json'):
 assert rows, 'running image missing from release ledger'
 _,file,row=max(rows,key=lambda entry:entry[0])
 request=row['request']
-failure=state/('diagnostic-'+file.name)
+diagnostics=[state/('diagnostic-'+file.name), *state.glob('diagnostic-'+file.stem+'-*.json')]
+current=[entry for entry in diagnostics if entry.exists()
+         and entry.stat().st_mtime >= row.get('verificationResumedAt', 0)]
+diagnostic=json.loads(max(current,key=lambda entry:entry.stat().st_mtime).read_text()) if current else {}
 receipt=row.get('receipt') or {}
 print(json.dumps({'environment':config['environment'],'origin':config['publicOrigin'],
     'sha':request['sourceSha'],'image':request['image'],'run':request['runId'],
-    'phase':row['phase'],'failed':failure.exists() and json.loads(failure.read_text()).get('exit')==1,
+    'phase':row['phase'],'diagnostic':{'exit':diagnostic.get('exit'),'timedOut':diagnostic.get('timedOut')},
+    'rejected':(state/('rejected-'+file.name)).exists(),
     'verified':receipt.get('businessVerified') is True,'boot':receipt.get('bootId'),
     'started':live['State']['StartedAt']}))
 '''
@@ -75,7 +79,10 @@ def releaseProperties(env, identity, evidence):
     if evidence['phase'] == 'completed' and evidence['verified'] and evidence['boot'] == identity['bootId']:
         status = '验收通过' if env == 'staging' else '已上线'
     elif evidence['phase'] == 'verifying':
-        status = '完整验收未通过' if evidence['failed'] else '验收中'
+        diagnostic = evidence['diagnostic']
+        exitCode = diagnostic.get('exit')
+        failed = evidence['rejected'] or diagnostic.get('timedOut') is True or (type(exitCode) is int and exitCode != 0)
+        status = '完整验收未通过' if failed else '验收中'
     else:
         raise ValueError('release ledger has no current verification state')
     properties = {stateField: select(status), linkField: {'url': releaseRuns + evidence['run']}}
