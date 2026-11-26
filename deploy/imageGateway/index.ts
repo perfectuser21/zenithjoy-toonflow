@@ -4,6 +4,8 @@ const modelId = "gpt-image-2.5-sunburst";
 const upstreamOrigin = "https://api.openai.com";
 const maxReferenceImages = 16;
 const maxEncodedImageBytes = 20 * 1024 * 1024;
+const maxResponseBytes = 34 * 1024 * 1024;
+const upstreamTimeoutMs = 270_000;
 const generations = "/v1/images/generations";
 const edits = "/v1/images/edits";
 const validDimensions = new Set(["1024x1024", "1536x1024", "1024x1536", "1536x864", "864x1536",
@@ -25,6 +27,26 @@ function authorized(header: string | null) {
   if (!header) return false;
   const supplied = Buffer.from(header);
   return supplied.length === expectedAuthorization.length && timingSafeEqual(supplied, expectedAuthorization);
+}
+
+async function readImageResponse(body: ReadableStream<Uint8Array>) {
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) return Buffer.concat(chunks, size);
+      size += value.byteLength;
+      if (size > maxResponseBytes) {
+        await reader.cancel();
+        throw new Error("图片响应体超出网关限制");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 function readImageUrl(value: unknown) {
@@ -56,7 +78,7 @@ Bun.serve({
   port,
   maxRequestBodySize: maxEncodedImageBytes + 256 * 1024,
   idleTimeout: 210,
-  async fetch(request) {
+  async fetch(request, server) {
     const { pathname, search } = new URL(request.url);
     if (search || (pathname !== generations && pathname !== edits)) return error("未找到图片接口", 404);
     if (request.method !== "POST") return error("图片接口仅接受 POST", 405);
@@ -73,27 +95,37 @@ Bun.serve({
     try { body = parseImageRequest(await request.json(), pathname === edits); }
     catch (cause) { return error(cause instanceof SyntaxError ? "图片请求 JSON 无效" : cause instanceof Error ? cause.message : "图片请求无效", 400, headers); }
     const operation = pathname === edits ? "edit" : "generate";
+    const deadline = AbortSignal.timeout(upstreamTimeoutMs);
+    const signal = AbortSignal.any([request.signal, deadline]);
+    server.timeout(request, 0);
+    let upstreamRequestId: string | undefined;
     try {
       const upstream = await fetch(new URL(pathname, upstreamOrigin), {
         method: "POST",
         headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json", "X-Client-Request-Id": requestId },
         body: JSON.stringify(body),
         redirect: "error",
-        signal: AbortSignal.any([request.signal, AbortSignal.timeout(180000)]),
+        signal,
       });
       const requestHeader = upstream.headers.get("x-request-id");
-      const upstreamRequestId = requestHeader && /^req_[a-zA-Z0-9_-]{1,120}$/.test(requestHeader) ? requestHeader : undefined;
-      console.info(JSON.stringify({ event: "openaiImageGateway", requestId, upstreamRequestId, model: modelId, operation, status: upstream.status }));
+      upstreamRequestId = requestHeader && /^req_[a-zA-Z0-9_-]{1,120}$/.test(requestHeader) ? requestHeader : undefined;
       if (upstreamRequestId) headers.set("x-request-id", upstreamRequestId);
-      if (!upstream.ok || !upstreamRequestId || !upstream.headers.get("content-type")?.startsWith("application/json")) {
+      if (!upstream.ok || !upstreamRequestId || !upstream.body || !upstream.headers.get("content-type")?.startsWith("application/json")) {
         await upstream.body?.cancel().catch(() => {});
+        console.info(JSON.stringify({ event: "openaiImageGateway", requestId, upstreamRequestId, model: modelId, operation, status: upstream.status, phase: "invalidResponse" }));
         return error(`OpenAI 图片接口响应失败 (${upstream.status})`, upstream.status >= 400 && upstream.status <= 599 ? upstream.status : 502, headers);
       }
+      const output = await readImageResponse(upstream.body);
+      signal.throwIfAborted();
+      console.info(JSON.stringify({ event: "openaiImageGateway", requestId, upstreamRequestId, model: modelId, operation, status: upstream.status, phase: "bodyComplete", bytes: output.length }));
       headers.set("content-type", "application/json");
-      return new Response(upstream.body, { headers });
+      return new Response(output, { headers });
     } catch {
-      console.info(JSON.stringify({ event: "openaiImageGateway", requestId, model: modelId, operation, status: "networkError" }));
-      return error("OpenAI 图片接口暂时不可达", 502, headers);
+      const status = deadline.aborted ? 504 : 502;
+      console.info(JSON.stringify({ event: "openaiImageGateway", requestId, upstreamRequestId, model: modelId, operation, status, phase: upstreamRequestId ? "bodyInterrupted" : "upstreamUnavailable" }));
+      return error(deadline.aborted ? "OpenAI 图片响应超时，请稍后查看任务状态" : "OpenAI 图片响应中断或不完整，请稍后查看任务状态", status, headers);
+    } finally {
+      server.timeout(request, 30);
     }
   },
 });

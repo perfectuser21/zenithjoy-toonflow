@@ -19,6 +19,7 @@ on:
       - '.github/workflows/candidateImage.yml'
       # Host delivery tools are installed and checked before a manual release.
       - '!deploy/delivery/**'
+      - '!deploy/imageGateway/**'
       - '!apps/**/*.test.ts'
       - '!packages/**/*.test.ts'
   workflow_dispatch:
