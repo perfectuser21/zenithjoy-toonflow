@@ -558,4 +558,4 @@ jobs:
           PY
           bun test apps/server/src/utils/plugins/trustedNodeInitialization.test.ts
       - name: Test simultaneous clip previews
-        run: bun test apps/server/src/utils/media/trimReadQueue.test.ts apps/server/src/lib/diagnosticReport.test.ts
+        run: bun test apps/server/src/utils/media/trimReadQueue.test.ts

@@ -16,6 +16,58 @@ import { createSceneDetector } from "../../../../../packages/nodes/frameAnalysis
 import { combinationCount, combinationAt, renderBatch, type MashupClip } from "../../../../../packages/nodes/mashupNode/src/mashupBatch";
 import { initializeHostedSharedCanvasNodes, initializeTrustedNodes, trustedNodeNames } from "./initialize";
 import { canvasRelease } from "../../../../../canvasRelease";
+import { aliyunImageFailure, browserCanvasDiagnosticSchema, workspaceErrorDiagnostic } from "../../lib/diagnosticReport";
+
+test("workspace errors identify the route and reason without retaining paths or error messages", () => {
+  const failure = Object.assign(new Error("user-project.txt"), { code: "WORKSPACE_NOT_FOUND" });
+  expect(workspaceErrorDiagnostic("/api/workspaces/files/list", 404, failure)).toEqual({
+    event: "canvasWorkspaceError", operation: "list", status: 404, reason: "WORKSPACE_NOT_FOUND",
+  });
+  expect(workspaceErrorDiagnostic("/api/workspaces/files/read", 404, { code: "ENOENT" })?.reason).toBe("ENOENT");
+  expect(workspaceErrorDiagnostic("/api/workspaces/files/write", 507, { code: "ENOSPC" })?.reason).toBe("ENOSPC");
+  expect(workspaceErrorDiagnostic("/api/workspaces/files/read", 403, failure)).toBeUndefined();
+  expect(workspaceErrorDiagnostic("/api/workspaces/files/mkdir", 409, { code: "EEXIST" })).toBeUndefined();
+  expect(workspaceErrorDiagnostic("/api/workspaces/files/private-project.txt", 500, failure)).toBeUndefined();
+});
+
+test("browser reports accept only a predefined canvas failure stage", () => {
+  for (const stage of ["load", "render", "save"]) {
+    expect(browserCanvasDiagnosticSchema.safeParse({ stage }).success).toBe(true);
+  }
+  expect(browserCanvasDiagnosticSchema.safeParse({ stage: "render", message: "project contents" }).success).toBe(false);
+  expect(browserCanvasDiagnosticSchema.safeParse({ stage: "private-path" }).success).toBe(false);
+});
+
+test("Aliyun terminal image failures retain only the status, safe code and a valid request ID", () => {
+  const requestId = "9526edbf-b95f-4dea-bc9c-129c349eaef1";
+  expect(aliyunImageFailure({
+    request_id: requestId, output: { task_status: "FAILED", code: "DataInspectionFailed", message: "private prompt" },
+  })).toEqual({ upstreamStatus: "FAILED", upstreamCode: "DataInspectionFailed", upstreamRequestId: requestId });
+  expect(aliyunImageFailure({
+    request_id: "Bearer secret", output: { task_status: "CANCELED", code: "invalid token", message: "private prompt" },
+  })).toEqual({ upstreamStatus: "CANCELED" });
+  expect(aliyunImageFailure({ output: { task_status: "RUNNING" } })).toBeUndefined();
+});
+
+test("same-origin remote standalone canvas can submit a diagnostic", async () => {
+  const app = express();
+  app.use(express.json());
+  app.use("/diagnostic", (await import("../../routes/workspaces/canvasDiagnostic")).default);
+  const server = app.listen(0, "127.0.0.1");
+  try {
+    await once(server, "listening");
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Missing standalone test address");
+    const headers = { host: "standalone.example.test", "content-type": "application/json", "x-toonflow-workspace": "1" };
+    const report = (origin: string) => fetch(`http://127.0.0.1:${address.port}/diagnostic`, {
+      method: "POST", headers: { ...headers, origin }, body: JSON.stringify({ stage: "render" }),
+    });
+    expect((await report("https://standalone.example.test")).status).toBe(200);
+    expect((await report("https://foreign.example.test")).status).toBe(403);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
+});
 
 test("delivery identity includes a Canvas product version distinct from the platform version", async () => {
   const sourceSha = "a".repeat(40);
