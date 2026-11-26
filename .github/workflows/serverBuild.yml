@@ -169,6 +169,24 @@ jobs:
 
 
           class StagingRejectionTest(unittest.TestCase):
+              def test_staging_rejection_reads_submitted_video_before_image_reservation(self):
+                  with tempfile.TemporaryDirectory() as directory:
+                      state = Path(directory)
+                      video = state / 'generation-42-1.json'
+                      studio = state / 'studioImageGeneration-42-1.json'
+                      with patch.object(releaseHost, 'rootJson', lambda path, private=False: json.loads(path.read_text())):
+                          video.write_text('{"phase":"submitted"}')
+                          self.assertEqual(releaseHost.stagingGenerationJournals(state, '42-1'),
+                                           [('generation', {'phase': 'submitted'})])
+                          studio.write_text('{"phase":"completed"}')
+                          with self.assertRaisesRegex(RuntimeError, '图片任务记录'):
+                              releaseHost.stagingGenerationJournals(state, '42-1')
+                          video.write_text('{"phase":"completed"}')
+                          self.assertEqual(len(releaseHost.stagingGenerationJournals(state, '42-1')), 2)
+                          video.write_text('{"phase":"prepared"}')
+                          with self.assertRaisesRegex(RuntimeError, '提交结果未知'):
+                              releaseHost.stagingGenerationJournals(state, '42-1')
+
               def test_rejection_allows_only_staging_to_move_forward_without_success_receipt(self):
                   with tempfile.TemporaryDirectory() as directory:
                       state = Path(directory)
