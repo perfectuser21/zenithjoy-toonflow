@@ -54,7 +54,7 @@
 import { computed, onMounted, ref } from "vue";
 import { ElButton, ElInput, ElOption, ElSelect } from "element-plus";
 import { IconSparkles } from "@tabler/icons-vue";
-import { getNodeModelIdentity, getNodeModelKey, nodeSkeleton, useNode, useNodeInputs, useNodeModelSelection, type NodeAiModel, type NodeHandle } from "@toonflow/nodes-scaffold/runtime";
+import { getNodeModelIdentity, getNodeModelKey, nodeSkeleton, preferredCreativeTextModel, useNode, useNodeInputs, useNodeModelSelection, type NodeAiModel, type NodeHandle } from "@toonflow/nodes-scaffold/runtime";
 
 defineOptions({
   inheritAttrs: false,
@@ -65,7 +65,6 @@ defineOptions({
   ] satisfies NodeHandle[],
 });
 
-const preferredModels = ["gpt-6.2-sol", "gpt-6.1-sol", "gpt-6.1-terra"];
 const { id, node, nodeProps, outputs, ai } = useNode({
   label: "Skill",
   outputs: { text: { dataType: "STRING", value: "" } },
@@ -104,12 +103,8 @@ async function loadModels() {
   try {
     models.value = await ai.getModels();
     if (!model.value) {
-      for (const preferred of preferredModels) {
-        const available = models.value.find(choice => choice.modelId === preferred);
-        if (!available) continue;
-        model.value = getNodeModelKey(available);
-        break;
-      }
+      const available = preferredCreativeTextModel(models.value);
+      if (available) model.value = getNodeModelKey(available);
     }
   } catch (error) {
     if (!(error instanceof Error) || error.name !== "AbortError") modelError.value = "模型列表读取失败，请重新打开下拉列表重试。";
