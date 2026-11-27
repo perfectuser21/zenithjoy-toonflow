@@ -964,9 +964,9 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     const originals = new Map(await Promise.all(clips.map(async clip => [clip.name, await readFile(join(project.directory, clip.url))] as const)));
     for (const index of [0, 49, 99]) {
       const path = join(project.directory, clips[index]!.url);
-      const details = execFileSync("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name,duration",
+      const details = execFileSync("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name,width,height,duration",
         "-of", "default=noprint_wrappers=1", path], { encoding: "utf8" });
-      expect(details).toContain("codec_name=h264");
+      expect(details).toContain("codec_name=h264\nwidth=1080\nheight=1920\n");
       expect(Number(details.match(/duration=(.+)/)?.[1])).toBeCloseTo(0.75, 2);
     }
     const concat = generating.page.locator(".videoConcatNode button.primary:not([disabled])");
@@ -999,7 +999,7 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     }, { timeout: 5000 }, wanNode);
 
     const concatPath = join(project.directory, (await savedNodeData("concat")).videoConcat.result.url);
-    const readPixel = (path: string, seconds: string) => ffmpeg("-ss", seconds, "-i", path, "-vf", "crop=4:4:28:28,scale=1:1",
+    const readPixel = (path: string, seconds: string) => ffmpeg("-ss", seconds, "-i", path, "-vf", "crop=4:4,scale=1:1",
       "-frames:v", "1", "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1");
     const mixed = join(project.directory, clips[0]!.url);
     const [red, redGreen, redBlue] = readPixel(mixed, "0.1");

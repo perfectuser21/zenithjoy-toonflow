@@ -179,11 +179,9 @@ async function resampleAudio(
   }
 }
 
-async function createVideoRenderer(first: Segment, countBytes: (size: number) => void) {
-  const width = Math.ceil(await first.video.getDisplayWidth() / 2) * 2;
-  const height = Math.ceil(await first.video.getDisplayHeight() / 2) * 2;
+async function createVideoRenderer({ width, height }: { width: number; height: number }, countBytes: (size: number) => void) {
   if (!await canEncodeVideo("avc", { width, height, quality: QUALITY_HIGH })) {
-    throw new Error("当前浏览器不支持以首段尺寸编码 H.264 视频，请换一个浏览器后重试");
+    throw new Error(`当前浏览器不支持编码 ${width} × ${height} 的 H.264 视频，请换一个浏览器后重试`);
   }
   const source = new VideoSampleSource({
     codec: "avc",
@@ -208,7 +206,11 @@ async function createVideoRenderer(first: Segment, countBytes: (size: number) =>
   } };
 }
 
-export async function concatVideo(clips: readonly Blob[], signal?: AbortSignal): Promise<Blob> {
+export async function concatVideo(
+  clips: readonly Blob[],
+  signal?: AbortSignal,
+  { resolution }: { resolution?: "1080p" } = {},
+): Promise<Blob> {
   signal?.throwIfAborted();
   if (clips.length < 2 || clips.length > maxConcatClips) throw new Error("请选择 2 至 6 个视频片段");
   if (clips.some(clip => !clip.size || clip.size > workspaceFileLimit)) {
@@ -250,8 +252,17 @@ export async function concatVideo(clips: readonly Blob[], signal?: AbortSignal):
       segments.push(await inspectClip(input, index + 1));
     }
     const first = segments[0]!;
-    const renderer = segments.some(clip => clip.videoFingerprint !== first.videoFingerprint)
-      ? await createVideoRenderer(first, countBytes)
+    const displayWidth = await first.video.getDisplayWidth();
+    const displayHeight = await first.video.getDisplayHeight();
+    const dimensions = resolution === "1080p"
+      ? displayWidth > displayHeight ? { width: 1920, height: 1080 } : { width: 1080, height: 1920 }
+      : { width: Math.ceil(displayWidth / 2) * 2, height: Math.ceil(displayHeight / 2) * 2 };
+    const needsResize = resolution === "1080p" && (
+      dimensions.width !== displayWidth || dimensions.height !== displayHeight
+      || dimensions.width !== first.videoConfig.codedWidth || dimensions.height !== first.videoConfig.codedHeight
+    );
+    const renderer = needsResize || segments.some(clip => clip.videoFingerprint !== first.videoFingerprint)
+      ? await createVideoRenderer(dimensions, countBytes)
       : undefined;
     const videoOutput = renderer ? null : new EncodedVideoPacketSource("avc");
     const firstWithAudio = segments.find(clip => clip.audioConfig);
