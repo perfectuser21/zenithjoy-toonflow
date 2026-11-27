@@ -2,6 +2,8 @@ import axios from "axios";
 import { normalizeLocale } from "@toonflow/i18n";
 import { computed, nextTick, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
+import { cloneDeep, isEqual } from "lodash-es";
+import { mergeSettings } from "./settingsMerge";
 import { getNodeModelKey, invalidateNodeModels, readNodeModels, subscribeNodeModels } from "@toonflow/nodes-scaffold/nodeAi";
 import { canvasShortcutFields, defaultCanvasShortcuts, getShortcutBindings, isShortcutAllowed, normalizeShortcut, type CanvasShortcuts } from "@/lib/canvasShortcuts";
 import { normalizeNodeMenu, type StoredNodeMenuItem } from "@toonflow/server/nodeMenu";
@@ -20,7 +22,10 @@ let settingsReady = false;
 let saveQueue = Promise.resolve();
 let applyingSettings = false;
 let multiTenantVersion = 0;
-let settingsRevision: number | undefined;
+type SettingsSnapshot = { settings: Record<string, unknown>; revision: number };
+let savedSettings: SettingsSnapshot | undefined;
+let settingsEditBase: Record<string, unknown> | undefined;
+let conflictShown = false;
 
 export const multiTenantEnabled = computed(() => settings.value.multiTenantEnabled === true);
 
@@ -179,20 +184,77 @@ subscribeNodeModels(type => {
   void refreshModelChoices().catch(error => { ElMessage.error(error instanceof Error ? error.message : "读取模型推理等级失败"); });
 });
 
+async function readSettings(signal?: AbortSignal) {
+  const { data, headers } = await axios.get("/api/settings/get", { signal, headers: { "Cache-Control": "no-cache", "x-toonflow-workspace": "1" } });
+  if (data.code !== 200 || !data.data || typeof data.data !== "object" || Array.isArray(data.data)) throw new Error("读取设置失败");
+  return { settings: data.data as Record<string, unknown>, revision: readSettingsRevision(headers["x-toonflow-settings-revision"]) };
+}
+
+function readSettingsRevision(header: unknown) {
+  if (typeof header !== "string" || !/^\d+$/.test(header)) return undefined;
+  const value = Number(header);
+  return Number.isSafeInteger(value) ? value : undefined;
+}
+
 export async function loadSettings() {
   if (settingsReady) return;
-  const { data, headers } = await axios.get("/api/settings/get", { headers: { "Cache-Control": "no-cache", "x-toonflow-workspace": "1" } });
+  const snapshot = await readSettings();
   if (settingsReady) return;
-  if (data.code !== 200 || !data.data || typeof data.data !== "object" || Array.isArray(data.data)) {
-    throw new Error("读取设置失败");
+  if (snapshot.revision !== undefined) {
+    savedSettings = { settings: cloneDeep(snapshot.settings), revision: snapshot.revision };
+    settingsEditBase = savedSettings.settings;
   }
-  settings.value = data.data;
-  settingsRevision = headers["x-toonflow-settings-revision"] === undefined ? undefined : Number(headers["x-toonflow-settings-revision"]);
+  settings.value = snapshot.settings;
   // 等初始化引发的监听执行完，再允许自动保存。
   await nextTick();
   settingsReady = true;
   void refreshModelChoices().catch(() => {});
   void refreshToonflowProvider();
+}
+
+function settingsConflict(error: unknown) {
+  return axios.isAxiosError(error) && error.response?.status === 409;
+}
+
+function putSettings(settings: Record<string, unknown>, revision: number | undefined, signal?: AbortSignal) {
+  return axios.put<{ code: number; data: { customProviders?: CustomProvider[]; mediaProviderConfigs?: Record<string, unknown>; toonflowProvider?: CustomProvider | null; nodeMenu?: StoredNodeMenuItem[] | null; aiModels?: ResolvedAiModel[]; multiTenantEnabled?: boolean } | null }>(
+    "/api/settings/save", { settings, ...(revision === undefined ? {} : { expectedRevision: revision }) }, { signal, headers: { "x-toonflow-workspace": "1" } },
+  );
+}
+
+async function saveVersionedSettings(latest: SettingsSnapshot, base: Record<string, unknown>, patch: Record<string, unknown> | undefined, signal?: AbortSignal) {
+  const before = cloneDeep(settings.value);
+  const requested = cloneDeep({ ...before, ...patch });
+  const saveMerged = async (snapshot: SettingsSnapshot) => {
+    const merged = mergeSettings(base, requested, snapshot.settings);
+    if (!isEqual(merged.saved, snapshot.settings)) {
+      const { data, headers } = await putSettings(merged.saved, snapshot.revision, signal);
+      const revision = readSettingsRevision(headers["x-toonflow-settings-revision"]);
+      if (data.code !== 200 || revision === undefined) throw new Error("保存设置失败");
+      savedSettings = { settings: merged.saved, revision };
+    }
+    return merged;
+  };
+  let merged;
+  try {
+    merged = await saveMerged(latest);
+  } catch (error) {
+    if (!settingsConflict(error)) throw error;
+    const refreshed = await readSettings(signal);
+    if (refreshed.revision === undefined) throw error;
+    savedSettings = { settings: refreshed.settings, revision: refreshed.revision };
+    merged = await saveMerged(savedSettings);
+  }
+  settingsEditBase = merged.base;
+  const current = mergeSettings(before, settings.value, merged.draft).draft;
+  if (!isEqual(current, settings.value)) {
+    applyingSettings = true;
+    try { settings.value = current; }
+    finally { applyingSettings = false; }
+  }
+  if (merged.conflict && !conflictShown) ElMessage.warning("其他页面也修改了部分设置，冲突项仍是本页草稿");
+  conflictShown = merged.conflict;
+  return !merged.conflict;
 }
 
 export function saveSettings(update?: (current: Record<string, unknown>) => Record<string, unknown> | undefined, signal?: AbortSignal) {
@@ -201,17 +263,15 @@ export function saveSettings(update?: (current: Record<string, unknown>) => Reco
     signal?.throwIfAborted();
     const patch = update?.(settings.value);
     if (update && !patch) return false;
+    if (savedSettings && settingsEditBase) return saveVersionedSettings(savedSettings, settingsEditBase, patch, signal);
     const requestedSettings = { ...settings.value, ...patch };
     const requestedMultiTenantVersion = multiTenantVersion;
     const providerFields = ["customProviders", "mediaProviderConfigs", "toonflowProvider"] as const;
     const requestedProviders = providerFields.map(field => JSON.stringify(requestedSettings[field]));
     const requestedNodeMenu = JSON.stringify(((patch?.general ?? settings.value.general) as { nodeMenu?: unknown } | undefined)?.nodeMenu);
-    const { data, headers } = await axios.put<{ code: number; data: { customProviders?: CustomProvider[]; mediaProviderConfigs?: Record<string, unknown>; toonflowProvider?: CustomProvider | null; nodeMenu?: StoredNodeMenuItem[] | null; aiModels?: ResolvedAiModel[]; multiTenantEnabled?: boolean } | null }>(
-      "/api/settings/save", { settings: requestedSettings, ...(settingsRevision === undefined ? {} : { expectedRevision: settingsRevision }) }, { signal, headers: { "x-toonflow-workspace": "1" } },
-    );
+    const { data } = await putSettings(requestedSettings, undefined, signal);
     signal?.throwIfAborted();
     if (data.code !== 200) throw new Error("保存设置失败");
-    if (headers["x-toonflow-settings-revision"] !== undefined) settingsRevision = Number(headers["x-toonflow-settings-revision"]);
     if (typeof data.data?.multiTenantEnabled === "boolean" && requestedMultiTenantVersion === multiTenantVersion) {
       applyMultiTenantEnabled(data.data.multiTenantEnabled);
     }
@@ -255,8 +315,10 @@ export function saveSettings(update?: (current: Record<string, unknown>) => Reco
 watch(settings, () => {
   if (!settingsReady || applyingSettings) return;
   void saveSettings().catch(error => {
-    ElMessage.error(axios.isAxiosError(error) && error.response?.status === 409
-      ? "设置已更新，请重新读取后保存" : "设置保存失败，请稍后重试");
+    if (settingsConflict(error)) {
+      if (!conflictShown) ElMessage.warning("其他页面也修改了设置，本页草稿尚未保存");
+      conflictShown = true;
+    } else ElMessage.error({ message: "设置保存失败，请稍后重试", grouping: true });
   });
 }, { deep: true, flush: "sync" });
 
