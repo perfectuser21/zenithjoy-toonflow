@@ -1,5 +1,5 @@
 import { t } from "@/lib/i18n";
-import { existsSync, mkdir, readFile, realpath, stat } from "@toonflow/file";
+import { existsSync, mkdir, readFile, realpath, realpathSync, stat } from "@toonflow/file";
 import { basename, dirname, join, relative, sep } from "node:path";
 import { loadSkills, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import type { SkillContext, SkillLocation, SkillScope } from "@toonflow/tools-scaffold/runtime";
@@ -10,7 +10,8 @@ import { currentIdentity } from "@/utils/multiTenant/context";
 
 export function loadAgentSkills(cwd: string, scope?: SkillScope) {
   if (scope !== undefined && scope !== "workspace" && scope !== "global") throw new Error("技能范围无效");
-  if (currentIdentity()?.role === "user") {
+  const tenantUser = currentIdentity()?.role === "user";
+  if (tenantUser) {
     if (scope === "global") throw Object.assign(new Error("无权访问全局技能"), { status: 403 });
     scope = "workspace";
   }
@@ -24,7 +25,14 @@ export function loadAgentSkills(cwd: string, scope?: SkillScope) {
       ...(scope !== "workspace" ? [join(dirname(conf.path), "skills")] : []),
     ].filter(existsSync),
   });
-  result.skills = result.skills.filter(skill => !isWithin(directory(), skill.filePath) || isEnabled(skill.name));
+  const workspaceRoot = tenantUser ? realpathSync(cwd) : undefined;
+  result.skills = result.skills.filter(skill => {
+    if (workspaceRoot) {
+      try { return isWithin(workspaceRoot, realpathSync(skill.filePath)); }
+      catch { return false; }
+    }
+    return !isWithin(directory(), skill.filePath) || isEnabled(skill.name);
+  });
   return result;
 }
 
