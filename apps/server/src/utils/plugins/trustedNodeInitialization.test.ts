@@ -839,7 +839,6 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       if (budgetProviders.some(provider => String(input) === `${provider.apiUrl}/chat/completions`)) {
         if (typeof init?.body !== "string") throw Error("模型请求缺少 JSON 请求体");
         const payload = JSON.parse(init.body);
-        sentReasoningBudgets.push(payload.thinking_budget);
         let reply: unknown = backgroundReplies.at(-1);
         if (skillModelIds.includes(payload.model)) {
           expect(payload.messages).toEqual(expect.arrayContaining([
@@ -847,6 +846,8 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
             expect.objectContaining({ role: "user", content: "上游素材\n\n补充要求" }),
           ]));
           reply = { text: "分镜提纲" };
+        } else {
+          sentReasoningBudgets.push(payload.thinking_budget);
         }
         const images = payload.messages.flatMap((message: { content: unknown }) => Array.isArray(message.content)
           ? message.content.filter(part => part.type === "image_url") : []);
