@@ -189,7 +189,7 @@ import { ElButton, ElDialog } from "element-plus";
 import { IconSitemap } from "@tabler/icons-vue";
 import { strToU8, zipSync } from "fflate";
 import { defaultPreset, ipCardCopy, ipCardPreset, type IpCardCopy, type IpCardPreset } from "@toonflow/node-ip-card/preset";
-import { findNodeModel, getNodeModelIdentity, getNodeModelKey, nodeSkeleton, uploadNodeFile, useNode, type NodeAiModel, type NodeHandle } from "@toonflow/nodes-scaffold/runtime";
+import { findNodeModel, getNodeModelIdentity, preferredCreativeTextModel, getNodeModelKey, nodeSkeleton, uploadNodeFile, useNode, type NodeAiModel, type NodeHandle } from "@toonflow/nodes-scaffold/runtime";
 import { builtInSkill, effectivePrompt, fiveCopies, labels, notionSnapshot, parseModelJson, readReceipt, steps, type NotionSnapshot, type Receipt, type SavedCard, type Skill, type Step } from "./workflow";
 
 defineOptions({
@@ -343,7 +343,8 @@ async function loadModels() {
   if (!executable.value || step.value === "review") return;
   try {
     models.value = await ai.getModels();
-    if (!modelKey.value && models.value[0]) modelKey.value = getNodeModelKey(models.value[0]);
+    const first = preferredCreativeTextModel(models.value) ?? models.value[0];
+    if (!modelKey.value && first) modelKey.value = getNodeModelKey(first);
   } catch (cause) {
     showError(cause);
   }

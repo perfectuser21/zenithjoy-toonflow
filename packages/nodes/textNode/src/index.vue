@@ -55,7 +55,7 @@
 import { computed, inject, onMounted, ref, watch } from "vue";
 import { ElAlert, ElButton, ElCard, ElSelect, ElDialog, ElOption, ElOptionGroup, ElMessage, ElMessageBox } from "element-plus";
 import { IconEdit, IconFileText, IconSparkles, IconArrowUp } from "@tabler/icons-vue";
-import { getNodeModelIdentity, getNodeModelKey, nodeSkeleton, nodeTools, useNode, useNodeModelSelection, z, type NodeAiModel, type NodeHandle } from "@toonflow/nodes-scaffold/runtime";
+import { getNodeModelIdentity, preferredCreativeTextModel, getNodeModelKey, nodeSkeleton, nodeTools, useNode, useNodeModelSelection, z, type NodeAiModel, type NodeHandle } from "@toonflow/nodes-scaffold/runtime";
 import { groupNodeModels } from "@toonflow/node-shared/groupNodeModels";
 import modelLabel from "@toonflow/node-shared/modelLabel";
 import { useNodeReferences } from "@toonflow/node-shared/useNodeReferences";
@@ -218,7 +218,7 @@ async function loadModels() {
   try {
     models.value = await ai.getModels();
     if (!model.value) {
-      const first = modelGroups.value[0]?.models[0];
+      const first = preferredCreativeTextModel(models.value) ?? modelGroups.value[0]?.models[0];
       model.value = first ? getNodeModelKey(first) : "";
     }
   } catch (error) {

@@ -23,6 +23,15 @@ export type NodeMediaModel = Omit<MediaModel, "mode"> & {
 };
 type ModelIdentity = { providerId: string; modelId: string; routeId?: string };
 
+const creativeTextDefaults = ["gpt-6.2-sol", "gpt-6.1-sol", "gpt-6.1-terra"];
+
+export function preferredCreativeTextModel<T extends { modelId: string }>(models: readonly T[]) {
+  for (const id of creativeTextDefaults) {
+    const match = models.find(model => model.modelId === id);
+    if (match) return match;
+  }
+}
+
 export function getNodeModelIdentity(model: ModelIdentity) {
   return { providerId: model.providerId, modelId: model.providerId === "multiTenant" ? model.routeId ?? model.modelId : model.modelId };
 }

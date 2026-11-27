@@ -113,6 +113,7 @@ test("existing workspaces receive trusted nodes from each release", async () => 
     const nodeFiles = Object.keys(trustedNodeNames).map(name => `${name}.umd.js`);
     expect(trustedNodeNames.videoConcatNode).toBe("合成成片");
     expect(trustedNodeNames.frameAnalysisNode).toBe("逐帧拉片");
+    expect(trustedNodeNames.skillNode).toBe("Skill");
     for (const file of nodeFiles) {
       await writeFile(join(source, file), `candidate:${file}`);
       await writeFile(join(target, file), `old:${file}`);
@@ -132,7 +133,7 @@ test("existing workspaces receive trusted nodes from each release", async () => 
     await writeFile(join(source, "frameAnalysisNode.umd.js"), "candidate:frameAnalysis");
     await writeFile(join(target, "frameAnalysisNode.umd.js"), "old:frameAnalysis");
     await writeFile(join(target, "videoNode.umd.js"), "old:video");
-    const updatedNodes = ["videoGenerationNode", "mashupNode", "videoConcatNode", "ipCardNode", "ipWorkflowNode"];
+    const updatedNodes = ["videoGenerationNode", "mashupNode", "videoConcatNode", "ipCardNode", "ipWorkflowNode", "skillNode"];
     for (const node of updatedNodes) await writeFile(join(target, node + ".umd.js"), "old");
     await initializeHostedSharedCanvasNodes(target, source);
     for (const node of updatedNodes) expect(await readFile(join(target, node + ".umd.js"), "utf8")).toBe(`candidate:${node}.umd.js`);
@@ -340,6 +341,7 @@ test("platform image routes charge customer points and exempt administrators", a
     const auth = createMultiTenant(root);
     await auth.setup("points-admin", "fixture-password");
     const user = await auth.createUser("points-customer", "fixture-password");
+    const other = await auth.createUser("points-other", "fixture-password");
     const admin = await auth.getAdminIdentity();
     if (!admin) throw Error("积分验收缺少管理员身份");
     const customer = { id: user.id, role: "user" } as const;
@@ -350,8 +352,8 @@ test("platform image routes charge customer points and exempt administrators", a
       sources: {
         backend: {
           async available(type: string) {
-            return type === "image" ? [{ target: "backend" as const, providerId: provider.id, providerLabel: provider.label,
-              modelId: model.id, label: model.label, type: model.type }] : [];
+            return type === "image" || type === "text" ? [{ target: "backend" as const, providerId: provider.id, providerLabel: provider.label,
+              modelId: model.id, label: model.label, type: type as "text" | "image" }] : [];
           },
           async resolve() { return { apiKey: secret }; },
         },
@@ -378,8 +380,16 @@ test("platform image routes charge customer points and exempt administrators", a
     const paid = { id: randomUUID(), publicId: "fixture-public", label: "图片生成 · 精细", type: "image", enabled: true,
       target: "backend", providerId: provider.id, upstreamModelId: model.id, costPrice: null,
       salePrice: { currency: "CNY", mode: "perRequest", amount: "1.5" } } as const;
-    await gateway.save([paid, { ...paid, id: randomUUID(), publicId: "fixture-free", salePrice: { ...paid.salePrice, amount: "0" } }], 0);
+    const scoped = { ...paid, type: "text", upstreamModelId: model.id, id: randomUUID(), publicId: "gpt-6.1-terra",
+      allowedUserIds: [user.id] as string[], salePrice: { currency: "CNY", mode: "perMillionTokens", input: "2", output: "10", cacheRead: "0", cacheWrite: "0" } } as const;
+    await gateway.save([scoped, paid, { ...paid, id: randomUUID(), publicId: "fixture-free", salePrice: { ...paid.salePrice, amount: "0" } }], 0);
     expect((await gateway.getProviders()).providers[0]?.config.apiKey).toBe(secret);
+    const outsider = { id: other.id, role: "user" } as const;
+    expect((await gateway.catalog(["text"], customer)).map(route => route.modelId)).toEqual([scoped.publicId]);
+    expect(await gateway.catalog(["text"], outsider)).toEqual([]);
+    expect(await gateway.catalog(["text"])).toEqual([]);
+    await expect(gateway.resolve("text", "multiTenant", scoped.publicId, undefined, {}, { actor: outsider })).rejects.toMatchObject({ status: 403 });
+    expect((await gateway.resolve("text", "multiTenant", scoped.publicId, undefined, {}, { actor: customer })).route.id).toBe(scoped.id);
     expect(await gateway.catalog(["image"], customer)).toEqual([{
       type: "image", providerId: "multiTenant", providerLabel: "悦升云端", routeId: paid.id, modelId: paid.publicId,
       label: "图片生成 · 精细 · 1.5 积分/次", priceLabel: "1.5 积分/次",
@@ -659,7 +669,11 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       return { id: name, type: "remote-videoNode", position: { x: 350 + index * 320, y: 1000 },
         data: { label: name, outputs: { video: { dataType: "VIDEO", value: { url, mimeType: "video/mp4" } } } } };
     }));
+    const skillSourcePath = "assets/skillSource/content.md";
+    await mkdir(join(project.directory, "assets", "skillSource"));
+    await writeFile(join(project.directory, skillSourcePath), "上游素材");
     const canvas = join(project.directory, "画布.json");
+    const skillModelIds = ["gpt-6.1-terra", "gpt-6.1-sol", "gpt-6.2-sol"];
     await writeFile(canvas, JSON.stringify({
       toonflowCanvas: true,
       nodes: [
@@ -668,6 +682,9 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
         } } },
         { id: "qianchuan", type: "remote-qianchuanUploadNode", position: { x: 480, y: 90 }, data: {} },
         ...videoNodes,
+        { id: "skillSource", type: "remote-textNode", position: { x: 30, y: 1300 },
+          data: { textPath: skillSourcePath } },
+        { id: "skill", type: "remote-skillNode", position: { x: 1970, y: 110 }, data: {} },
         ...referenceImages.map((id, index) => ({
           id, type: "remote-imageNode", position: { x: 1550 + 200 * index, y: 650 },
           data: { outputs: { image: { dataType: "IMAGE", value: { url: "assets/" + id + ".png", mimeType: "image/png" } } } },
@@ -676,7 +693,7 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
         { id: "backgroundSource", type: "remote-videoNode", position: { x: 1240, y: 570 },
           data: { outputs: { video: { dataType: "VIDEO", value: { url: sceneSource, mimeType: "video/mp4" } } } } },
         { id: "analysis", type: "remote-frameAnalysisNode", position: { x: 1240, y: 115 },
-          data: { frameAnalysis: { source: { url: sceneSource, mimeType: "video/mp4" }, aiEnabled: false } } },
+          data: { frameAnalysis: { source: { url: sceneSource, mimeType: "video/mp4" }, aiEnabled: false, aiModel: JSON.stringify(["backgroundFixture", "qwen3.7-plus"]) } } },
         { id: "imageGeneration", type: "remote-imageGenerationNode", position: { x: 850, y: 90 },
           data: { prompt: "一张红色背景图", promptModel: [[{ type: "Write", text: "一张红色背景图" }]],
             model: JSON.stringify(["fixtureMedia", "fixture-image"]), ratio: "1:1" } },
@@ -684,6 +701,7 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
           data: { model: JSON.stringify(["fixtureMedia", "wan3.0-video"]) } },
       ],
       edges: [
+        { id: "skillInput", source: "skillSource", sourceHandle: "text", target: "skill", targetHandle: "in" },
         { id: "batch", source: "mashup", sourceHandle: "videos", target: "qianchuan", targetHandle: "videos" },
         { id: "analysisInput", source: "backgroundSource", sourceHandle: "video", target: "analysis", targetHandle: "in" },
         { id: "wanImage", source: "imageGeneration", sourceHandle: "image", target: "wanGeneration", targetHandle: "in" },
@@ -697,7 +715,7 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     const reviewModel = "qwen3.7-plus";
     const alternateModel = "qwen3.7-max";
     const budgetProviders = [
-      { id: "backgroundFixture", apiUrl: `https://${dashScopeHost}/compatible-mode/v1`, models: [reviewModel, alternateModel] },
+      { id: "backgroundFixture", apiUrl: `https://${dashScopeHost}/compatible-mode/v1`, models: [reviewModel, alternateModel, ...skillModelIds] },
       { id: "proxyFixture", apiUrl: `https://${dashScopeHost}.example.test/v1`, models: [reviewModel] },
       { id: "insecureFixture", apiUrl: `http://${dashScopeHost}/compatible-mode/v1`, models: [reviewModel] },
     ];
@@ -787,7 +805,9 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       if (modelCatalogUnavailable) return response.status(503).json({ code: 503, message: "模型目录暂不可用" });
       return response.json({ code: 200, data: [{
         providerId: "backgroundFixture", providerLabel: "验收", label: "背景模型", modelId: reviewModel, protocol: "openai-completions",
-      }] });
+      }, ...skillModelIds.map(modelId => ({
+        providerId: "backgroundFixture", providerLabel: "验收", label: modelId, modelId, protocol: "openai-completions",
+      }))] });
     });
     gateway.get("/api/ai/media/models", (_request, response, next) => {
       if (!swapFixture) return next();
@@ -819,8 +839,16 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       if (budgetProviders.some(provider => String(input) === `${provider.apiUrl}/chat/completions`)) {
         if (typeof init?.body !== "string") throw Error("模型请求缺少 JSON 请求体");
         const payload = JSON.parse(init.body);
-        sentReasoningBudgets.push(payload.thinking_budget);
-        let reply = backgroundReplies.at(-1);
+        let reply: unknown = backgroundReplies.at(-1);
+        if (skillModelIds.includes(payload.model)) {
+          expect(payload.messages).toEqual(expect.arrayContaining([
+            expect.objectContaining({ role: "system", content: "生成分镜提纲" }),
+            expect.objectContaining({ role: "user", content: "上游素材\n\n补充要求" }),
+          ]));
+          reply = { text: "分镜提纲" };
+        } else {
+          sentReasoningBudgets.push(payload.thinking_budget);
+        }
         const images = payload.messages.flatMap((message: { content: unknown }) => Array.isArray(message.content)
           ? message.content.filter(part => part.type === "image_url") : []);
         if (images.length) {
@@ -957,6 +985,32 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
       throw Error("画布未保存验收产物");
     }
     const generating = await openCanvas();
+    const skillNode = '.vue-flow__node[data-id="skill"]';
+    await generating.page.locator(skillNode + ' textarea[id$="-instructions"]').setTimeout(10000).fill("生成分镜提纲");
+    await generating.page.locator(skillNode + ' textarea[id$="-input"]').fill("补充要求");
+    const runSkill = `xpath=//div[@data-id="skill"]//button[normalize-space(.)="运行 Skill" and not(@disabled)]`;
+    await generating.page.locator(runSkill).setTimeout(5000).click();
+    await generating.page.waitForSelector(skillNode + " .skillOutput", { timeout: 10000 });
+    const skill = await waitForSaved(async () => {
+      const saved = await savedNodeData("skill");
+      if (saved?.outputs?.text?.value) return saved;
+    });
+    expect(skill).toMatchObject({
+      instructions: "生成分镜提纲", input: "补充要求", model: JSON.stringify(["backgroundFixture", "gpt-6.2-sol"]),
+      outputs: { text: { dataType: "STRING", value: JSON.stringify({ text: "分镜提纲" }) } },
+    });
+    const skillModel = skillNode + ' input[role="combobox"]';
+    await generating.page.locator(skillModel).setTimeout(5000).click();
+    const skillOptions = await generating.page.$eval(skillModel, input => input.getAttribute("aria-controls"));
+    expect(skillOptions).toBeTruthy();
+    await generating.page.locator(`xpath=//*[@id=${JSON.stringify(skillOptions)}]//li[@role="option" and normalize-space(.)="gpt-6.1-terra"]`).setTimeout(5000).click();
+    await waitForSaved(async () => (await savedNodeData("skill"))?.model === JSON.stringify(["backgroundFixture", "gpt-6.1-terra"]) ? true : undefined);
+    const reopenedSkill = await openCanvas();
+    expect(await reopenedSkill.page.$eval(skillNode + ' textarea[id$="-instructions"]', input => Reflect.get(input, "value"))).toBe("生成分镜提纲");
+    await reopenedSkill.page.waitForFunction(selector => Reflect.get(globalThis, "document").querySelector(selector)?.textContent.includes("gpt-6.1-terra"),
+      { timeout: 5000 }, skillNode + " .el-select");
+    await reopenedSkill.context.close();
+
     let normalizations = 0;
     generating.page.on("request", request => {
       if (request.method() === "POST" && new URL(request.url()).pathname === "/api/workspaces/files/normalizeVideo") normalizations++;
