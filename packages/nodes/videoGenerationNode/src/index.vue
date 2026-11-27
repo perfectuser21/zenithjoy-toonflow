@@ -186,10 +186,10 @@ const { generating, pendingRecovery, cancelling } = generationState;
 let generation: Promise<void> | undefined;
 let modelsRequest: Promise<void> | undefined;
 watch(generating, value => { if (!value && !disposed && !deleting.value && !models.value.length) void loadModels().catch(error => showNodeError(error, "模型读取失败")); });
-// ACT: 供应商未声明视频比例范围，沿用界面的通用比例，具体支持范围由供应商校验。
-const ratioOptions = ["16:9", "9:16", "1:1", "4:3", "3:4"];
+const defaultRatios = ["16:9", "9:16", "1:1", "4:3", "3:4"];
 const selectedModel = useNodeModelSelection(models, computed({ get: () => data.value.model, set: value => { data.value.model = value; } }));
 useModelForm(data, selectedModel);
+const ratioOptions = computed(() => supportedRatios(selectedModel.value));
 const selectedMode = computed(() => selectedModel.value?.mode?.find((item) => JSON.stringify(item) === data.value.mode) as NodeVideoRequest["mode"]);
 const frameModes = ["startEndRequired", "endFrameOptional", "startFrameOptional"];
 const frameMode = computed(() => frameModes.includes(String(selectedMode.value)));
@@ -216,6 +216,11 @@ const wanReferenceDurationHint = computed(() => {
   return modelId === "wan3.0-video" || modelId === "wan3.0-video-prime";
 });
 const matchingModes = computed(() => getMatchingModes(selectedModel.value));
+
+function supportedRatios(choice?: NodeMediaModel) {
+  const ratios = choice?.imageRatios?.filter(ratio => /^[1-9]\d{0,3}:[1-9]\d{0,3}$/.test(ratio));
+  return ratios?.length ? [...new Set(ratios)] : defaultRatios;
+}
 
 function getReferenceLimit(mode: string[], type: keyof typeof mediaCounts.value) {
   return Number(mode.find(item => item.startsWith(`${type}Reference:`))?.split(":")[1] ?? 0);
@@ -260,7 +265,8 @@ watch([selectedModel, () => data.value.duration], ([choice]) => {
   if (!durations.includes(data.value.duration!)) data.value.duration = durations[0];
   const resolutions = getResolutions(choice, data.value.duration);
   if (!resolutions.includes(data.value.resolution)) data.value.resolution = resolutions[0] ?? "";
-  if (!ratioOptions.includes(data.value.ratio)) data.value.ratio = "9:16";
+  const ratios = supportedRatios(choice);
+  if (!ratios.includes(data.value.ratio)) data.value.ratio = ratios.includes("9:16") ? "9:16" : ratios[0]!;
   if (choice.audio !== "optional") data.value.generateAudio = choice.audio === true;
 }, { flush: "sync" });
 const modelGroups = computed(() => groupNodeModels(models.value));
@@ -477,7 +483,7 @@ function getConfig() {
       other: data.value.other,
     },
     models: models.value,
-    ratios: adaptiveRatio.value ? ["adaptive"] : ratioOptions,
+    ratios: adaptiveRatio.value ? ["adaptive"] : ratioOptions.value,
     matchingModes: matchingModes.value,
   };
 }
@@ -502,7 +508,7 @@ nodeTools.register({
     modelId: z.string().min(1).optional(),
     duration: z.number().positive().optional(),
     resolution: z.string().min(1).optional(),
-    ratio: z.enum([...ratioOptions, "adaptive"]).optional(),
+    ratio: z.union([z.literal("adaptive"), z.string().regex(/^[1-9]\d{0,3}:[1-9]\d{0,3}$/)]).optional(),
     mode: z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]).optional(),
     generateAudio: z.boolean().optional(),
     other: z.record(z.string(), z.json()).optional(),
@@ -528,6 +534,9 @@ nodeTools.register({
     const followsInput = choice.adaptiveFrameRatio === true && frameModes.includes(String(targetMode));
     if (args.ratio !== undefined && followsInput !== (args.ratio === "adaptive")) {
       throw new Error(followsInput ? "当前模式的视频比例跟随输入图" : "当前模式需要指定视频比例");
+    }
+    if (args.ratio !== undefined && !followsInput && !supportedRatios(choice).includes(args.ratio)) {
+      throw new Error(`当前模型不支持比例 ${args.ratio}，可选：${supportedRatios(choice).join("、")}`);
     }
     if (args.generateAudio !== undefined && choice.audio !== "optional" && args.generateAudio !== (choice.audio === true)) throw new Error("当前模型不支持切换声音，请查看 getConfig 返回的 audio 能力");
     const other = getModelFormValues(choice, choice === selectedModel.value ? data.value.other : {}, args.other);
