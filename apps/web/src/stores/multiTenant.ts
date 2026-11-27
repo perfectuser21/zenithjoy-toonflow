@@ -5,3 +5,4 @@ export const currentUser = shallowRef<UserIdentity | null>(null);
 export const publicWeb = ref(false);
 export const hostWeb = ref(false);
 export const agentEnabled = ref(false);
+export const workspaceSkillsEnabled = ref(false);

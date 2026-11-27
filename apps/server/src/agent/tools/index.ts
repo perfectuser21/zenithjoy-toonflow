@@ -27,6 +27,7 @@ import { readDocument } from "@/utils/documents";
 import { createMcpAgentTools } from "@/utils/mcp/servers";
 import { createPluginMarketTools } from "./pluginMarket";
 import { currentIdentity } from "@/utils/multiTenant/context";
+import { canManageWorkspaceSkills } from "@/utils/multiTenant/workspaceAgentAccess";
 import { modelGateway, requireDirectModelAccess } from "@/utils/multiTenant/gateway";
 import * as mediaTasks from "@/utils/media/tasks";
 
@@ -174,6 +175,37 @@ export function createAgentToolContext(cwd: string, config: Record<string, unkno
   };
 }
 
+function createWorkspaceSkillTool(cwd: string): ToolDefinition {
+  const skills = createSkillContext(cwd);
+  const location = { name: z.string().min(1).max(64), path: z.string().min(1).max(4096).optional() };
+  const manifest = z.string().min(1).max(128 * 1024);
+  const schema = z.discriminatedUnion("action", [
+    z.strictObject({ action: z.literal("list") }),
+    z.strictObject({ action: z.literal("read"), ...location }),
+    z.strictObject({ action: z.literal("create"), ...location, content: manifest }),
+    z.strictObject({ action: z.literal("update"), ...location, content: manifest }),
+  ]);
+  return {
+    name: "skillOperator",
+    label: "项目 Skill 操作器",
+    description: "列出或读取当前项目 Skill。用户明确要求时，可以新建或更新项目内的 SKILL.md 和参考资料。新建时先保存包含 name 和 description 的 SKILL.md。",
+    parameters: z.toJSONSchema(z.strictObject({
+      action: z.enum(["list", "read", "create", "update"]), name: location.name.optional(), path: location.path, content: manifest.optional(),
+    }), { io: "input", target: "draft-07" }),
+    executionMode: "sequential",
+    async execute(_id, params, signal) {
+      const request = schema.parse(params);
+      signal?.throwIfAborted();
+      const result = request.action === "list"
+        ? skills.list("workspace").map(({ name, description, disableModelInvocation }) => ({ name, description, disableModelInvocation }))
+        : request.action === "read"
+          ? await skills.read({ ...request, scope: "workspace" }, signal)
+          : await skills[request.action]({ ...request, scope: "workspace" }, signal);
+      return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
+    },
+  };
+}
+
 export async function createAgentTools(cwd: string, canvas?: CanvasContext, question?: QuestionContext, includeMcp = true): Promise<ToolDefinition[]> {
   if (currentIdentity()?.role === "user") {
     const allowed = new Set(["getCanvas", "findCanvasNodes", "getCanvasNodes", "getCanvasEdges", "addNode", "connectNodes"]);
@@ -196,6 +228,7 @@ export async function createAgentTools(cwd: string, canvas?: CanvasContext, ques
       tools.push({ name: "askUser", label: "提问器", description: "向用户提问并等待回答。", parameters: z.toJSONSchema(schema, { io: "input", target: "draft-07" }), executionMode: "sequential",
         async execute(id, params, signal) { const result = await question.ask(id, schema.parse(params), signal); return { content: [{ type: "text", text: JSON.stringify(result) }], details: result }; } });
     }
+    if (canManageWorkspaceSkills(currentIdentity())) tools.push(createWorkspaceSkillTool(cwd));
     return tools;
   }
   const tools = createPluginMarketTools(question);

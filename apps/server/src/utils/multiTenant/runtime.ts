@@ -13,6 +13,7 @@ import { stopMobileLinkRuntime } from "@/utils/mobileLink";
 import { runWithIdentity } from "./context";
 import { verifyProjectQuota } from "@/utils/workspace/projectQuota";
 import { isolatedBackgroundBeta, productionBackgroundAdmission } from "./backgroundAdmission";
+import { canUseWorkspaceAgent } from "./workspaceAgentAccess";
 
 type Runtime = { started: boolean; server?: Server; sockets: Set<Socket>; queue: Promise<void>; onEnabledChange?: (enabled: boolean) => void };
 const runtimes = new WeakMap<Application, Runtime>();
@@ -25,7 +26,7 @@ const backgroundBetaRoutes = new Set(["/api/ai/media/background/analyze", "/api/
   "/api/ai/media/background/confirm", "/api/ai/media/background/retry", "/api/ai/media/background/status", "/api/ai/media/background/cancel", "/api/ai/media/background/finish",
   "/api/ai/media/background/cleanup", "/api/ai/media/background/cleanupframe", "/api/ai/media/background/reservations"]);
 const tenantAgentRoutes = new Set([
-  "POST /api/agent", "POST /api/agent/create", "GET /api/agent/get", "GET /api/agent/list", "GET /api/agent/skills",
+  "POST /api/agent", "POST /api/agent/create", "GET /api/agent/get", "GET /api/agent/list", "GET /api/agent/skills", "POST /api/agent/skills/import",
   "POST /api/agent/answer", "POST /api/agent/canvasresult", "POST /api/agent/stop", "PATCH /api/agent/rename",
   "POST /api/agent/branch", "DELETE /api/agent/message", "DELETE /api/agent/queue", "POST /api/agent/queue/steer",
 ]);
@@ -154,10 +155,6 @@ export async function changeMultiTenantEnabled(app: Application, enabled: boolea
       timer.unref();
     } else notify();
   });
-}
-
-export function canUseWorkspaceAgent(user: AuthIdentity | null) {
-  return user?.role === "admin" || (user?.role === "user" && process.env.TOONFLOW_TRUSTED_CANVAS_BETA === "1");
 }
 
 export function requestIdentity(req: Request): AuthIdentity | undefined {

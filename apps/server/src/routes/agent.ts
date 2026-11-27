@@ -8,6 +8,7 @@ import { translateError, translateMessage } from "@/lib/i18n";
 import { thinkingLevels } from "@/lib/modelReasoning";
 import { getAgentModelConfiguration } from "@/agent/runtime/model";
 import { currentIdentity } from "@/utils/multiTenant/context";
+import { canUseWorkspaceAgent } from "@/utils/multiTenant/workspaceAgentAccess";
 
 const inputSchema = z.object({
   prompt: z.string().trim(), directory: z.string().min(1),
@@ -35,8 +36,9 @@ const inputSchema = z.object({
 
 export default Router().post("/", validateFields(inputSchema.shape), async (req, res) => {
   const { directory, canvas, runId = crypto.randomUUID(), ...options } = inputSchema.parse(req.body);
-  if (currentIdentity()?.role === "user" && process.env.TOONFLOW_TRUSTED_CANVAS_BETA !== "1") throw Object.assign(new Error("当前账号的画布助手尚未开放"), { status: 403 });
-  if (currentIdentity()?.role === "user" && (options.mentions?.length || options.resendFrom)) {
+  const user = currentIdentity();
+  if (user?.role === "user" && !canUseWorkspaceAgent(user)) throw Object.assign(new Error("当前账号的画布助手尚未开放"), { status: 403 });
+  if (user?.role === "user" && (options.mentions?.length || options.resendFrom)) {
     throw Object.assign(new Error("当前账号暂不支持引用素材或重发历史消息"), { status: 403 });
   }
   if (options.streamingBehavior && !options.expectedRunId) {

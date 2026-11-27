@@ -1,5 +1,5 @@
 import { t } from "@/lib/i18n";
-import { existsSync, mkdir, readFile, realpath, stat } from "@toonflow/file";
+import { existsSync, mkdir, readFile, realpath, realpathSync, stat } from "@toonflow/file";
 import { basename, dirname, join, relative, sep } from "node:path";
 import { loadSkills, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import type { SkillContext, SkillLocation, SkillScope } from "@toonflow/tools-scaffold/runtime";
@@ -10,7 +10,8 @@ import { currentIdentity } from "@/utils/multiTenant/context";
 
 export function loadAgentSkills(cwd: string, scope?: SkillScope) {
   if (scope !== undefined && scope !== "workspace" && scope !== "global") throw new Error("技能范围无效");
-  if (currentIdentity()?.role === "user") {
+  const tenantUser = currentIdentity()?.role === "user";
+  if (tenantUser) {
     if (scope === "global") throw Object.assign(new Error("无权访问全局技能"), { status: 403 });
     scope = "workspace";
   }
@@ -24,8 +25,22 @@ export function loadAgentSkills(cwd: string, scope?: SkillScope) {
       ...(scope !== "workspace" ? [join(dirname(conf.path), "skills")] : []),
     ].filter(existsSync),
   });
-  result.skills = result.skills.filter(skill => !isWithin(directory(), skill.filePath) || isEnabled(skill.name));
+  const workspaceRoot = tenantUser ? realpathSync(cwd) : undefined;
+  result.skills = result.skills.filter(skill => {
+    if (workspaceRoot) {
+      try { return isWithin(workspaceRoot, realpathSync(skill.filePath)); }
+      catch { return false; }
+    }
+    return !isWithin(directory(), skill.filePath) || isEnabled(skill.name);
+  });
   return result;
+}
+
+const localSkillName = /^[a-z][a-zA-Z0-9]*$/;
+const workspaceSkillName = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+
+export function isWorkspaceSkillName(name: string) {
+  return name.length <= 64 && (localSkillName.test(name) || workspaceSkillName.test(name));
 }
 
 export function createSkillContext(cwd: string): SkillContext {
@@ -38,7 +53,9 @@ export function createSkillContext(cwd: string): SkillContext {
     const scope = create ? request.scope ?? "workspace" : request.scope;
     const skill = loadAgentSkills(cwd, scope).skills.find(skill => skill.name === request.name);
     if (!skill && !create) throw new Error(t`技能不存在：${request.name}`);
-    if (!skill && (request.name.length > 64 || !/^[a-z][a-zA-Z0-9]*$/.test(request.name))) throw new Error("新技能名称必须为不超过 64 字符的小驼峰");
+    if (!skill && (scope === "workspace" ? !isWorkspaceSkillName(request.name) : request.name.length > 64 || !localSkillName.test(request.name))) {
+      throw new Error("技能名称须以小写字母开头，最多 64 个字符，工作区技能可用短横线");
+    }
     const targetScope = scope ?? skillScope(skill!.filePath);
     const root = await realpath(targetScope === "workspace" ? cwd : dirname(conf.path));
     const { path: scopeDirectory } = await resolveWorkspacePath(root, targetScope === "workspace" ? "skill" : "skills", true);
