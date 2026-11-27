@@ -140,6 +140,7 @@ function selectSkill(name: string) {
 
 function handleKeydown(event: KeyboardEvent) {
   if (!visible.value || event.isComposing || event.keyCode === 229) return;
+  if (event.target instanceof Element && event.target.closest(".skillImport")) return;
   if (event.key === "Tab" && (event.shiftKey || loading.value || loadError.value || !filteredSkills.value.length)) return closeMenu();
   if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
   if (!["ArrowUp", "ArrowDown", "Enter", "Tab", "Escape"].includes(event.key)) return;
