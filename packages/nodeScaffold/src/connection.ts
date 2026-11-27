@@ -9,6 +9,7 @@ export type NodeHandle = {
   type: "source" | "target";
   dataType: NodeDataType | NodeDataType[];
   label?: string;
+  position?: "top" | "bottom";
 };
 
 export type NodeConnectionFeedback = {

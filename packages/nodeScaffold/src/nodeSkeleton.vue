@@ -130,7 +130,7 @@
         </div>
         <slot v-else-if="previewReady || documentTarget" />
       </el-card>
-      <template v-for="group in handleGroups" :key="group.type">
+      <template v-for="group in handleGroups" :key="group.position">
         <handle
           v-for="(item, index) in group.items"
           :id="item.id"
@@ -147,7 +147,7 @@
           :position="group.position"
           :isValidConnection="validateConnection"
           :data-connection-status="getHandleStatus(item)"
-          :style="{ top: `${((index + 1) / (group.items.length + 1)) * 100}%` }"
+          :style="{ [group.position === Position.Top || group.position === Position.Bottom ? 'left' : 'top']: `${((index + 1) / (group.items.length + 1)) * 100}%` }"
           :title="`${item.label ?? item.id} · ${Array.isArray(item.dataType) ? item.dataType.join(' / ') : item.dataType}`"
           :aria-label="`${item.label ?? item.id} · ${Array.isArray(item.dataType) ? item.dataType.join(' / ') : item.dataType}`"
           @pointermove="moveHandle"
@@ -231,8 +231,10 @@ const props = withDefaults(
   }
 );
 const handleGroups = computed(() => [
-  { type: "target" as const, position: Position.Left, items: props.handles.filter((item) => item.type === "target") },
-  { type: "source" as const, position: Position.Right, items: props.handles.filter((item) => item.type === "source") },
+  { type: "target" as const, position: Position.Left, items: props.handles.filter(item => item.type === "target" && !item.position) },
+  { type: "source" as const, position: Position.Right, items: props.handles.filter(item => item.type === "source" && !item.position) },
+  { type: "target" as const, position: Position.Top, items: props.handles.filter(item => item.type === "target" && item.position === "top") },
+  { type: "source" as const, position: Position.Bottom, items: props.handles.filter(item => item.type === "source" && item.position === "bottom") },
 ]);
 const cardHeight = computed(() => Math.max(100, ...handleGroups.value.map((group) => (group.items.length + 1) * 44)));
 const { id: nodeId, node } = useNode();
@@ -873,6 +875,9 @@ watch(
       &.vue-flow__handle-right {
         right: -12px;
       }
+
+      &.vue-flow__handle-top { top: -12px; }
+      &.vue-flow__handle-bottom { bottom: -12px; }
 
       &::before {
         content: "";

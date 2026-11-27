@@ -23,6 +23,7 @@ export const modelRouteSchema = z.strictObject({
   label: z.string().trim().min(1).max(128),
   type: z.enum(["text", "image", "video", "audio"]),
   enabled: z.boolean(),
+  allowedUserIds: z.array(z.uuid()).min(1).max(100).optional(),
   target: z.enum(["backend", "toonflowCloud"]),
   providerId: z.string().trim().min(1).max(96),
   upstreamModelId: z.string().trim().min(1).max(256),

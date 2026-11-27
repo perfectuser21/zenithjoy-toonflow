@@ -1,3 +1,4 @@
+import { articleDocumentPattern } from "./articleDocument";
 import { z } from "zod";
 import { ipCardCopy, ipCardPreset } from "@toonflow/node-ip-card/preset";
 
@@ -64,7 +65,9 @@ const receipt = z.strictObject({
   revision: z.string(),
   sourceRevision: z.string().optional(),
   promptRevision: z.string(),
+  mountedSkillVersion: z.string().optional(),
   article: z.string().optional(),
+  articlePath: z.string().regex(articleDocumentPattern).optional(),
   notionReference: notionReference.optional(),
   notionSnapshot: notionSnapshot.optional(),
   text: z.string().optional(),
