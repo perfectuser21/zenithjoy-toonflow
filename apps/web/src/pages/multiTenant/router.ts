@@ -9,11 +9,11 @@ export const adminRoute: RouteRecordRaw = {
   children: adminRoutes,
 };
 
-export function createAdminRouter() {
+export function createAdminRouter(allowPublicAdmin = false) {
   return createRouter({
     history: createWebHashHistory(),
     routes: [
-      adminRoute,
+      allowPublicAdmin ? { ...adminRoute, beforeEnter: undefined } : adminRoute,
       { path: "/:pathMatch(.*)*", redirect: { name: "multiTenantOverview" } },
     ],
   });

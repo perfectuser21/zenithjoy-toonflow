@@ -12,6 +12,7 @@
       <el-select v-if="modes.length" v-model="mode" :disabled="disabled" :teleported="false" aria-label="视频生成模式">
         <el-option v-for="item in modes" :key="item.value" :value="item.value" :label="item.label" />
       </el-select>
+      <p v-if="referenceSummary" class="sectionLabel">{{ referenceSummary }}</p>
       <div v-if="durations.length || resolutions.length" class="outputOptions">
         <div v-if="durations.length" class="outputField">
           <div class="sectionLabel">时长</div>
@@ -27,7 +28,7 @@
         </div>
       </div>
       <div v-if="adaptiveRatio" class="sectionLabel">视频比例跟随输入图</div>
-      <div v-else class="sectionLabel">通用比例</div>
+      <div v-else class="sectionLabel">{{ model?.imageRatios?.length ? '支持的比例' : '视频比例' }}</div>
       <div v-if="!adaptiveRatio" class="ratioOptions" role="group" aria-label="视频比例">
         <el-button v-for="item in ratios" :key="item" class="ratioButton" :disabled="disabled" :aria-label="`比例 ${item}`" :aria-pressed="ratio === item" @click="ratio = item">
           <span class="ratioContent">
@@ -40,6 +41,7 @@
         <span class="sectionLabel">生成音频</span>
         <el-switch v-model="generateAudio" :disabled="disabled" aria-label="生成音频" />
       </div>
+      <p v-else-if="model?.audio === true" class="sectionLabel">输出包含音频</p>
       <modelForm v-model="other" :rules="model?.rules" :disabled="disabled" />
     </div>
   </el-popover>
@@ -67,6 +69,12 @@ const modes = computed(() => (props.model?.mode ?? []).map(item => ({
   value: JSON.stringify(item),
   label: Array.isArray(item) ? "混合参考" : modeLabels[item] ?? item,
 })));
+const referenceSummary = computed(() => {
+  const referenceMode = props.model?.mode?.find(value => Array.isArray(value) && JSON.stringify(value) === mode.value);
+  if (!Array.isArray(referenceMode)) return "";
+  const count = (type: string) => Number(referenceMode.find(value => value.startsWith(type + "Reference:"))?.split(":")[1] ?? 0);
+  return `参考上限：图片 ${count("image")} 张 · 视频 ${count("video")} 段 · 音频 ${count("audio")} 段`;
+});
 const mappings = computed(() => props.model?.durationResolutionMap ?? []);
 const durations = computed(() => [...new Set(mappings.value.flatMap(item => item.duration))].sort((a, b) => a - b));
 const resolutions = computed(() => resolutionsFor(duration.value));

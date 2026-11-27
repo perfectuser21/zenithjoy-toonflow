@@ -13,6 +13,7 @@ import { isMobileLinkRequest } from "@/utils/mobileLink";
 import { changeMultiTenantEnabled } from "./runtime";
 import { canManageWorkspaceSkills, canUseWorkspaceAgent } from "./workspaceAgentAccess";
 import { isEnabled } from "./mode";
+import { namedPlatformAdminWebEnabled } from "./namedPlatformAdminWeb";
 
 export { startMultiTenantRuntime, stopMultiTenantRuntime } from "./runtime";
 export { creationPort, isEnabled } from "./mode";
@@ -50,7 +51,7 @@ function assertUserRequest(req: Request) {
   }
 }
 function assertControlRequest(req: Request) {
-  if (req.res?.locals.multiTenantWeb) throw Object.assign(new Error("创作入口不能访问主机管理接口"), { status: 403 });
+  if (req.res?.locals.multiTenantWeb && !req.res.locals.namedPlatformAdminWeb) throw Object.assign(new Error("创作入口不能访问主机管理接口"), { status: 403 });
   assertAppRequest(req);
 }
 
@@ -117,22 +118,38 @@ export function setup(req: Request, userName: string, password: string, enabled:
 
 export async function login(req: Request, res: Response, userName: string, password: string) {
   assertControlRequest(req);
-  const token = await accessControl(() => control.login(userName, password));
+  const namedWeb = req.res?.locals.namedPlatformAdminWeb === true;
+  const token = await accessControl(() => namedWeb ? control.loginNamedAdmin(userName, password) : control.login(userName, password));
   res.cookie("toonflowAdminSession", token, cookieOptions(req, "/api/multiTenant"));
-  return { token, enabled: isEnabled() };
+  return { ...(!namedWeb ? { token } : {}), enabled: isEnabled() };
 }
 
 export async function authorize(req: Request) {
   assertControlRequest(req);
-  if (authenticateHost(req)) return;
+  if (req.res?.locals.namedPlatformAdminWeb) {
+    return accessControl(() => control.authorizeNamedAdmin(cookie(req, "toonflowAdminSession")));
+  }
+  if (authenticateHost(req)) return accessControl(() => control.getAdminIdentity());
   const value = req.get("authorization") ?? "";
-  await accessControl(() => control.authorize(value.startsWith("Bearer ") ? value.slice(7) : cookie(req, "toonflowAdminSession")));
+  return accessControl(() => control.authorize(value.startsWith("Bearer ") ? value.slice(7) : cookie(req, "toonflowAdminSession")));
 }
 
 export async function logout(req: Request, res: Response) {
   assertControlRequest(req);
   const value = req.get("authorization") ?? "";
-  await accessControl(() => control.logout(value.startsWith("Bearer ") ? value.slice(7) : cookie(req, "toonflowAdminSession")));
+  const token = cookie(req, "toonflowAdminSession");
+  if (req.res?.locals.namedPlatformAdminWeb) {
+    await accessControl(async () => {
+      try { await control.authorizeNamedAdmin(token); }
+      catch (error) {
+        if ((error as { status?: number }).status === 401) return;
+        throw error;
+      }
+      await control.logout(token);
+    });
+  } else {
+    await accessControl(() => control.logout(value.startsWith("Bearer ") ? value.slice(7) : token));
+  }
   const host = hostClients.get(req.app);
   if (authenticateHost(req) && host) host.token = randomBytes(32).toString("hex");
   res.clearCookie("toonflowAdminSession", cookieOptions(req, "/api/multiTenant"));
@@ -155,15 +172,14 @@ export async function userSession(req: Request) {
   else if (host) user = await accessControl(() => control.getAdminIdentity());
   else {
     try {
-      await authorize(req);
-      user = await accessControl(() => control.getAdminIdentity());
+      user = await authorize(req);
     } catch (error) {
       if ((error as { status?: number }).status !== 401) throw error;
     }
   }
   const enabled = isEnabled();
   return { user, publicWeb, enabled, host, agentEnabled: !enabled || canUseWorkspaceAgent(user),
-    workspaceSkillsEnabled: canManageWorkspaceSkills(user), registrationEnabled: await accessControl(() => control.getRegistrationEnabled()) };
+    workspaceSkillsEnabled: canManageWorkspaceSkills(user), namedPlatformAdminLogin: publicWeb && namedPlatformAdminWebEnabled(req), registrationEnabled: await accessControl(() => control.getRegistrationEnabled()) };
 }
 
 export async function registerUser(req: Request, res: Response, userName: string, password: string) {
@@ -231,13 +247,13 @@ export async function resetUserPassword(req: Request, id: string, password: stri
 }
 
 export async function state(req: Request) {
-  await authorize(req);
+  const user = await authorize(req);
   const value = conf.get("settings", {}).ui;
   const ui = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
   return {
     enabled: isEnabled(),
     registrationEnabled: await accessControl(() => control.getRegistrationEnabled()),
-    user: await accessControl(() => control.getAdminIdentity()),
+    user,
     ui: Object.fromEntries(["theme", "language", "primaryColor", "fontScale", "radius"]
       .filter(key => Object.hasOwn(ui, key)).map(key => [key, ui[key]])),
   };

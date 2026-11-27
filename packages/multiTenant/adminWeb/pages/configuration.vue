@@ -7,14 +7,14 @@
 
     <section class="serviceSection" aria-labelledby="configurationServiceTitle">
       <h2 id="configurationServiceTitle">{{ translate("多租户服务") }}</h2>
-      <div class="settingRow" :aria-busy="saving">
+      <div v-if="canChangeHostState" class="settingRow" :aria-busy="saving">
         <div class="settingText">
           <label for="configurationMultiTenantEnabled">{{ translate("开启多租户") }}</label>
           <p id="configurationEnabledDescription">{{ translate("开启后，用户登录后即可访问创作 Web。") }}</p>
         </div>
         <el-switch id="configurationMultiTenantEnabled" :modelValue="enabled" :loading="saving" :disabled="saving || registrationSaving" :aria-label="translate('开启多租户')" aria-describedby="configurationEnabledDescription" @change="changeEnabled" />
       </div>
-      <p class="preservationNote">{{ translate("关闭服务不会删除账号、项目或设置。") }}</p>
+      <p v-if="canChangeHostState" class="preservationNote">{{ translate("关闭服务不会删除账号、项目或设置。") }}</p>
       <div class="settingRow" :aria-busy="registrationSaving">
         <div class="settingText">
           <label for="configurationRegistrationEnabled">{{ translate("允许注册") }}</label>
@@ -46,7 +46,7 @@ import { computed } from "vue";
 import { ElSwitch } from "element-plus";
 import "element-plus/es/components/switch/style/css";
 
-const props = defineProps<{ enabled: boolean; saving: boolean; registrationEnabled: boolean; registrationSaving: boolean; creationUrl: string }>();
+const props = defineProps<{ enabled: boolean; saving: boolean; registrationEnabled: boolean; registrationSaving: boolean; creationUrl: string; canChangeHostState: boolean }>();
 const emit = defineEmits<{ changeEnabled: [enabled: boolean]; changeRegistration: [enabled: boolean]; openCreation: [] }>();
 const accessPort = computed(() => {
   try {

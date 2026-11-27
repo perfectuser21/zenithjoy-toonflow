@@ -19,16 +19,18 @@ export async function initializeMultiTenant(): Promise<{ session: UserSession; a
   workspaceSkillsEnabled.value = session.workspaceSkillsEnabled ?? false;
   let app: App<Element> | undefined;
 
-  if (session.publicWeb && !session.user) {
+  const adminPath = /^#\/multiTenant(?:\/|$)/.test(window.location.hash);
+  const openNamedAdmin = adminPath && session.namedPlatformAdminLogin === true;
+  if (session.publicWeb && !session.user && !openNamedAdmin) {
     const { default: userWeb } = await import("@toonflow/multi-tenant-user-web");
     app = createApp({ render: () => h(ElConfigProvider, { locale: elementLocales[locale.value] }, () => h(userWeb, {
       request: http, brand: webBrand, registrationEnabled: session.registrationEnabled, onAuthenticated: () => window.location.reload(),
     })) });
-  } else if (!session.publicWeb && (session.enabled || window.location.hash.startsWith("#/multiTenant"))) {
+  } else if (openNamedAdmin || !session.publicWeb && (session.enabled || adminPath)) {
     const [{ createAdminRouter }, { RouterView }] = await Promise.all([
       import("@/pages/multiTenant/router"), import("vue-router"),
     ]);
-    const router = createAdminRouter();
+    const router = createAdminRouter(openNamedAdmin);
     app = createApp({ render: () => h(ElConfigProvider, { locale: elementLocales[locale.value] }, () => h(RouterView)) });
     app.use(router);
     await router.isReady();

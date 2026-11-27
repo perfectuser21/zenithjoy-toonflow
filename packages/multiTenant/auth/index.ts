@@ -1,7 +1,7 @@
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { openDatabase } from "@toonflow/multi-tenant-db";
-import type { AdminDatabase, ListUserOptions, ManagedUser } from "@toonflow/multi-tenant-db";
+import type { AdminDatabase, ListUserOptions, ManagedUser, UserRecord } from "@toonflow/multi-tenant-db";
 
 export type { ListUserOptions, ManagedUser } from "@toonflow/multi-tenant-db";
 
@@ -24,10 +24,36 @@ function digest(value: string) { return createHash("sha256").update(value).diges
 function fail(message: string, status: number): never { throw Object.assign(new Error(message), { status }); }
 function accountKey(value: string) { return value.normalize("NFKC").toLowerCase(); }
 
+function platformAdminIds() {
+  const ids = (process.env.TOONFLOW_PLATFORM_ADMIN_USER_IDS ?? "").split(",").map(id => id.trim());
+  return new Set(ids.filter(id => userIdSchema.safeParse(id).success));
+}
+
+function failedLogin(user: { failedAttempts: number; lockedUntil: number }, now: number) {
+  const failedAttempts = user.lockedUntil ? 1 : user.failedAttempts + 1;
+  return { failedAttempts, lockedUntil: failedAttempts >= 5 ? now + 60000 : 0 };
+}
+
+async function completeOrdinaryLogin(db: AdminDatabase, user: UserRecord, password: string) {
+  const now = Date.now();
+  if (user.disabled) fail("账号已禁用", 403);
+  if (user.lockedUntil > now) fail("尝试次数过多，请稍后重试", 429);
+  if (!await Bun.password.verify(password, user.passwordHash)) {
+    await db.updateUser(user.id, failedLogin(user, now), user.authVersion);
+    fail("账号或密码错误", 401);
+  }
+  if (!await db.completeUserLogin(user.id, user.authVersion, Date.now())) fail("账号状态已变更，请重新登录", 401);
+}
+
 export function createMultiTenant(dataDirectory: string) {
   let database: Promise<AdminDatabase | undefined> | undefined;
   let queue = Promise.resolve();
   let adminSessionHash: string | undefined;
+  const platformAdminSessionKey = randomBytes(32);
+  // 会话摘要使用本次进程密钥，管理令牌无法用于创作端，重启后需重新登录。
+  function platformAdminSessionHash(token: string) {
+    return createHmac("sha256", platformAdminSessionKey).update(token).digest("hex");
+  }
   async function getDatabase(create = false) {
     if (database) {
       const current = await database;
@@ -54,6 +80,27 @@ export function createMultiTenant(dataDirectory: string) {
     const expiresAt = user.role === "user" ? browserSessionExpiry : Date.now() + adminWebSessionLifetimeMs;
     await db.createWebSession({ tokenHash: digest(token), userId: user.id, role: user.role, expiresAt, authVersion });
     return { token, user };
+  }
+  async function createNamedAdminSession(db: AdminDatabase, user: UserRecord, password: string) {
+    await completeOrdinaryLogin(db, user, password);
+    const token = randomBytes(32).toString("hex");
+    await db.createWebSession({ tokenHash: platformAdminSessionHash(token), userId: user.id, role: "admin",
+      expiresAt: Date.now() + adminWebSessionLifetimeMs, authVersion: user.authVersion });
+    return token;
+  }
+  async function authorizeNamedAdmin(token: string): Promise<AuthIdentity> {
+    if (!/^[a-f0-9]{64}$/.test(token)) fail("请先登录多租户管理后台", 401);
+    const adminIds = platformAdminIds();
+    if (!adminIds.size) fail("管理会话已失效，请重新登录", 401);
+    const db = await getDatabase();
+    if (!db) fail("管理会话已失效，请重新登录", 401);
+    const session = await db.getWebSession(platformAdminSessionHash(token));
+    if (session?.role !== "admin" || session.expiresAt <= Date.now() || !adminIds.has(session.userId)) {
+      fail("管理会话已失效，请重新登录", 401);
+    }
+    const user = await db.getUserById(session.userId);
+    if (!user || user.disabled || user.authVersion !== session.authVersion) fail("管理会话已失效，请重新登录", 401);
+    return { id: user.id, userName: user.userName, role: "admin" };
   }
   async function addUser(db: AdminDatabase, account: string, password: string, selfRegistration = false) {
     const admin = await db.getAdmin();
@@ -110,6 +157,24 @@ export function createMultiTenant(dataDirectory: string) {
         }
       });
     },
+    loginNamedAdmin(userName: string, password: string) {
+      const key = accountKey(adminAccountSchema.parse(userName));
+      passwordSchema.parse(password);
+      return serial(async () => {
+        const db = await getDatabase();
+        if (!db) fail("请先设置超级管理员账号", 409);
+        await db.initialize();
+        const admin = await db.getAdmin();
+        if (!admin) fail("请先设置超级管理员账号", 409);
+        const adminIds = platformAdminIds();
+        const user = adminIds.size && key !== accountKey(admin.userName) ? await db.getUser(key) : undefined;
+        if (!user || !adminIds.has(user.id)) {
+          await Bun.password.verify(password, admin.passwordHash);
+          fail("超级管理员账号或密码错误", 401);
+        }
+        return createNamedAdminSession(db, user, password);
+      });
+    },
     login(userName: string, password: string) {
       const account = adminAccountSchema.parse(userName);
       passwordSchema.parse(password);
@@ -119,37 +184,52 @@ export function createMultiTenant(dataDirectory: string) {
         await db.initialize();
         const admin = await db.getAdmin();
         if (!admin) fail("请先设置超级管理员账号", 409);
+        const key = accountKey(account);
+        const isRoot = key === accountKey(admin.userName);
+        const adminIds = platformAdminIds();
+        if (!isRoot && adminIds.size) {
+          const user = await db.getUser(key);
+          if (user && adminIds.has(user.id)) return createNamedAdminSession(db, user, password);
+        }
         const now = Date.now();
         if (admin.lockedUntil > now) fail("尝试次数过多，请稍后重试", 429);
         const passwordMatches = await Bun.password.verify(password, admin.passwordHash);
-        if (accountKey(account) !== accountKey(admin.userName) || !passwordMatches) {
-          const attempts = admin.lockedUntil ? 1 : admin.failedAttempts + 1;
-          await db.updateAdmin({ failedAttempts: attempts, lockedUntil: attempts >= 5 ? now + 60000 : 0 });
+        if (!isRoot || !passwordMatches) {
+          await db.updateAdmin(failedLogin(admin, now));
           fail("超级管理员账号或密码错误", 401);
         }
-        // ACT: 当前只有一个超级管理员会话；重新登录会替换旧会话，后续多用户阶段再扩展会话表。
         const token = randomBytes(32).toString("hex");
-        await db.updateAdmin({ sessionHash: digest(token), sessionExpiresAt: now + 8 * 60 * 60 * 1000, failedAttempts: 0, lockedUntil: 0 });
+        await db.updateAdmin({ sessionHash: digest(token), sessionExpiresAt: now + adminWebSessionLifetimeMs, failedAttempts: 0, lockedUntil: 0 });
         adminSessionHash = digest(token);
         return token;
       });
     },
-    async authorize(token: string) {
+    authorizeNamedAdmin,
+    async authorize(token: string): Promise<AuthIdentity> {
       if (!/^[a-f0-9]{64}$/.test(token)) fail("请先登录多租户管理后台", 401);
-      if (!adminSessionHash || digest(token) !== adminSessionHash) fail("管理会话已失效，请重新登录", 401);
-      const db = await getDatabase();
-      const admin = await db?.getAdmin();
-      if (!admin?.sessionHash || admin.sessionExpiresAt <= Date.now()) fail("管理会话已失效，请重新登录", 401);
-      const actual = Buffer.from(digest(token), "hex");
-      const expected = Buffer.from(admin.sessionHash, "hex");
-      if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) fail("管理会话已失效，请重新登录", 401);
+      const tokenHash = digest(token);
+      if (adminSessionHash === tokenHash) {
+        const db = await getDatabase();
+        const admin = await db?.getAdmin();
+        if (!admin?.sessionHash || admin.sessionExpiresAt <= Date.now()) fail("管理会话已失效，请重新登录", 401);
+        const actual = Buffer.from(tokenHash, "hex");
+        const expected = Buffer.from(admin.sessionHash, "hex");
+        if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) fail("管理会话已失效，请重新登录", 401);
+        return { id: "admin", userName: admin.userName, role: "admin" };
+      }
+      return authorizeNamedAdmin(token);
     },
     logout(token: string) {
       return serial(async () => {
-        if (!adminSessionHash || !/^[a-f0-9]{64}$/.test(token) || digest(token) !== adminSessionHash) return;
+        if (!/^[a-f0-9]{64}$/.test(token)) return;
         const db = await getDatabase();
-        await db?.updateAdmin({ sessionHash: null, sessionExpiresAt: 0 });
-        adminSessionHash = undefined;
+        if (adminSessionHash === digest(token)) {
+          await db?.updateAdmin({ sessionHash: null, sessionExpiresAt: 0 });
+          adminSessionHash = undefined;
+          return;
+        }
+        const tokenHash = platformAdminSessionHash(token);
+        if ((await db?.getWebSession(tokenHash))?.role === "admin") await db?.expireWebSession(tokenHash);
       });
     },
     register(userName: string, password: string) {
@@ -212,27 +292,23 @@ export function createMultiTenant(dataDirectory: string) {
         const admin = await db.getAdmin();
         if (!admin) fail("请先设置超级管理员账号", 409);
         const key = accountKey(account);
-        const isAdmin = key === accountKey(admin.userName);
-        const ordinaryUser = isAdmin ? undefined : await db.getUser(key);
-        const user = isAdmin ? admin : ordinaryUser;
-        const now = Date.now();
-        if (ordinaryUser?.disabled) fail("账号已禁用", 403);
-        if (user && user.lockedUntil > now) fail("尝试次数过多，请稍后重试", 429);
-        const passwordMatches = await Bun.password.verify(password, user?.passwordHash ?? admin.passwordHash);
-        if (!user || !passwordMatches) {
-          if (user) {
-            const attempts = user.lockedUntil ? 1 : user.failedAttempts + 1;
-            const values = { failedAttempts: attempts, lockedUntil: attempts >= 5 ? now + 60000 : 0 };
-            if (isAdmin) await db.updateAdmin(values);
-            else if (ordinaryUser) await db.updateUser(ordinaryUser.id, values, ordinaryUser.authVersion);
+        if (key !== accountKey(admin.userName)) {
+          const user = await db.getUser(key);
+          if (!user) {
+            await Bun.password.verify(password, admin.passwordHash);
+            fail("账号或密码错误", 401);
           }
+          await completeOrdinaryLogin(db, user, password);
+          return createWebSession(db, { id: user.id, userName: user.userName, role: "user" }, user.authVersion);
+        }
+        const now = Date.now();
+        if (admin.lockedUntil > now) fail("尝试次数过多，请稍后重试", 429);
+        if (!await Bun.password.verify(password, admin.passwordHash)) {
+          await db.updateAdmin(failedLogin(admin, now));
           fail("账号或密码错误", 401);
         }
-        if (isAdmin) await db.updateAdmin({ failedAttempts: 0, lockedUntil: 0 });
-        else if (!ordinaryUser || !await db.completeUserLogin(ordinaryUser.id, ordinaryUser.authVersion, Date.now())) {
-          fail("账号状态已变更，请重新登录", 401);
-        }
-        return createWebSession(db, { id: isAdmin ? "admin" : String(user.id), userName: user.userName, role: isAdmin ? "admin" : "user" }, ordinaryUser?.authVersion ?? 0);
+        await db.updateAdmin({ failedAttempts: 0, lockedUntil: 0 });
+        return createWebSession(db, { id: "admin", userName: admin.userName, role: "admin" });
       });
     },
     async authenticateWeb(token: string): Promise<AuthIdentity | null> {

@@ -1,6 +1,6 @@
 <template>
   <div class="multiTenantPage">
-    <adminWeb :request="requestAdmin" :logoUrl="logoUrl" :creationUrl="creationUrl.href" :accountName="currentUser?.userName" @enabledChange="applyMultiTenantEnabled" @back="openCreation" />
+    <adminWeb :request="requestAdmin" :logoUrl="logoUrl" :creationUrl="creationUrl.href" :accountName="currentUser?.userName" :canChangeHostState="!publicWeb" @enabledChange="applyMultiTenantEnabled" @back="openCreation" />
     <desktopQuit v-if="actualPlatform.isDesktop" />
   </div>
 </template>
@@ -14,13 +14,13 @@ import desktopQuit from "@/components/desktopQuit.vue";
 import http from "@/lib/http";
 import { actualPlatform } from "@/lib/platform";
 import { applyMultiTenantEnabled, settings } from "@/stores/settings";
-import { currentUser } from "@/stores/multiTenant";
+import { currentUser, publicWeb } from "@/stores/multiTenant";
 import { registerAppearance } from "@/lib/appearance";
 import { registerLanguage } from "@/lib/i18n";
 
 const hostWindow = window as Window & { __electrobunSendToHost?: (message: { type: "openExternal"; url: string }) => void };
 const creationUrl = new URL(window.location.origin);
-creationUrl.port = "10888";
+if (!publicWeb.value) creationUrl.port = "10888";
 creationUrl.hash = "/home";
 
 onBeforeUnmount(registerAppearance());

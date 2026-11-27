@@ -14,6 +14,7 @@ import { runWithIdentity } from "./context";
 import { verifyProjectQuota } from "@/utils/workspace/projectQuota";
 import { isolatedBackgroundBeta, productionBackgroundAdmission } from "./backgroundAdmission";
 import { canUseWorkspaceAgent } from "./workspaceAgentAccess";
+import { isNamedPlatformAdminWeb } from "./namedPlatformAdminWeb";
 
 type Runtime = { started: boolean; server?: Server; sockets: Set<Socket>; queue: Promise<void>; onEnabledChange?: (enabled: boolean) => void };
 const runtimes = new WeakMap<Application, Runtime>();
@@ -176,6 +177,10 @@ export async function multiTenantAccess(req: Request, res: Response, next: NextF
   const desktopRoute = path === "/api/desktop" || path.startsWith("/api/desktop/");
   if (userRoutes.has(path) && (publicWeb || path === "/api/multitenant/user/session")) return next();
   if (!publicWeb && (managementRoute || path === "/api/desktop/ready")) return next();
+  if (publicWeb && managementRoute && isNamedPlatformAdminWeb(req, path)) {
+    res.locals.namedPlatformAdminWeb = true;
+    return next();
+  }
   if (!publicWeb && !desktopRoute) throw Object.assign(new Error("请通过端口 10888 访问创作功能"), { status: 403 });
   const platformRoute = platformPrefixes.some(prefix => path === prefix || path.startsWith(`${prefix}/`))
     || platformControlRoutes.has(path) || path === "/api/ai/media/balance" || path === "/api/ai/media/balanceevents";
