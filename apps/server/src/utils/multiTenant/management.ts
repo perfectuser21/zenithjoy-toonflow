@@ -52,8 +52,8 @@ export async function creditUserBalance(req: Request, input: BillingCredit) {
 }
 
 export async function releaseUserReservation(req: Request, userId: string, requestId: string, reason: string) {
-  await authorize(req);
-  return modelGateway.releaseReservation(userId, requestId, { actorId: "admin", reason });
+  const administrator = await authorize(req);
+  return modelGateway.releaseReservation(userId, requestId, { actorId: administrator?.id ?? "admin", reason });
 }
 
 export async function readOwnBalance(req: Request): Promise<CustomerPoints> {

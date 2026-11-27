@@ -98,7 +98,7 @@
           <div class="contentInner">
             <el-alert v-if="requestError" class="requestError" :title="requestError" type="error" :closable="false" showIcon />
             <router-view v-slot="{ Component: currentComponent }">
-              <component :is="currentComponent" v-bind="['multiTenantUsers', 'multiTenantSourceMapping', 'multiTenantProviders', 'multiTenantModels', 'multiTenantPrices'].includes(String(route.name)) ? { request, onSessionExpired: sessionExpired } : route.name === 'multiTenantConfiguration' ? { registrationEnabled, registrationSaving } : {}" :enabled="enabled" :saving="saving" :creationUrl="creationUrl" @changeEnabled="changeEnabled" @changeRegistration="changeRegistration" @openCreation="emit('back')" />
+              <component :is="currentComponent" v-bind="['multiTenantUsers', 'multiTenantSourceMapping', 'multiTenantProviders', 'multiTenantModels', 'multiTenantPrices'].includes(String(route.name)) ? { request, onSessionExpired: sessionExpired } : route.name === 'multiTenantConfiguration' ? { registrationEnabled, registrationSaving, canChangeHostState } : {}" :enabled="enabled" :saving="saving" :creationUrl="creationUrl" @changeEnabled="changeEnabled" @changeRegistration="changeRegistration" @openCreation="emit('back')" />
             </router-view>
           </div>
         </main>
@@ -121,12 +121,13 @@ import "element-plus/es/components/form-item/style/css";
 import "element-plus/es/components/input/style/css";
 import "element-plus/es/components/skeleton/style/css";
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   logoUrl: string;
   accountName?: string;
   creationUrl: string;
   request: AdminRequest;
-}>();
+  canChangeHostState?: boolean;
+}>(), { canChangeHostState: true });
 const emit = defineEmits<{ enabledChange: [enabled: boolean]; back: [] }>();
 const route = useRoute();
 const sidebarCollapsed = ref(false);
@@ -210,7 +211,7 @@ async function login() {
 }
 
 async function changeEnabled(value: boolean | string | number) {
-  if (saving.value || registrationSaving.value || !authenticated.value || typeof value !== "boolean") return;
+  if (!props.canChangeHostState || saving.value || registrationSaving.value || !authenticated.value || typeof value !== "boolean") return;
   saving.value = true;
   requestError.value = "";
   try {
@@ -229,7 +230,7 @@ async function changeEnabled(value: boolean | string | number) {
 }
 
 async function changeRegistration(value: boolean | string | number) {
-  if (saving.value || registrationSaving.value || !authenticated.value || typeof value !== "boolean") return;
+  if (!props.canChangeHostState || saving.value || registrationSaving.value || !authenticated.value || typeof value !== "boolean") return;
   registrationSaving.value = true;
   requestError.value = "";
   try {

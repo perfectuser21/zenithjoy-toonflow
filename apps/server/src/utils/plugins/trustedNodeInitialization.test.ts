@@ -1294,6 +1294,41 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
     const longSource = "assets/concatOverLimit.mp4";
     ffmpeg("-f", "lavfi", "-i", "color=red:size=64x64:rate=1:duration=121", "-c:v", "libx264", join(customerProject.directory, longSource));
     ordinaryWeb = true;
+    const browserAdminOrigin = process.env.TOONFLOW_PLATFORM_ADMIN_ORIGIN;
+    const browserAdminIds = process.env.TOONFLOW_PLATFORM_ADMIN_USER_IDS;
+    process.env.TOONFLOW_PLATFORM_ADMIN_ORIGIN = origin;
+    process.env.TOONFLOW_PLATFORM_ADMIN_USER_IDS = customer.id;
+    const adminContext = await browser.createBrowserContext();
+    try {
+      const adminPage = await adminContext.newPage();
+      await adminPage.goto(origin + "/#/multiTenant", { waitUntil: "domcontentloaded" });
+      const probe = () => adminPage.evaluate(async () => {
+        const headers = { "Content-Type": "application/json", "x-toonflow-workspace": "1" };
+        const state = await fetch("/api/multiTenant/state", { headers });
+        const creative = await fetch("/api/multiTenant/user/session", { headers });
+        const wrongOrigin = await fetch("/api/multiTenant/state", { headers, referrerPolicy: "no-referrer" });
+        const stopped = await fetch("/api/multiTenant/enabled", { headers, method: "PUT", body: JSON.stringify({ enabled: false }) });
+        return {
+          admin: (await state.json()).data?.user?.id, controlStatus: state.status,
+          creative: (await creative.json()).data?.user, foreign: wrongOrigin.status, hostSwitch: stopped.status,
+        };
+      });
+      expect(await probe()).toMatchObject({ controlStatus: 401, creative: null, foreign: 403, hostSwitch: 403 });
+      await adminPage.locator('input[autocomplete="username"]').fill(customer.userName);
+      await adminPage.locator('input[autocomplete="current-password"]').fill(customerPassword);
+      const adminLogin = adminPage.waitForResponse(response => new URL(response.url()).pathname === "/api/multiTenant/login");
+      await adminPage.locator('button[type="submit"]').click();
+      const response = await adminLogin;
+      expect(response.status()).toBe(200);
+      expect((await response.json()).data).not.toHaveProperty("token");
+      expect(await probe()).toMatchObject({ admin: customer.id, controlStatus: 200, creative: null, foreign: 403, hostSwitch: 403 });
+    } finally {
+      if (browserAdminOrigin === undefined) delete process.env.TOONFLOW_PLATFORM_ADMIN_ORIGIN;
+      else process.env.TOONFLOW_PLATFORM_ADMIN_ORIGIN = browserAdminOrigin;
+      if (browserAdminIds === undefined) delete process.env.TOONFLOW_PLATFORM_ADMIN_USER_IDS;
+      else process.env.TOONFLOW_PLATFORM_ADMIN_USER_IDS = browserAdminIds;
+      await adminContext.close();
+    }
     const observed = [];
     for (const simulateCatalogOutage of [false, true]) {
       modelCatalogUnavailable = simulateCatalogOutage;
