@@ -1,7 +1,7 @@
 <template>
   <nodeSkeleton v-bind="nodeProps" class="mashupNode" :topVisible="node.selected" :fullscreenVisible="false" :downloadUrl="preview" :downloadName="selected?.name">
     <div class="mashupContent nodrag nopan nowheel" @pointerdown.stop @dblclick.stop @keydown.stop>
-      <p class="hint">按组顺序拼接 H.264 MP4 或 MOV。格式不同时，画面以每条成片的第一段尺寸为准，保留各段比例。支持 AAC 原声和无声片段混用。</p>
+      <p class="hint">按组顺序拼接并导出 1080P，横竖屏跟随每条成片的第一段，各段画面等比缩放。支持 AAC 原声和无声片段混用。</p>
       <fieldset :disabled="busy">
         <section v-for="(group, slot) in state.groups" :key="slot" class="mediaGroup" @dragover.prevent.stop @drop.prevent.stop="addFiles(slot, $event.dataTransfer?.files)">
           <div><strong>{{ group.name }}</strong><span>{{ groups[slot].length }} 个片段</span>
@@ -56,7 +56,8 @@ defineOptions({
     { id: "videos", type: "source", dataType: "VIDEO_BATCH", label: "整批成片" },
   ] satisfies NodeHandle[],
 });
-type Batch = { key: string; target: number; results: MashupClip[]; previewOnly?: boolean };
+const outputResolution = "1080p";
+type Batch = { key: string; target: number; results: MashupClip[]; previewOnly?: boolean; resolution?: typeof outputResolution };
 type MashupState = { groups: MashupGroup[]; limit: number | ""; selectedIndex?: number; batch?: Batch };
 const { id, node, nodeProps, files, outputs, handles, nodeEvent } = useNode({ label: "批量混剪" });
 const persisted = node.data as typeof node.data & { mashup?: MashupState };
@@ -98,7 +99,8 @@ const count = computed(() => combinationCount(groups.value));
 const limit = computed(() => state.limit === "" ? count.value : state.limit);
 const canRun = computed(() => Number.isSafeInteger(limit.value) && limit.value > 0 && limit.value <= count.value);
 const batchKey = computed(() => JSON.stringify(groups.value.map(clips => clips.map(clip => clip.url))));
-const unfinished = computed(() => state.batch?.key === batchKey.value && results.value.length > 0 && results.value.length < limit.value);
+const unfinished = computed(() => state.batch?.resolution === outputResolution && state.batch.key === batchKey.value
+  && results.value.length > 0 && results.value.length < limit.value);
 watchEffect(() => {
   const batch = state.batch;
   outputs.value.videos = !running.value && batch && !batch.previewOnly && batch.key === batchKey.value
@@ -149,8 +151,8 @@ async function run(first: boolean) {
     const saved = binding();
     const snapshot = groups.value.map(clips => clips.map(clip => ({ ...clip })));
     const target = first ? 1 : limit.value;
-    if (state.batch?.key !== batchKey.value) {
-      state.batch = { key: batchKey.value, target, results: [], previewOnly: first };
+    if (state.batch?.key !== batchKey.value || state.batch.resolution !== outputResolution) {
+      state.batch = { key: batchKey.value, target, results: [], previewOnly: first, resolution: outputResolution };
       selectedIndex.value = 0;
     }
     const batch = state.batch!;
@@ -183,7 +185,7 @@ async function run(first: boolean) {
         }
         blobs.push(lastClip[slot].blob);
       }
-      const output = await concatVideo(blobs, signal);
+      const output = await concatVideo(blobs, signal, { resolution: outputResolution });
       signal.throwIfAborted(); ensureCurrent(saved);
       const name = String(index + 1).padStart(3, "0") + "_" + clips.map(clip => clip.name.replace(/\.[^.]+$/, "").replace(/[^\p{L}\p{N}._-]/gu, "_").slice(0, 24)).join("-") + ".mp4";
       const url = await uploadNodeFile(workspace, id, new File([output], name, { type: "video/mp4" }));
