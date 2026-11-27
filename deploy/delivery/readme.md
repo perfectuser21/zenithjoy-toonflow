@@ -170,7 +170,7 @@ GitHub 在正式晋级前还会通过只读 preflight 核对杭州主机已安�
 
 ### 杭州公网入口的不可用提示
 
-将 `canvasUnavailable.conf` 安装到杭州公网 Nginx，并在 `aivideo.zenithjoy.tech` 的 HTTPS `server` 块内包含它。代理位置保留 `proxy_intercept_errors off`，让应用返回的业务错误照常传给客户端。通过 `nginx -t` 后重载配置。
+在杭州网关的 `aivideo.zenithjoy.tech` HTTPS `server` 块内加入 `canvasUnavailable.conf` 的内容。当前容器只绑定宿主机的 `/opt/zenithjoy-cn/production/nginx.conf`，检查容器内的配置已读到改动后，再运行 `nginx -t` 和重载。代理位置保留 `proxy_intercept_errors off`，让应用返回的状态照常传给客户端。
 
 在隔离网关验证空闲上游端口。页面应返回带中文提示的 503，画布保存接口应返回带提示的 503 JSON。上游恢复后，首页和保存接口应重新通过原代理。正在编辑的用户可保留当前页面，等服务恢复后再保存。
 
