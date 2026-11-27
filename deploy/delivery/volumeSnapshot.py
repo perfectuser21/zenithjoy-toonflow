@@ -51,7 +51,7 @@ def requireSpace(directory, required):
         raise RuntimeError('insufficient bounded backup storage')
 
 
-def sparseCopy(source, target, timeout=90):
+def sparseCopy(source, target, timeout=90, *, maxPayloadBytes=None):
     source, target = Path(source), Path(target)
     info = source.lstat()
     if not stat.S_ISREG(info.st_mode) or info.st_size <= 0:
@@ -62,10 +62,14 @@ def sparseCopy(source, target, timeout=90):
         fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         try:
             offset = 0
+            nonzero = 0
             while chunk := incoming.read(quantum):
                 if time.monotonic() > deadline:
                     raise RuntimeError('volume copy timed out')
                 if chunk != zero[:len(chunk)]:
+                    nonzero += 1
+                    if maxPayloadBytes is not None and nonzero * quantum > maxPayloadBytes:
+                        raise RuntimeError('insufficient bounded backup storage')
                     written = 0
                     while written < len(chunk):
                         count = os.pwrite(fd, chunk[written:], offset + written)
@@ -79,3 +83,5 @@ def sparseCopy(source, target, timeout=90):
             os.fsync(fd)
         finally:
             os.close(fd)
+    return {'logicalBytes': offset, 'nonzeroQuanta': nonzero,
+            'estimatedPayloadBytes': nonzero * quantum}

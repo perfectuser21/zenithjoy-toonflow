@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 from releasePolicy import requireQuotaVolume
-from volumeSnapshot import scanVolume, requireSpace, sparseCopy, capsuleSize, reserve, requireCapsuleFilesystem
+from volumeSnapshot import requireSpace, sparseCopy, capsuleSize, reserve, requireCapsuleFilesystem
 
 
 def command(args, timeout=120):
@@ -153,9 +153,11 @@ def main():
         guardArmed = True
         frozen = True
         command(['fsfreeze', '--freeze', data], timeout=30)
-        storage = scanVolume(volume)
-        requireSpace(payload, 2 * storage['estimatedPayloadBytes'] + 64 * 1024**2)
-        sparseCopy(volume, snapshot)
+        stats = os.statvfs(payload)
+        restoreReserve = 64 * 1024**2
+        available = stats.f_bavail * stats.f_frsize
+        storage = sparseCopy(volume, snapshot, maxPayloadBytes=(available - restoreReserve) // 2)
+        requireSpace(payload, storage['estimatedPayloadBytes'] + restoreReserve)
         os.chmod(snapshot, 0o600)
         with open(snapshot, 'rb') as durable:
             os.fsync(durable.fileno())
