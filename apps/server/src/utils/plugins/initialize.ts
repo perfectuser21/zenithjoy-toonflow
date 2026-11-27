@@ -6,6 +6,7 @@ export const trustedNodeNames: Readonly<Record<string, string>> = {
   videoNode: "视频",
   frameAnalysisNode: "逐帧拉片",
   textNode: "文本",
+  skillNode: "Skill",
   videoGenerationNode: "视频生成",
   imageNode: "图片",
   ipCardNode: "IP 卡片改版",
@@ -23,7 +24,7 @@ export async function initializeTrustedNodes(targetDirectory: string, sourceDire
 
 export async function initializeHostedSharedCanvasNodes(targetDirectory: string, sourceDirectory: string) {
   await syncBundledNodes(targetDirectory, sourceDirectory, [
-    "frameAnalysisNode.umd.js", "videoNode.umd.js", "ipCardNode.umd.js", "ipWorkflowNode.umd.js", "videoGenerationNode.umd.js", "mashupNode.umd.js", "videoConcatNode.umd.js",
+    "frameAnalysisNode.umd.js", "videoNode.umd.js", "ipCardNode.umd.js", "ipWorkflowNode.umd.js", "skillNode.umd.js", "videoGenerationNode.umd.js", "mashupNode.umd.js", "videoConcatNode.umd.js",
   ], "hostedSharedNodesRevision");
 }
 
