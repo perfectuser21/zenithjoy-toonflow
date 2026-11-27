@@ -18,6 +18,31 @@ import { initializeHostedSharedCanvasNodes, initializeTrustedNodes, trustedNodeN
 import { canvasRelease } from "../../../../../canvasRelease";
 import { aliyunImageFailure, browserCanvasDiagnosticSchema, workspaceErrorDiagnostic } from "../../lib/diagnosticReport";
 
+test("workspace Agent admits only named pilot accounts with the shared beta disabled", async () => {
+  const { canUseWorkspaceAgent } = await import("../multiTenant/runtime");
+  const beta = process.env.TOONFLOW_TRUSTED_CANVAS_BETA;
+  const pilots = process.env.TOONFLOW_WORKSPACE_AGENT_USER_IDS;
+  const first = { id: randomUUID(), userName: "first", role: "user" as const };
+  const second = { id: randomUUID(), userName: "second", role: "user" as const };
+  const other = { id: randomUUID(), userName: first.userName, role: "user" as const };
+  try {
+    delete process.env.TOONFLOW_TRUSTED_CANVAS_BETA;
+    process.env.TOONFLOW_WORKSPACE_AGENT_USER_IDS = `  ${first.id}, ${second.id} `;
+    expect(canUseWorkspaceAgent(first)).toBe(true);
+    expect(canUseWorkspaceAgent(second)).toBe(true);
+    expect(canUseWorkspaceAgent(other)).toBe(false);
+    expect(canUseWorkspaceAgent(null)).toBe(false);
+    expect(canUseWorkspaceAgent({ id: "admin", userName: "admin", role: "admin" })).toBe(true);
+    process.env.TOONFLOW_TRUSTED_CANVAS_BETA = "1";
+    expect(canUseWorkspaceAgent(other)).toBe(true);
+  } finally {
+    if (beta === undefined) delete process.env.TOONFLOW_TRUSTED_CANVAS_BETA;
+    else process.env.TOONFLOW_TRUSTED_CANVAS_BETA = beta;
+    if (pilots === undefined) delete process.env.TOONFLOW_WORKSPACE_AGENT_USER_IDS;
+    else process.env.TOONFLOW_WORKSPACE_AGENT_USER_IDS = pilots;
+  }
+});
+
 test("workspace errors identify the route and reason without retaining paths or error messages", () => {
   const failure = Object.assign(new Error("user-project.txt"), { code: "WORKSPACE_NOT_FOUND" });
   expect(workspaceErrorDiagnostic("/api/workspaces/files/list", 404, failure)).toEqual({
@@ -1297,6 +1322,34 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
         expect(sessionCookie?.session).toBe(true);
         await tenantPage.waitForSelector(".workspacePage:not([inert]) .canvasPanel:not([inert]), .el-result", { visible: true, timeout: 15000 });
         if (!simulateCatalogOutage) {
+          const skillRequests = (admitted: boolean) => tenantPage.evaluate(async input => {
+            const headers = { "Content-Type": "application/json", "x-toonflow-workspace": "1" };
+            const list = (directory: string) => fetch("/api/agent/skills?" + new URLSearchParams({ directory }), { headers });
+            const upload = (directory: string, content: string) => fetch("/api/agent/skills/import", {
+              method: "POST", headers, body: JSON.stringify({ directory, content }),
+            });
+            const content = "---\nname: workspace-pilot\ndescription: Project pilot fixture\n---\nUse the project pilot instructions.";
+            if (!input.admitted) return { denied: (await list(input.own)).status, createDenied: (await upload(input.own, content)).status };
+            const session = await (await fetch("/api/multiTenant/user/session", { headers })).json() as { data: { agentEnabled: boolean } };
+            const created = await upload(input.own, content);
+            const duplicate = await upload(input.own, content);
+            const invalid = await upload(input.own, "---\nname: ../outside\ndescription: invalid\n---");
+            const foreign = await upload(input.foreign, content);
+            const listed = await list(input.own);
+            const body = await listed.json() as { data: unknown[] };
+            return { created: created.status, duplicate: duplicate.status, invalid: invalid.status, foreign: foreign.status,
+              agentEnabled: session.data.agentEnabled, listed: body.data, global: (await fetch("/api/skills/get", { headers })).status };
+          }, { admitted, own: customerProject.directory, foreign: project.directory });
+          expect(await skillRequests(false)).toEqual({ denied: 403, createDenied: 403 });
+          const pilots = process.env.TOONFLOW_WORKSPACE_AGENT_USER_IDS;
+          process.env.TOONFLOW_WORKSPACE_AGENT_USER_IDS = customer.id;
+          try {
+            expect(await skillRequests(true)).toMatchObject({ created: 201, duplicate: 409, invalid: 400, foreign: 403,
+              agentEnabled: true, listed: expect.arrayContaining([expect.objectContaining({ name: "workspace-pilot" })]), global: 403 });
+          } finally {
+            if (pilots === undefined) delete process.env.TOONFLOW_WORKSPACE_AGENT_USER_IDS;
+            else process.env.TOONFLOW_WORKSPACE_AGENT_USER_IDS = pilots;
+          }
           const diagnostics = await tenantPage.evaluate(async directory => {
             const headers = { "Content-Type": "application/json", "x-toonflow-workspace": "1" };
             const missing = await fetch("/api/workspaces/files/list?" + new URLSearchParams({ directory: directory + "/missingDiagnosticFixture" }), { headers });

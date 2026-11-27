@@ -10,7 +10,7 @@ import type { SourceMapping } from "@toonflow/multi-tenant-source-mapping/config
 import conf from "@/utils/conf";
 import { assertAppRequest } from "@/utils/mcp/control";
 import { isMobileLinkRequest } from "@/utils/mobileLink";
-import { canUseWorkspaceAgent, changeMultiTenantEnabled } from "./runtime";
+import { canManageWorkspaceSkills, canUseWorkspaceAgent, changeMultiTenantEnabled } from "./runtime";
 import { isEnabled } from "./mode";
 
 export { startMultiTenantRuntime, stopMultiTenantRuntime } from "./runtime";
@@ -162,7 +162,7 @@ export async function userSession(req: Request) {
   }
   const enabled = isEnabled();
   return { user, publicWeb, enabled, host, agentEnabled: !enabled || canUseWorkspaceAgent(user),
-    registrationEnabled: await accessControl(() => control.getRegistrationEnabled()) };
+    workspaceSkillsEnabled: canManageWorkspaceSkills(user), registrationEnabled: await accessControl(() => control.getRegistrationEnabled()) };
 }
 
 export async function registerUser(req: Request, res: Response, userName: string, password: string) {

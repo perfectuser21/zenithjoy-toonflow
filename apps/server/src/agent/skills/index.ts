@@ -28,6 +28,13 @@ export function loadAgentSkills(cwd: string, scope?: SkillScope) {
   return result;
 }
 
+const localSkillName = /^[a-z][a-zA-Z0-9]*$/;
+const workspaceSkillName = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+
+export function isWorkspaceSkillName(name: string) {
+  return name.length <= 64 && (localSkillName.test(name) || workspaceSkillName.test(name));
+}
+
 export function createSkillContext(cwd: string): SkillContext {
   const skillScope = (filePath: string): SkillScope => isWithin(join(cwd, "skill"), filePath) ? "workspace" : "global";
 
@@ -38,7 +45,9 @@ export function createSkillContext(cwd: string): SkillContext {
     const scope = create ? request.scope ?? "workspace" : request.scope;
     const skill = loadAgentSkills(cwd, scope).skills.find(skill => skill.name === request.name);
     if (!skill && !create) throw new Error(t`技能不存在：${request.name}`);
-    if (!skill && (request.name.length > 64 || !/^[a-z][a-zA-Z0-9]*$/.test(request.name))) throw new Error("新技能名称必须为不超过 64 字符的小驼峰");
+    if (!skill && (scope === "workspace" ? !isWorkspaceSkillName(request.name) : request.name.length > 64 || !localSkillName.test(request.name))) {
+      throw new Error("技能名称须以小写字母开头，最多 64 个字符，工作区技能可用短横线");
+    }
     const targetScope = scope ?? skillScope(skill!.filePath);
     const root = await realpath(targetScope === "workspace" ? cwd : dirname(conf.path));
     const { path: scopeDirectory } = await resolveWorkspacePath(root, targetScope === "workspace" ? "skill" : "skills", true);
