@@ -1308,9 +1308,11 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
         const creative = await fetch("/api/multiTenant/user/session", { headers });
         const wrongOrigin = await fetch("/api/multiTenant/state", { headers, referrerPolicy: "no-referrer" });
         const stopped = await fetch("/api/multiTenant/enabled", { headers, method: "PUT", body: JSON.stringify({ enabled: false }) });
+        const adminBody = await state.json() as { data?: { user?: { id: string } } | null };
+        const creativeBody = await creative.json() as { data?: { user: unknown } };
         return {
-          admin: (await state.json()).data?.user?.id, controlStatus: state.status,
-          creative: (await creative.json()).data?.user, foreign: wrongOrigin.status, hostSwitch: stopped.status,
+          admin: adminBody.data?.user?.id, controlStatus: state.status,
+          creative: creativeBody.data?.user, foreign: wrongOrigin.status, hostSwitch: stopped.status,
         };
       });
       expect(await probe()).toMatchObject({ controlStatus: 401, creative: null, foreign: 403, hostSwitch: 403 });
