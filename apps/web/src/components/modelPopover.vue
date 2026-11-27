@@ -56,7 +56,7 @@
 import { computed, ref, useId, watch } from "vue";
 import { IconChevronDown, IconChevronUp } from "@tabler/icons-vue";
 import { modelIcon } from "@toonflow/model-icons";
-import { useNodeModelSelection } from "@toonflow/nodes-scaffold/nodeAi";
+import { preferredCreativeTextModel, useNodeModelSelection } from "@toonflow/nodes-scaffold/nodeAi";
 import modelLabel from "@toonflow/node-shared/modelLabel";
 import type { ThinkingLevel } from "@toonflow/server/modelReasoning";
 import { modelChoices, refreshModelChoices } from "@/stores/settings";
@@ -83,7 +83,7 @@ const reasoningOptions = computed(() => [{ label: "默认", value: "" }, ...reas
 const reasoningColumns = computed(() => Math.min(4, reasoningOptions.value.length > 4 ? Math.ceil(reasoningOptions.value.length / 2) : reasoningOptions.value.length));
 const reasoningLabel = computed(() => reasoningOptions.value.find(item => item.value === reasoningEffort.value)?.label ?? "默认");
 watch(modelChoices, items => {
-  if (!selectedModel.value) selectedModel.value = items[0]?.value ?? "";
+  if (!selectedModel.value) selectedModel.value = (preferredCreativeTextModel(items) ?? items[0])?.value ?? "";
 }, { immediate: true });
 watch([() => selectedModelChoice.value?.reasoningLevels, reasoningEffort], ([levels, effort]) => {
   if (levels && effort && !levels.includes(effort as ThinkingLevel)) reasoningEffort.value = "";

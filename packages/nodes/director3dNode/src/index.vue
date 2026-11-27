@@ -25,7 +25,7 @@ import { computed, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import { useVueFlow } from "@vue-flow/core";
 import { IconCube3dSphere } from "@tabler/icons-vue";
 import { ElLoading, ElMessage } from "element-plus";
-import { getNodeModelIdentity, getNodeModelKey, nodeSkeleton, useNode, useNodeFiles, useNodeModelSelection, z, type NodeHandle, type NodeData, type NodeAiModel } from "@toonflow/nodes-scaffold/runtime";
+import { getNodeModelIdentity, preferredCreativeTextModel, getNodeModelKey, nodeSkeleton, useNode, useNodeFiles, useNodeModelSelection, z, type NodeHandle, type NodeData, type NodeAiModel } from "@toonflow/nodes-scaffold/runtime";
 import { useNodeReferences } from "@toonflow/node-shared/useNodeReferences";
 import { groupNodeModels } from "@toonflow/node-shared/groupNodeModels";
 import promptInput from "@toonflow/node-shared/promptInput";
@@ -290,7 +290,7 @@ async function loadModels() {
     const available = await ai.getModels();
     if (disposed) return;
     models.value = available;
-    const first = groupNodeModels(models.value)[0]?.models[0];
+    const first = preferredCreativeTextModel(models.value) ?? groupNodeModels(models.value)[0]?.models[0];
     // ACT: 只给空配置选默认模型，保留暂时不可用的旧选择。
     if (!model.value) model.value = first ? getNodeModelKey(first) : "";
   } catch (error) {

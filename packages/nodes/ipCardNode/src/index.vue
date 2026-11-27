@@ -96,7 +96,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onScopeDispose, ref } from "vue";
 import { IconPhotoEdit } from "@tabler/icons-vue";
-import { findNodeModel, getNodeModelIdentity, getNodeModelKey, nodeSkeleton, uploadNodeFile, useNode, type NodeAiModel, type NodeMediaValue } from "@toonflow/nodes-scaffold/runtime";
+import { findNodeModel, getNodeModelIdentity, preferredCreativeTextModel, getNodeModelKey, nodeSkeleton, uploadNodeFile, useNode, type NodeAiModel, type NodeMediaValue } from "@toonflow/nodes-scaffold/runtime";
 import { defaultPreset, ipCardCopy, ipCardPreset, ipCardProposal, type IpCardCopy, type IpCardPreset } from "./preset";
 import { samples } from "./samples";
 import first from "./card01.png?inline";
@@ -206,7 +206,7 @@ async function loadModels() {
   try {
     models.value = await ai.getModels();
     if (!findNodeModel(models.value, modelKey.value)) {
-      const preferred = models.value.find(model => /千问|qwen/i.test(model.label)) ?? models.value[0];
+      const preferred = preferredCreativeTextModel(models.value) ?? models.value[0];
       modelKey.value = preferred ? getNodeModelKey(preferred) : "";
     }
   } catch (cause) {

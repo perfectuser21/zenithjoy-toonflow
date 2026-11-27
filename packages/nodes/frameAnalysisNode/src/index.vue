@@ -97,7 +97,7 @@ import { computed, inject, nextTick, onScopeDispose, reactive, ref, shallowRef, 
 import { IconMovie, IconPhoto, IconUpload, IconWaveSine, IconScissors, IconAdjustmentsHorizontal, IconSparkles, IconTransfer, IconMaximize, IconFileText, IconArrowUp, IconPlayerStop } from "@tabler/icons-vue";
 import { ElMessage, ElSelect, ElOption, ElOptionGroup, ElButton, ElCard, ElCheckbox, ElPopover, ElInputNumber, ElSwitch, ElProgress } from "element-plus";
 import {
-  findNodeModel, getNodeModelKey, getTargetValues, isNodeOutput, nodeSkeleton, useNode, useNodeInputs, useNodeModelSelection, uploadNodeFile,
+  findNodeModel, preferredCreativeTextModel, getNodeModelKey, getTargetValues, isNodeOutput, nodeSkeleton, useNode, useNodeInputs, useNodeModelSelection, uploadNodeFile,
   type NodeHandle, type NodeMediaValue, type WorkspaceFiles, type NodeAiModel, type BrowserFfmpegFactory,
 } from "@toonflow/nodes-scaffold/runtime";
 import { analyzeVideo, type AnalysisResult } from "./videoAnalysis";
@@ -270,7 +270,7 @@ async function loadModels() {
     const available = await ai.getModels();
     if (!disposed) {
       models.value = available;
-      const first = modelGroups.value[0]?.models[0];
+      const first = preferredCreativeTextModel(models.value) ?? modelGroups.value[0]?.models[0];
       if (!settings.aiModel && first) settings.aiModel = getNodeModelKey(first);
     }
   } catch (error) {

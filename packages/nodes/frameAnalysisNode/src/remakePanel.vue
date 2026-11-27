@@ -130,7 +130,7 @@
 import { computed, onScopeDispose, ref, shallowRef, watch } from "vue";
 import { useVueFlow } from "@vue-flow/core";
 import { ElButton, ElDialog, ElMessageBox, ElOption, ElSelect } from "element-plus";
-import { findNodeModel, getNodeModelIdentity, getNodeModelKey, useNode, type NodeAiModel, type NodeMediaModel, type NodeMediaResult, type NodeMediaValue } from "@toonflow/nodes-scaffold/runtime";
+import { findNodeModel, getNodeModelIdentity, getNodeModelKey, preferredCreativeTextModel, useNode, type NodeAiModel, type NodeMediaModel, type NodeMediaResult, type NodeMediaValue } from "@toonflow/nodes-scaffold/runtime";
 import { useNodePersistence } from "@toonflow/nodes-scaffold/nodeDocument";
 import { reviewBackgrounds } from "./backgroundReview";
 import { restoreBackgroundReview } from "./backgroundAssignments";
@@ -232,7 +232,8 @@ async function loadModels() {
     const [language, media] = await Promise.all([ai.getModels(lifetime.signal), ai.getMediaModels(lifetime.signal)]);
     analysisModels.value = language;
     mediaModels.value = media;
-    if (!analysisModel.value && language[0]) analysisModelKey.value = getNodeModelKey(language[0]);
+    const preferred = preferredCreativeTextModel(language) ?? language[0];
+    if (!analysisModel.value && preferred) analysisModelKey.value = getNodeModelKey(preferred);
     if (!imageModel.value && imageModels.value[0]) imageModelKey.value = getNodeModelKey(imageModels.value[0]);
     if (!videoModel.value && videoModels.value[0]) videoModelKey.value = getNodeModelKey(videoModels.value[0]);
   } catch (error) {

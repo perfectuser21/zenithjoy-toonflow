@@ -59,6 +59,12 @@ function customerModel(route: ModelRoute) {
     : Number(price.amount) > 0;
 }
 
+function isRouteVisibleTo(route: ModelRoute, actor: ModelAccess["actor"] | undefined) {
+  if (actor?.role === "admin") return true;
+  if (route.allowedUserIds && (!actor || !route.allowedUserIds.includes(actor.id))) return false;
+  return actor?.role !== "user" || customerModel(route);
+}
+
 function customerPriceLabel(price: ModelRoute["salePrice"]) {
   if (price.mode === "perMillionTokens") {
     return `输入 ${cnyToPoints(price.input)} / 输出 ${cnyToPoints(price.output)} 积分/百万 Token`;
@@ -204,9 +210,10 @@ export function createModelGateway<Upstreams extends ModelMap, Catalogs extends 
       const current = await read();
       const route = current.routes.find(item => matchesPublicModel(item, publicModelId) && item.type === type && item.enabled);
       if (!route) fail("平台模型不存在或已停用", 404);
-      if (actor.role === "user" && !customerModel(route)) fail("所选模型暂不可用", 403);
+      if (!isRouteVisibleTo(route, actor)) fail("所选模型暂不可用", 403);
       execution = { route, revision: current.revision, upstream: await readUpstream(type, route, current.revision) };
     }
+    if (snapshot !== undefined && execution.route.allowedUserIds && !isRouteVisibleTo(execution.route, actor)) fail("所选模型暂不可用", 403);
     if (request !== undefined) await routeAccess(() => adapter.validate(execution, request));
     executionOwners.set(execution, { ownerId: actor.id, billingMode: execution.billingMode ?? "platform" });
     return execution;
@@ -363,7 +370,7 @@ export function createModelGateway<Upstreams extends ModelMap, Catalogs extends 
       const catalog: (Catalogs[K] & PublicModel)[] = [];
       const customer = actor?.role === "user";
       for (const route of current.routes) {
-        if (!route.enabled || !types.includes(route.type as K) || customer && !customerModel(route)) continue;
+        if (!route.enabled || !types.includes(route.type as K) || !isRouteVisibleTo(route, actor)) continue;
         const adapter = options.adapters[route.type as K];
         const execution = { route, revision: current.revision,
           upstream: await readUpstream(route.type as K, route, current.revision, resources) };
