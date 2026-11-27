@@ -13,6 +13,7 @@ import { stopMobileLinkRuntime } from "@/utils/mobileLink";
 import { runWithIdentity } from "./context";
 import { verifyProjectQuota } from "@/utils/workspace/projectQuota";
 import { isolatedBackgroundBeta, productionBackgroundAdmission } from "./backgroundAdmission";
+import { canUseWorkspaceAgent } from "./workspaceAgentAccess";
 
 type Runtime = { started: boolean; server?: Server; sockets: Set<Socket>; queue: Promise<void>; onEnabledChange?: (enabled: boolean) => void };
 const runtimes = new WeakMap<Application, Runtime>();
@@ -154,15 +155,6 @@ export async function changeMultiTenantEnabled(app: Application, enabled: boolea
       timer.unref();
     } else notify();
   });
-}
-
-export function canManageWorkspaceSkills(user: AuthIdentity | null | undefined) {
-  return user?.role === "user" && process.env.TOONFLOW_WORKSPACE_AGENT_USER_IDS?.split(",").some(id => id.trim() === user.id) === true;
-}
-
-export function canUseWorkspaceAgent(user: AuthIdentity | null) {
-  return user?.role === "admin" || canManageWorkspaceSkills(user)
-    || (user?.role === "user" && process.env.TOONFLOW_TRUSTED_CANVAS_BETA === "1");
 }
 
 export function requestIdentity(req: Request): AuthIdentity | undefined {

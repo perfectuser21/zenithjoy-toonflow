@@ -19,7 +19,7 @@ import { canvasRelease } from "../../../../../canvasRelease";
 import { aliyunImageFailure, browserCanvasDiagnosticSchema, workspaceErrorDiagnostic } from "../../lib/diagnosticReport";
 
 test("workspace Agent admits only named pilot accounts with the shared beta disabled", async () => {
-  const { canUseWorkspaceAgent } = await import("../multiTenant/runtime");
+  const { canUseWorkspaceAgent } = await import("../multiTenant/workspaceAgentAccess");
   const beta = process.env.TOONFLOW_TRUSTED_CANVAS_BETA;
   const pilots = process.env.TOONFLOW_WORKSPACE_AGENT_USER_IDS;
   const first = { id: randomUUID(), userName: "first", role: "user" as const };

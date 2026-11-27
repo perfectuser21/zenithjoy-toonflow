@@ -8,7 +8,7 @@ import { translateError, translateMessage } from "@/lib/i18n";
 import { thinkingLevels } from "@/lib/modelReasoning";
 import { getAgentModelConfiguration } from "@/agent/runtime/model";
 import { currentIdentity } from "@/utils/multiTenant/context";
-import { canUseWorkspaceAgent } from "@/utils/multiTenant/runtime";
+import { canUseWorkspaceAgent } from "@/utils/multiTenant/workspaceAgentAccess";
 
 const inputSchema = z.object({
   prompt: z.string().trim(), directory: z.string().min(1),

@@ -5,7 +5,7 @@ import { createSkillContext, isWorkspaceSkillName } from "@/agent/skills";
 import { validateFields } from "@/lib/middleware";
 import { error, success } from "@/lib/responseFormat";
 import u from "@/utils";
-import { canManageWorkspaceSkills } from "@/utils/multiTenant/runtime";
+import { canManageWorkspaceSkills } from "@/utils/multiTenant/workspaceAgentAccess";
 
 export default Router().post("/", validateFields({
   directory: z.string().min(1).max(4096),

@@ -27,7 +27,7 @@ import { readDocument } from "@/utils/documents";
 import { createMcpAgentTools } from "@/utils/mcp/servers";
 import { createPluginMarketTools } from "./pluginMarket";
 import { currentIdentity } from "@/utils/multiTenant/context";
-import { canManageWorkspaceSkills } from "@/utils/multiTenant/runtime";
+import { canManageWorkspaceSkills } from "@/utils/multiTenant/workspaceAgentAccess";
 import { modelGateway, requireDirectModelAccess } from "@/utils/multiTenant/gateway";
 import * as mediaTasks from "@/utils/media/tasks";
 

@@ -10,7 +10,8 @@ import type { SourceMapping } from "@toonflow/multi-tenant-source-mapping/config
 import conf from "@/utils/conf";
 import { assertAppRequest } from "@/utils/mcp/control";
 import { isMobileLinkRequest } from "@/utils/mobileLink";
-import { canManageWorkspaceSkills, canUseWorkspaceAgent, changeMultiTenantEnabled } from "./runtime";
+import { changeMultiTenantEnabled } from "./runtime";
+import { canManageWorkspaceSkills, canUseWorkspaceAgent } from "./workspaceAgentAccess";
 import { isEnabled } from "./mode";
 
 export { startMultiTenantRuntime, stopMultiTenantRuntime } from "./runtime";
