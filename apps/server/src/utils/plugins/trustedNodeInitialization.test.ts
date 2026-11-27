@@ -693,7 +693,7 @@ test("staff canvas generates images, analyzes and edits videos, and exports 100 
         { id: "backgroundSource", type: "remote-videoNode", position: { x: 1240, y: 570 },
           data: { outputs: { video: { dataType: "VIDEO", value: { url: sceneSource, mimeType: "video/mp4" } } } } },
         { id: "analysis", type: "remote-frameAnalysisNode", position: { x: 1240, y: 115 },
-          data: { frameAnalysis: { source: { url: sceneSource, mimeType: "video/mp4" }, aiEnabled: false } } },
+          data: { frameAnalysis: { source: { url: sceneSource, mimeType: "video/mp4" }, aiEnabled: false, aiModel: JSON.stringify(["backgroundFixture", "qwen3.7-plus"]) } } },
         { id: "imageGeneration", type: "remote-imageGenerationNode", position: { x: 850, y: 90 },
           data: { prompt: "一张红色背景图", promptModel: [[{ type: "Write", text: "一张红色背景图" }]],
             model: JSON.stringify(["fixtureMedia", "fixture-image"]), ratio: "1:1" } },
